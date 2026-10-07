@@ -32,11 +32,15 @@ public interface ValueCodec<V> {
 
     default boolean refersToPages(V value) {
         boolean[] found = new boolean[1];
-        mapRefs(value, (ref, _) -> {
-            found[0] |= ref instanceof Ref.Stored;
+        forEachRef(value, (ref, _) -> found[0] |= ref instanceof Ref.Stored);
+        return found[0];
+    }
+
+    default void forEachRef(V value, RefVisitor visitor) {
+        mapRefs(value, (ref, schema) -> {
+            visitor.visit(ref, schema);
             return ref;
         });
-        return found[0];
     }
 
     static <V> ValueCodec<V> rows(ToIntFunction<V> size, BiConsumer<ByteCursor, V> writer, Function<ByteCursor, V> reader) {
@@ -63,5 +67,9 @@ public interface ValueCodec<V> {
     @FunctionalInterface
     interface RefMapper {
         Ref map(Ref ref, TreeSchema<?> schema);
+    }
+
+    interface RefVisitor {
+        void visit(Ref ref, TreeSchema<?> schema);
     }
 }
