@@ -10,6 +10,7 @@ public enum CrashPoint {
     CATALOG_PUBLISH,
     COMPACTION_MOVE,
     COMPACTION_RETIRE,
+    CHECKPOINT_CATALOG,
     CHECKPOINT_JOURNAL;
 
     @FunctionalInterface

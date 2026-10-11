@@ -84,6 +84,7 @@ public final class Checkpointer {
                 .sorted((a, b) -> Long.compare(b.id(), a.id()))
                 .limit(historyLimit)
                 .toList();
+        faults.reach(CrashPoint.CHECKPOINT_CATALOG);
         catalog.publish(new CatalogImage(current, history, pages.segments(), lsn, feed.size()));
         wal.append(new WalRecord.Checkpoint(0, current.id(), lsn));
         wal.sync();

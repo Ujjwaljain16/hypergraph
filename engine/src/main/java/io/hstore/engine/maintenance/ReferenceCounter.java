@@ -369,7 +369,7 @@ public final class ReferenceCounter implements ReferenceTracker, AutoCloseable {
                 walker.references(work.page, work.schema, work.height, retainedOnly);
             }
         }
-        counts.trust();
+        counts.rebuilt();
     }
 
     private void counted(long pageId, TreeSchema<?> schema, int height) {

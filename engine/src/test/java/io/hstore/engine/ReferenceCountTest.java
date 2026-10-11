@@ -308,6 +308,42 @@ class ReferenceCountTest {
         }
     }
 
+    @Test
+    void anOpenThatCrashesAfterRebuildingTheCountsRebuildsThemAgain() throws Exception {
+        Random random = new Random(13);
+        Map<Long, TreeSet<Long>> model = new HashMap<>();
+        StorageEngine engine = StorageEngine.open(directory, options());
+        for (int round = 0; round < 40; round++) {
+            step(engine, random, model);
+        }
+        Branch side = engine.createBranch("side", Branch.MAIN);
+        engine.checkpoint();
+        engine.dropBranch(side.id());
+        engine.halt();
+        markForRebuild();
+        AtomicBoolean armed = new AtomicBoolean(true);
+        EngineOptions crashing = options().withFaults(point -> {
+            if (point == CrashPoint.CHECKPOINT_CATALOG && armed.compareAndSet(true, false)) {
+                throw new CrashPoint.SimulatedCrash(point);
+            }
+        });
+        assertThrows(CrashPoint.SimulatedCrash.class, () -> StorageEngine.open(directory, crashing));
+        try (StorageEngine recovered = StorageEngine.open(directory, options())) {
+            recovered.verifyReferences();
+            assertModel(recovered, model);
+        }
+    }
+
+    private Path counts() {
+        return directory.resolve("data").resolve("segments").resolve("pages.ref");
+    }
+
+    private void markForRebuild() throws Exception {
+        try (FileChannel file = FileChannel.open(counts(), StandardOpenOption.WRITE)) {
+            file.write(ByteBuffer.allocate(Long.BYTES).order(ByteOrder.LITTLE_ENDIAN).putLong(0, 1), 8);
+        }
+    }
+
     private static List<Incidence> spread(int count) {
         return LongStream.range(0, count).map(i -> i * 7_919).mapToObj(Incidence::of).toList();
     }

@@ -16,6 +16,7 @@ public final class ReferenceCounts implements AutoCloseable {
 
     private final MappedLongs file;
     private final LongLongMap changed = new LongLongMap(1 << 12);
+    private volatile boolean rebuilt;
 
     private ReferenceCounts(MappedLongs file) {
         this.file = file;
@@ -59,14 +60,22 @@ public final class ReferenceCounts implements AutoCloseable {
     }
 
     public void distrust() {
+        rebuilt = false;
         file.header(STATE_OFFSET, REBUILD);
         file.force();
     }
 
-    public void trust() {
+    public void rebuilt() {
         file.force();
-        file.header(STATE_OFFSET, TRUSTED);
-        file.force();
+        rebuilt = true;
+    }
+
+    void checkpointed() {
+        if (rebuilt) {
+            file.header(STATE_OFFSET, TRUSTED);
+            file.force();
+            rebuilt = false;
+        }
     }
 
     void forEachChange(LongLongMap.Visitor visitor) {
