@@ -84,7 +84,7 @@ The engine has no dependencies outside `java.base`. All three modules build into
 |---|---|
 | `io.hstore.engine` | `StorageEngine` (open/close, maintenance thread, checkpoint/compact entry points), `EngineOptions`, `EngineStats`, `Dictionary` (interned role names and role sets), `HStoreException` (error codes, retryable conflicts). |
 | `engine.page` | Byte-level storage. `PageStore` and `SegmentFile` hold segment files and allocation. `PageHeader` is the 80-byte header and crc32c seal. `PageId` is a page's permanent number, `PageAddress` its place in a segment, and `PageDirectory` the memory-mapped `pages.dir` that maps one to the other. `ReferenceCounts` is `pages.ref`, the count of references to each page, with its checkpoint journal. `ByteCursor` provides little-endian and varint codecs over `MemorySegment`. `IoTrace` counts page visits per query through a `ScopedValue`. |
-| `engine.tree` | The copy-on-write counted B+tree. `Tree` is the immutable handle and `TreeWriter` does path-copy updates. Nodes are `Leaf` and `Branch`, referenced by `Ref` (`Empty`, `Pending` or `Stored`). Also here: `Summary` (monoid annotations), `TreeCursor`, `TreeAlgebra` (leapfrog, set algebra), `TreeDiff`, `BulkBuilder`, `NodeCodec`, `NodeCache`, `Materializer`, `TreeWalker` and `TreeVerifier`. |
+| `engine.tree` | The copy-on-write counted B+tree. `Tree` is the immutable handle and `TreeWriter` does path-copy updates. Nodes are `Leaf` and `Branch`, referenced by `Ref` (`Empty`, `Pending`, `Stored`, or `Inline` for a small leaf carried inside an edge record). Also here: `Summary` (monoid annotations), `TreeCursor`, `TreeAlgebra` (leapfrog, set algebra), `TreeDiff`, `BulkBuilder`, `NodeCodec`, `NodeCache`, `Materializer`, `TreeWalker` and `TreeVerifier`. |
 | `engine.topology` | Hyperedge representation: `Hyperedge` (members tree plus order index), `Incidence` (one member's role set, weight, validity, payload and qualifier), `IncidenceCodec` (columnar leaf encoding), `MemberChange`, `Weight` (fixed point) and `Validity`. |
 | `engine.index` | `PostingIndex`, a two-level index from a key to a postings set. Small sets are inlined and large ones are promoted to their own tree. Used by the reverse incidence, type, canonical-key and symbol indexes. |
 | `engine.catalog` | `AtomRecord` (`NodeRecord`/`EdgeRecord`) and its codec, `EngineSlots` (built-in slots, schemas and key functions), `Slot`/`SlotRegistry`, `RootVector`, `Generation`, `Branch`, `Symbol`, and `CatalogImage`/`CatalogStore` (checkpoint files). |
@@ -229,25 +229,25 @@ Readers take no locks at all.
 The following is real output from `hstore init` followed by loading `examples/clinical-claims.hql` and running `CHECKPOINT;` (default 16 KiB pages):
 
 ```text
-FORMAT                                   55 B  format=5, page-size=16384 (java.util.Properties)
+FORMAT                                   55 B  format=6, page-size=16384 (java.util.Properties)
 LOCK                                      0 B  FileChannel.tryLock() held while open
-hstore.conf                            2863 B  server configuration template written by `hstore init`
+hstore.conf                            2903 B  server configuration template written by `hstore init`
 catalog/manifest                         20 B  name of the latest catalog file
 catalog/generations/0000000000000000.cat 37 B  checkpoint of generation 0
-catalog/generations/000000000000009d.cat 49851 B  checkpoint of generation 157 (current + retained history)
-data/segments/00000001.seg           1213651 B  segment 1: packed node images
+catalog/generations/000000000000009d.cat 50554 B  checkpoint of generation 157 (current + retained history)
+data/segments/00000001.seg           1029664 B  segment 1: packed node images
 data/segments/pages.dir              8388608 B  page directory, one 8 MiB chunk mapped so far (sparse)
 data/segments/pages.ref              8388608 B  reference counts, same layout (sparse)
 data/segments/pages.ref.journal            0 B  emptied after every checkpoint
-wal/segments/0000000000000000.wal      165595 B  WAL segment starting at LSN 0
-feed/0000000000000000.feed             29846 B  change feed segment starting at byte 0
+wal/segments/0000000000000000.wal      161389 B  WAL segment starting at LSN 0
+feed/0000000000000000.feed             28782 B  change feed segment starting at byte 0
 payload/000001.pay                        0 B  payload segment (database layer)
 semantic/state                           53 B  persisted HNSW index state (database layer)
 ```
 
 | Path | Owner | Format |
 |---|---|---|
-| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=5` (page numbers resolved through a page directory, reference counts per page) and `page-size` (the maximum node size). Opening a directory written in an older format, or opening with a different page size, fails. |
+| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=6` (page numbers resolved through a page directory, reference counts per page, small member trees inline in their edge record) and `page-size` (the maximum node size). Opening a directory written in an older format, or opening with a different page size, fails. |
 | `LOCK` | `StorageEngine.open` | An exclusive OS file lock. A second process gets `database ... is opened by another process`. |
 | `catalog/generations/%016x.cat` | `CatalogStore.publish` | `int magic 0x54414348`, `int crc32c(payload)`, `long length`, then the `CatalogImage` payload. Written to `*.tmp`, fsynced, atomically renamed, and the directory fsynced. The three newest files are kept. |
 | `catalog/manifest` | `CatalogStore` | The file name of the latest `.cat`, written durably the same way. |
@@ -260,7 +260,7 @@ semantic/state                           53 B  persisted HNSW index state (datab
 | `semantic/state`, `semantic/hnsw-<model>.idx` | `db.semantic.SemanticPlane` | A `Properties` file with `generation` and `models`, plus one serialized HNSW graph per model, written atomically at checkpoints and on close. |
 | `hstore.conf` | `server.ServerConfig` | Settings, overridden by `HSTORE_*` environment variables and then by `--setting` flags. |
 
-Every hyperedge's membership is a separate nested tree; `hstore check` reports 85 nested trees under the `catalog` slot. Most of them are a single small leaf of 100–200 bytes. Segments pack node images at 64-byte alignment instead of reserving a full `page_size` slot per node, so the whole example occupies 1.2 MB of segment space. With fixed 16 KiB slots it took 17.6 MB. See [pages.md](../storage/pages.md#segment-files).
+Every hyperedge's membership is a nested tree; `hstore check` reports 85 nested trees under the `catalog` slot. All of them are small enough to be kept inline in their edge record, so the whole catalog, edges and members included, is one page. Segments pack node images at 64-byte alignment instead of reserving a full `page_size` slot per node, so the whole example occupies 1.0 MB of segment space, most of it older images still kept for history. With fixed 16 KiB slots it took 17.6 MB. See [pages.md](../storage/pages.md#segment-files).
 
 ## Verifying a directory
 
@@ -280,6 +280,6 @@ branch main
   property-index          162 entries        9 pages      8 nested trees  height 1
   ...
   reverse                  53 entries        1 pages      0 nested trees  height 1
-  catalog                 458 entries       86 pages     85 nested trees  height 1
-verified 105 pages: checksums, ordering, balance and summaries are consistent
+  catalog                 458 entries        1 pages     85 nested trees  height 1
+verified 20 pages: checksums, ordering, balance and summaries are consistent
 ```

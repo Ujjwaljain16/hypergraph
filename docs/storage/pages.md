@@ -36,7 +36,7 @@ Sizes are computed exactly before writing (`varLongSize`, `signedVarLongSize`, `
 | 4 | 1 | `format` | Page format version, `1` (`PageHeader.FORMAT`). Distinct from the data-directory format (see [Format versioning](#format-versioning)). |
 | 5 | 1 | `type` | `PageType`: `1` = `INTERNAL` (branch), `2` = `LEAF` |
 | 6 | 1 | `schema` | `TreeSchema.id` (1–255) of the tree the node belongs to |
-| 7 | 1 | `flags` | Bit 0 (`REFERS_TO_PAGES`): a leaf with at least one value that points at another page, such as a catalog edge with a member tree. `NodeCodec.decode` checks it against the values. The other bits are `0`. |
+| 7 | 1 | `flags` | Bit 0 (`REFERS_TO_PAGES`): a leaf with at least one value that points at another page, such as a catalog edge whose member tree is stored as a page. A leaf whose nested trees are all inline or empty leaves it clear. `NodeCodec.decode` checks it against the values. The other bits are `0`. |
 | 8 | 8 | `pageId` | The image's own page number (below). It is written last, after allocation (`PageHeader.assign`). |
 | 16 | 8 | `creationEpoch` | Id of the generation whose commit wrote the image. Spilled pages use `head + 1`. |
 | 24 | 4 | `payloadLength` | Payload bytes after the header. Readers use it to size the second read. |
@@ -77,12 +77,26 @@ i64le   roleBits
 keys:   zigzag keys[0], then varint (keys[i] − keys[i−1]) for i = 1..slotCount−1
 LEAF:     schema.codec().encode(out, keys, values)          (value format owned by the schema)
 INTERNAL: Ref × slotCount
-          Ref := i64le pageId | Summary      (pageId 0 = empty, followed by nothing)
+          Ref := u8 0                                          empty tree
+               | u8 1 | i64le pageId | varint units | Summary  stored tree
+               | u8 2 | varint n | keys | values               inline tree (nested references only)
           Summary := varint count | zigzag min | varint (max − min) | zigzag weightSum | zigzag weightMin
                      | zigzag weightMax | zigzag timeMin | zigzag timeMax | i64le roleBits | i64le fingerprint
 ```
 
-For an internal node, "keys" are the separators. `separators[0]` is the first child's minimum (set by `Branch.frozenWith`), so the delta stream is non-negative. Each child reference embeds the child's image size in 64-byte units and its **complete** summary. This lets readers prune and count without loading children, lets compaction measure live bytes without reading pages, and is why a branch entry costs up to `KEY_BYTES + 8 + 3 + 96` bytes in the fanout calculation (`Layout`).
+For an internal node, "keys" are the separators. `separators[0]` is the first child's minimum (set by `Branch.frozenWith`), so the delta stream is non-negative. Each child reference embeds the child's image size in 64-byte units and its **complete** summary. This lets readers prune and count without loading children, lets compaction measure live bytes without reading pages, and is why a branch entry costs up to `KEY_BYTES + 1 + 8 + 3 + 96` bytes in the fanout calculation (`Layout`). An empty summary is a single `0` byte.
+
+**Reference encoding** (`tree/Ref.java`). Every reference starts with a tag byte. `0` is the empty tree and nothing follows. `1` is a stored tree: the page number, the image size in 64-byte units and the subtree's summary. `2` is an inline tree: the entry count `n` (1 to 32), then the leaf exactly as a leaf page payload encodes it, keys as a zigzag first key and varint gaps followed by `schema.codec().encode(...)`. There is no summary, because the reader recomputes it from the entries. An inline tree can only be decoded where the reader knows its schema, through `Ref.read(in, schema)`. `AtomCodec` passes the member schema of the edge's kind for `members` and `order-index` for `order`. Everywhere else (branch children, catalog images, WAL `Root` records, posting and property directories) `Ref.read(in)` rejects tag `2`, since only nested references in codecs that opt in with `inlinesSmallTrees()` are ever inline. An inline reference is never larger than `Ref.maxEncodedSize()` (108 bytes); see [persistent-tree.md](persistent-tree.md#inline-trees) for why that keeps pages from overflowing.
+
+An edge record with three plain members `{1000, 1001, 1005}` holds this as its `members` reference. It takes 7 bytes. A stored reference to the same tree would take 65 bytes, most of them summary, and point at an image of at least 128:
+
+```text
+02          tag: inline
+03          n = 3
+d0 0f       zigzag(1000)
+01 04       gaps 1 and 4
+00          IncidenceCodec flags: no columns, so no bitmaps or column values follow
+```
 
 **Size invariant.** Splits are decided from each value codec's `maxSize`, summed per entry, plus the codec's `leafOverhead(n)` and the exact key-stream size (`Leaf.bytes`, `BulkBuilder`). `IncidenceCodec.leafOverhead(n)` is `1 + 6·⌈n/8⌉`: the flags byte plus one bitmap per column, assuming every column is present. The accounting is therefore an upper bound for any leaf, and exact when all columns are present (`IncidenceCodecTest`). Other codecs have no per-leaf overhead. `Layout` still keeps a 32-byte reserve beyond `leafBudget` (`RESERVED = 32`), but correctness no longer depends on it. `NodeCodec.encode` encodes into a cursor of exactly `pageSize` bytes and would fail loudly (`node of N entries overflows a P byte page`) if the invariant were broken.
 
@@ -90,7 +104,7 @@ Leaf value formats in use:
 
 | Schema | Codec | Format |
 |---|---|---|
-| `atoms` #1 | `catalog/AtomCodec` | Tagged node/edge records with embedded `Ref`s to member and order trees ([topology.md](topology.md#encoding-catalogatomcodecjava)) |
+| `atoms` #1 | `catalog/AtomCodec` | Tagged node/edge records with embedded `Ref`s to member and order trees, which are inline when small ([topology.md](topology.md#encoding-catalogatomcodecjava)) |
 | `set-members` #2, `ordered-members` #3 | `topology/IncidenceCodec` | Columnar: presence flags, per-column bitmaps, varint columns ([topology.md](topology.md#leaf-encoding-of-incidences-topologyincidencecodecjava)) |
 | `order-index` #4 | `TopologySchemas.LONG_CODEC` | zigzag varint per value |
 | posting directories (#5, #7, #9, #12, …) | `index/PostingsCodec` | `u8 0 \| varint n \| delta keys \| values` (inline) or `u8 1 \| Ref` (promoted) |
@@ -185,7 +199,7 @@ header (`i32 magic 0x53464552`, `i32 format 1`, `i64` state), then one little-en
 | Entry | Meaning |
 |---|---|
 | `0` | No count: the number was never used, was released, or belongs to a page nothing has committed yet. |
-| `n > 0` | The page is in use and `n` places point at it: branch roots, branch nodes, or leaf values holding a nested tree. |
+| `n > 0` | The page is in use and `n` places point at it: branch roots, branch nodes, or leaf values holding a nested tree that is stored as a page. Inline trees have no page and are never counted. |
 | `0x8000_0000_0000_0000 \| g` (negative) | The page died in generation `g`. Generations before `g` can still reach it, so it keeps its address until it is released. |
 
 The header's state is `0` when the counts can be trusted and `1` when they have to be rebuilt on the next open.
@@ -258,7 +272,7 @@ sequenceDiagram
 * `PageStore.write(pageId, image)` looks the number up in the directory and performs a positional `FileChannel.write` at `offset × 64`, then marks the file dirty. It refuses an image longer than the units allocated for it. The write happens later, inside `TransactionManager.append`, after the WAL records have been appended (see [wal-and-recovery.md](../transactions/wal-and-recovery.md)).
 * `PageStore.sync()` calls `FileChannel.force(false)` on every dirty segment. The group committer calls it once per batch in `PAGE_REFERENCES` WAL mode, before the WAL sync. `PageStore.checkpoint()` does the same and then forces the page directory; only `Checkpointer` calls it.
 
-Compared with fixed page slots, packing removes almost all internal fragmentation for the many small nodes a hypergraph produces. A two-member hyperedge's member tree is one leaf of roughly 100–150 bytes, which now occupies 2–3 units instead of a full 16 KiB page.
+Compared with fixed page slots, packing removes almost all internal fragmentation for the many small nodes a hypergraph produces. A member tree stored as a page is still an image of at least 128 bytes (two units), even for two members. That is why small member trees are not stored as pages at all, but inline in their edge record ([persistent-tree.md](persistent-tree.md#inline-trees)).
 
 ### Reading (`SegmentFile.read(position, maximum)`)
 
@@ -314,7 +328,7 @@ read-only memory, so nothing can write into a stored image through a read.
 The cache stores **decoded, frozen** `Node` objects, not bytes. A hit therefore costs no decoding and no allocation. The cache has 16 shards; a node goes to shard `mix(pageId) >>> 60`. Each shard has:
 
 * an open-addressing table of `Slot(pageId, node, volatile referenced)`, probed linearly from `mix(pageId)`, so a lookup needs no boxed key. It is kept at most half full, counting removed slots, and is rebuilt into a new array when it would pass that;
-* a byte budget of `max(64 KiB, node_cache_mb / 16)` and a circular, doubly linked ring of slots with a CLOCK hand. Each slot weighs `Node.heapBytes()`, an estimate of the decoded node's heap size: 144 bytes for the node and its summary, its key and value or child arrays, then 96 bytes plus the encoded value per leaf entry, or 128 bytes per child reference in a branch. Those constants come from measuring retained heap against cache contents at two dataset sizes;
+* a byte budget of `max(64 KiB, node_cache_mb / 16)` and a circular, doubly linked ring of slots with a CLOCK hand. Each slot weighs `Node.heapBytes()`, an estimate of the decoded node's heap size: 144 bytes for the node and its summary, its key and value or child arrays, then 96 bytes plus the encoded value per leaf entry, or 128 bytes per child reference in a branch. A leaf whose values are implied by its keys or member ids counts only its `long` arrays, and a catalog leaf adds the estimate of every inline tree it holds. Those constants come from measuring retained heap against cache contents at two dataset sizes;
 * a `ReentrantLock` taken only for admission.
 
 **Reads are lock-free.** `get` probes the table, reading each slot with acquire ordering, plus setting `referenced = true` if it was clear. Writers change the table only under the shard lock, publishing each slot with release ordering, and a rebuild publishes the new array through a volatile field. A reader still probing the old array can find a node that was just evicted; that is harmless, because a page number's contents never change. The check avoids a redundant volatile write on hot entries.
@@ -353,7 +367,7 @@ Because images are never overwritten in place, a torn write can only damage an i
 
 | Version | Where | Meaning |
 |---|---|---|
-| `format=5` in `<data>/FORMAT` | `StorageEngine.verifyFormat` | Reference counts in `pages.ref`, page numbers resolved through `pages.dir`, images packed in 64-byte units, image sizes in every stored reference. Directories written by older builds (`format=1` fixed page slots, `format=2` references without sizes, `format=3` references by address, `format=4` no reference counts) fail to open: `uses storage format 4; this build reads format 5 (reference counts); export and reload it`. |
+| `format=6` in `<data>/FORMAT` | `StorageEngine.verifyFormat` | Tagged references, with small member and order trees inline in their edge record. Also reference counts in `pages.ref`, page numbers resolved through `pages.dir`, images packed in 64-byte units, image sizes in every stored reference. Directories written by older builds (`format=1` fixed page slots, `format=2` references without sizes, `format=3` references by address, `format=4` no reference counts, `format=5` untagged references with every nested tree on its own page) fail to open: `uses storage format 5; this build reads format 6 (inline member trees); export and reload it`. |
 | `page-size=N` in `<data>/FORMAT` | same | Fixed at creation. A mismatching `--page_size` is rejected. |
 | header byte 4 = `1` | `PageHeader.FORMAT` | Node image layout; unchanged by packing and by page numbers. |
 | `pages.dir` header | `PageDirectory` | `i32 magic 0x52494450`, `i32 format 1`. |

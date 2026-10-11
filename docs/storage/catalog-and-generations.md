@@ -141,7 +141,7 @@ MERGE BRANCH what_if INTO main ON CONFLICT FAIL;
 ```text
 Generation  := id | wallTime | txnId | nextAtom | nextTxn | branchCount | Branch*
 Branch      := id | name | parent | baseGeneration | createdAt | u8 state | rootCount | (slot | Ref)*
-Ref         := i64le pageId | Summary   (pageId 0 ⇒ empty, no summary)
+Ref         := u8 0 (empty) | u8 1 | i64le pageId | varint units | Summary   (slot roots are never inline)
 CatalogImage:= Generation(current) | historyCount | Generation* | segmentCount
                | (segmentId | u8 state | pages | retiredAt)* | checkpointLsn | feedEnd
 ```
@@ -185,7 +185,7 @@ varint slotCount | slotChange*
                   | [before value] | [after value]          (the slot schema's own ValueCodec)
 ```
 
-Values whose codec holds references are **detached** before encoding: every nested `Ref` is replaced with `Ref.EMPTY`. An `EdgeRecord` in the feed therefore carries its type, kind and version but not page pointers, which would be meaningless to a consumer and invalid after compaction. Topology is conveyed by the `members` list instead.
+Values whose codec holds references are **detached** before encoding: every nested `Ref` is replaced with `Ref.EMPTY`, inline ones included. An `EdgeRecord` in the feed therefore carries its type, kind and version but not page pointers, which would be meaningless to a consumer and invalid after compaction, nor a copy of a small edge's members. Topology is conveyed by the `members` list instead.
 
 ### File format
 
