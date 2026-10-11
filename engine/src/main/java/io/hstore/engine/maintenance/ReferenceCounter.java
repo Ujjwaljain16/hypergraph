@@ -170,7 +170,7 @@ public final class ReferenceCounter implements ReferenceTracker, AutoCloseable {
                     case Committed(Generation before, Generation after, long[] spilled) -> account(before, after, spilled);
                     case Discarded(long[] spilled) -> orphaned(spilled, generation);
                 }
-            } catch (RuntimeException failure) {
+            } catch (RuntimeException | Error failure) {
                 broken = failure;
                 LOG.log(System.Logger.Level.ERROR, "reference counting stopped; the counts will be rebuilt when the database next opens", failure);
                 counts.distrust();
