@@ -101,8 +101,10 @@ writer commits a single update every 20 ms on a fixed schedule, and each commit'
 was scheduled. In `compaction`, the store also runs a full compaction starting 1 s in, and the window lasts until
 the compaction has finished. HStore calls `StorageEngine.compact()`. JE calls `cleanLog()` until it cleans nothing,
 then forces a checkpoint so the cleaned files are deleted. The latency table compares the two windows, and the
-*Resources* table adds the compaction time and the space reclaimed (disk while open, before against after). That
-figure can be negative when compaction frees less than the writer adds. HStore's default segments are 256 MiB, so
+*Resources* table adds the compaction time and the space reclaimed. Disk is measured at a reopen just before the
+window and again at a reopen just after it, so segments that HStore only deletes once older readers are gone are
+counted too. That figure can be negative when compaction frees less than the writer adds. The two windows run at a
+fixed rate, so they are left out of the main table, where their ratio would always be about 1. HStore's default segments are 256 MiB, so
 at scale 1 most data shares one or two segments. `--pages-per-segment` (`PAGES_PER_SEGMENT`) and
 `--compaction-live-ratio` (`COMPACTION_LIVE_RATIO`) change HStore's settings for a run.
 
