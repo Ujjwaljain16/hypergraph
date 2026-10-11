@@ -449,6 +449,26 @@ public final class PageStore implements AutoCloseable {
         return List.copyOf(segments.values());
     }
 
+    public long segmentBytes() {
+        return (long) segmentUnits * PageId.UNIT_BYTES;
+    }
+
+    public void sealActive(int segment) {
+        allocation.lock();
+        try {
+            if (activeSegment == segment && segment != 0) {
+                segments.computeIfPresent(activeSegment, (_, info) -> info.withState(SegmentState.SEALED, 0));
+                SegmentFile file = files.get(activeSegment);
+                if (file != null) {
+                    file.seal();
+                }
+                activeSegment = 0;
+            }
+        } finally {
+            allocation.unlock();
+        }
+    }
+
     public int activeSegment() {
         allocation.lock();
         try {
