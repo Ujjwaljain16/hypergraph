@@ -259,8 +259,8 @@ skipped because `FORMAT` exists. To verify a backup, run
 `docker run --rm -v restored:/var/lib/hstore/data hstore check /var/lib/hstore/data`.
 
 To upgrade, stop the container, back up the volume, and start the new image on the same volume. `FORMAT`
-records the on-disk format version (`format=4`, page directory) and the page size. Both are checked at
+records the on-disk format version (`format=5`, reference counts) and the page size. Both are checked at
 open. A directory written in another format is refused with
-`database … uses storage format N; this build reads format 2 (packed segment extents); export and reload it`,
+`database … uses storage format N; this build reads format 5 (reference counts); export and reload it`,
 so the server never misreads it. Export the data with HQL against the old version and reload it into a fresh
 volume.

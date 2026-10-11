@@ -1,10 +1,13 @@
 package io.hstore.engine.tree;
 
-import java.util.function.LongPredicate;
-
 public final class TreeWalker {
 
-    private static final int UNKNOWN_HEIGHT = -1;
+    public static final int UNKNOWN_HEIGHT = -1;
+
+    @FunctionalInterface
+    public interface Reference {
+        void accept(long pageId, TreeSchema<?> schema, int height);
+    }
 
     private final NodeSource source;
 
@@ -12,37 +15,39 @@ public final class TreeWalker {
         this.source = source;
     }
 
-    public void visit(Ref root, TreeSchema<?> schema, LongPredicate firstVisit) {
-        visit(root, schema, UNKNOWN_HEIGHT, firstVisit);
-    }
-
-    private void visit(Ref ref, TreeSchema<?> schema, int height, LongPredicate firstVisit) {
-        if (!(ref instanceof Ref.Stored(long pageId, int _, Summary _)) || !firstVisit.test(pageId)) {
-            return;
-        }
+    public void references(long pageId, TreeSchema<?> schema, int height, Reference into) {
         if (height == 0 && !schema.codec().holdsRefs()) {
             return;
         }
-        switch (source.load(pageId, schema)) {
+        Node node = source.loadIfReferencing(pageId, schema);
+        if (node == null) {
+            return;
+        }
+        switch (node) {
             case Leaf leaf -> {
-                for (int i = 0; i < leaf.size(); i++) {
-                    visitNested(schema, leaf.value(i), firstVisit);
+                if (schema.codec().holdsRefs()) {
+                    ValueCodec.RefMapper mapper = (nested, nestedSchema) -> {
+                        if (nested instanceof Ref.Stored(long child, int _, Summary _)) {
+                            into.accept(child, nestedSchema, UNKNOWN_HEIGHT);
+                        }
+                        return nested;
+                    };
+                    for (int i = 0; i < leaf.size(); i++) {
+                        nested(schema, leaf.value(i), mapper);
+                    }
                 }
             }
             case Branch branch -> {
                 for (int i = 0; i < branch.size(); i++) {
-                    visit(branch.child(i), schema, branch.height() - 1, firstVisit);
+                    if (branch.child(i) instanceof Ref.Stored(long child, int _, Summary _)) {
+                        into.accept(child, schema, branch.height() - 1);
+                    }
                 }
             }
         }
     }
 
-    private <V> void visitNested(TreeSchema<V> schema, Object value, LongPredicate firstVisit) {
-        if (schema.codec().holdsRefs()) {
-            schema.codec().mapRefs(schema.cast(value), (nested, nestedSchema) -> {
-                visit(nested, nestedSchema, UNKNOWN_HEIGHT, firstVisit);
-                return nested;
-            });
-        }
+    private static <V> void nested(TreeSchema<V> schema, Object value, ValueCodec.RefMapper mapper) {
+        schema.codec().mapRefs(schema.cast(value), mapper);
     }
 }

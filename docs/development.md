@@ -24,7 +24,7 @@ flowchart LR
 
 | Package | Contents |
 |---|---|
-| `engine.page` | Segment files, 80-byte page header with CRC32C, `PageId` page numbers, `PageAddress` (segment 24 / offset 24 / units 16 bits), the `pages.dir` page directory, page store and cache |
+| `engine.page` | Segment files, 80-byte page header with CRC32C, `PageId` page numbers, `PageAddress` (segment 24 / offset 24 / units 16 bits), the `pages.dir` page directory, the `pages.ref` reference counts, page store and cache |
 | `engine.tree` | Copy-on-write counted B+tree, monoid summaries, write scopes, cursors, `TreeAlgebra` (leapfrog intersection, synchronized traversal), `TreeDiff`, `TreeVerifier` |
 | `engine.topology` | Hyperedge membership and incidence encodings, `Incidence`, `Validity` |
 | `engine.catalog` | Slots, root vectors, branches, generations, dictionary |
@@ -116,7 +116,8 @@ keep the matrix green. Add a `CrashPoint` when you introduce a new durability st
 * Prefer records for data, sealed interfaces for closed hierarchies, and exhaustive `switch` with pattern
   matching and record deconstruction. Use `_` for unused bindings.
 * Streams and small pure functions where natural. Clear loops on hot paths.
-* Virtual threads for request handling and for the engine's background work.
+* Virtual threads for request handling and for most of the engine's background work. Platform threads only for
+  long CPU-bound work that would otherwise hold a carrier, such as the reference counter.
 * **Deterministic hashing.** Every fingerprint, summary or hash that is persisted or compared across
   processes must be computed from explicit field values. Never use `Enum.hashCode()`, `Record.hashCode()`,
   `Object.hashCode()` or `String.hashCode()` of a record's `toString` in an `EntryMeasure`, a summary or an

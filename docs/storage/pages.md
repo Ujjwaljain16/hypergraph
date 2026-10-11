@@ -36,7 +36,7 @@ Sizes are computed exactly before writing (`varLongSize`, `signedVarLongSize`, `
 | 4 | 1 | `format` | Page format version, `1` (`PageHeader.FORMAT`). Distinct from the data-directory format (see [Format versioning](#format-versioning)). |
 | 5 | 1 | `type` | `PageType`: `1` = `INTERNAL` (branch), `2` = `LEAF` |
 | 6 | 1 | `schema` | `TreeSchema.id` (1–255) of the tree the node belongs to |
-| 7 | 1 | `flags` | Currently always `0` |
+| 7 | 1 | `flags` | Bit 0 (`REFERS_TO_PAGES`): a leaf with at least one value that points at another page, such as a catalog edge with a member tree. `NodeCodec.decode` checks it against the values. The other bits are `0`. |
 | 8 | 8 | `pageId` | The image's own page number (below). It is written last, after allocation (`PageHeader.assign`). |
 | 16 | 8 | `creationEpoch` | Id of the generation whose commit wrote the image. Spilled pages use `head + 1`. |
 | 24 | 4 | `payloadLength` | Payload bytes after the header. Readers use it to size the second read. |
@@ -175,6 +175,43 @@ commit path never syncs the directory, because every WAL record for a page carri
 writes each logged address back into the directory before it checks or replays the page, so an entry that a crash
 lost comes back from the log. The header's next index is updated on every allocation, and recovery raises it past
 every number it restores, so a restored number is never handed out a second time.
+
+### Reference counts
+
+`<data>/data/segments/pages.ref` (`page/ReferenceCounts.java`) has the same layout as the directory: a 64-byte
+header (`i32 magic 0x53464552`, `i32 format 1`, `i64` state), then one little-endian `i64` per index at byte
+`64 + 8 × i`, memory-mapped in 8 MiB chunks. An entry is one of:
+
+| Entry | Meaning |
+|---|---|
+| `0` | No count: the number was never used, was released, or belongs to a page nothing has committed yet. |
+| `n > 0` | The page is in use and `n` places point at it: branch roots, branch nodes, or leaf values holding a nested tree. |
+| `0x8000_0000_0000_0000 \| g` (negative) | The page died in generation `g`. Generations before `g` can still reach it, so it keeps its address until it is released. |
+
+The header's state is `0` when the counts can be trusted and `1` when they have to be rebuilt on the next open.
+How the counts change and when pages are released is in [maintenance.md](maintenance.md#reference-counts).
+
+The file is written only at checkpoints, through `<data>/data/segments/pages.ref.journal`
+(`page/ReferenceJournal.java`):
+
+```text
+i32 magic 0x4C4E524A   i32 format 1   i64 checkpoint lsn   i32 count entries (n)   i32 released entries (m)
+n × (i64 index, i64 entry)       the new value of every count changed since the last checkpoint
+m × i64 index                    directory entries to clear
+i32 crc32c of everything above
+```
+
+The journal is written and forced before the catalog is published and applied afterwards, then truncated to zero
+bytes. On open it is applied again only if its LSN is the published checkpoint's, so a half-applied journal is
+finished and one from a checkpoint that never published is ignored.
+
+Page `#1234` in use by two parents, then dead since generation 31:
+
+```text
+xxd -s $((64 + 1234 * 8)) -l 8 -g 8 -e data/segments/pages.ref
+# 000026d0: 0000000000000002   in use, two references
+# 000026d0: 800000000000001f   the same entry after the page died in generation 31
+```
 
 ## Segment files
 
@@ -316,10 +353,12 @@ Because images are never overwritten in place, a torn write can only damage an i
 
 | Version | Where | Meaning |
 |---|---|---|
-| `format=4` in `<data>/FORMAT` | `StorageEngine.verifyFormat` | Page numbers resolved through `pages.dir`, images packed in 64-byte units, image sizes in every stored reference. Directories written by older builds (`format=1` fixed page slots, `format=2` references without sizes, `format=3` references by address) fail to open: `uses storage format 3; this build reads format 4 (page directory); export and reload it`. |
+| `format=5` in `<data>/FORMAT` | `StorageEngine.verifyFormat` | Reference counts in `pages.ref`, page numbers resolved through `pages.dir`, images packed in 64-byte units, image sizes in every stored reference. Directories written by older builds (`format=1` fixed page slots, `format=2` references without sizes, `format=3` references by address, `format=4` no reference counts) fail to open: `uses storage format 4; this build reads format 5 (reference counts); export and reload it`. |
 | `page-size=N` in `<data>/FORMAT` | same | Fixed at creation. A mismatching `--page_size` is rejected. |
 | header byte 4 = `1` | `PageHeader.FORMAT` | Node image layout; unchanged by packing and by page numbers. |
 | `pages.dir` header | `PageDirectory` | `i32 magic 0x52494450`, `i32 format 1`. |
+| `pages.ref` header | `ReferenceCounts` | `i32 magic 0x53464552`, `i32 format 1`. |
+| `pages.ref.journal` header | `ReferenceJournal` | `i32 magic 0x4C4E524A`, `i32 format 1`. |
 | `SegmentInfo` in catalog images | `CatalogImage` | Now `(id, u8 state, pages, units, retiredAt)` |
 
 ## Inspecting images by hand

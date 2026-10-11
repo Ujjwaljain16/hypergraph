@@ -4,6 +4,10 @@ public interface NodeSource {
 
     Node load(long pageId, TreeSchema<?> schema);
 
+    default Node loadIfReferencing(long pageId, TreeSchema<?> schema) {
+        return load(pageId, schema);
+    }
+
     Layout layout();
 
     static NodeSource ephemeral(int pageSize) {

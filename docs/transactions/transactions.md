@@ -78,7 +78,7 @@ During replay (`Workspace.replaying() == true`) a failed precondition, a duplica
 
 ### Spilling large workspaces
 
-`Transaction` constructs its `WriteScope` with a `PageSink` that calls `TransactionManager.spill`. Only `BulkBuilder` spills (every `SPILL_BATCH = 32` leaves during `Hyperedge.build`, used by `Transaction.load`), so very large bulk loads do not have to hold every new leaf in memory. `spill` materializes the subtree, **writes the page images to their data segments first**, then appends the matching `Page`/`PageRef` WAL records under the transaction id (before the transaction commits), and returns a `Ref.Stored`. Writing data before logging means that by the time a checkpoint can observe an LSN past the spill records, the pages are already in the page cache, so the checkpoint's `pages.sync()` makes them durable before the records are truncated. The spilled pages count against the transaction's page budget (`spilledPages`).
+`Transaction` constructs its `WriteScope` with a `PageSink` that calls `TransactionManager.spill`. Only `BulkBuilder` spills (every `SPILL_BATCH = 32` leaves during `Hyperedge.build`, used by `Transaction.load`), so very large bulk loads do not have to hold every new leaf in memory. `spill` materializes the subtree, **writes the page images to their data segments first**, then appends the matching `Page`/`PageRef` WAL records under the transaction id (before the transaction commits), and returns a `Ref.Stored`. Writing data before logging means that by the time a checkpoint can observe an LSN past the spill records, the pages are already in the page cache, so the checkpoint's `pages.sync()` makes them durable before the records are truncated. Until the records are appended, the pages still count as unwritten for their segment, so compaction can't move them before the log says where they were written. The spilled pages count against the transaction's page budget (`spilledPages`).
 
 If a transaction that spilled is aborted (explicitly, or by `close()` without commit), `abort()` appends `WalRecord.Abort(txnId)`; recovery then drops its buffered records instead of reporting them as an unfinished transaction. A transaction that spilled and then crashed before `Commit` or `Abort` still appears in `Outcome.discardedTransactions`. In both cases the spilled pages are unreachable garbage reclaimed by compaction (see [maintenance](../storage/maintenance.md)). A commit that throws marks the transaction `ABORTED` directly and does not log `Abort`.
 
@@ -97,10 +97,10 @@ flowchart LR
     PUB[publication of g+1] -->|history.put, trimHistory| H
 ```
 
-* `snapshot(branch)` and `begin(options)` call `pinCurrent()`: read `current`, increment `pins[id]`.
+* `snapshot(branch)` and `begin(options)` call `pinCurrent()`: read `current`, increment `pins[id]`, then check that `history` still holds that generation. If a trim removed it in between, it unpins and tries again with the new `current`. Publication puts a generation into `history` before it makes it `current`, so this only loops when a reader races a trim.
 * `snapshotAt(g, branch)` pins `g` first and then looks it up in `history`, so a concurrent trim cannot remove it between lookup and pin. If `g` is gone it unpins and throws `INVALID_SCHEMA` (`"generation g is no longer retained"`).
-* `trimHistory()` (run during publication) computes `excess = history.size() - historyLimit` and walks the history oldest first, removing every generation that is neither pinned nor `current` until `excess` reaches 0. Pinned generations are **skipped**, not barriers: a long-running snapshot on an old generation keeps exactly that generation, while newer unpinned ones are still trimmed, so the history size stays bounded by `historyLimit + number of distinct pinned generations`.
-* `oldestPinned()` exposes the oldest pinned generation to maintenance so that compaction never reclaims pages still reachable from a pinned snapshot.
+* `trimHistory()` (run during publication) computes `excess = history.size() - historyLimit` and walks the history oldest first, removing every generation that is neither pinned nor `current` until `excess` reaches 0. After removing one it checks the pins again and puts the generation back if a reader pinned it in the meantime. Pinned generations are **skipped**, not barriers: a long-running snapshot on an old generation keeps exactly that generation, while newer unpinned ones are still trimmed, so the history size stays bounded by `historyLimit + number of distinct pinned generations`.
+* `oldestPinned()` exposes the oldest pinned generation to maintenance so that compaction never deletes a segment a pinned snapshot may still read. `oldestReadable()`, the smaller of that and the oldest retained generation, tells a checkpoint which dead pages it may release ([maintenance](../storage/maintenance.md#releasing-pages)).
 * `generationAsOf(wallTime)` returns the newest retained generation with `wallTime <= t` (used by `AS OF` time travel).
 
 A `Snapshot` is a `View` whose trees are rooted at the pinned branch's root vector; `Snapshot.close()` unpins once (`AtomicBoolean` guard). Retention defaults: `EngineOptions.historyLimit = 64`.
@@ -155,9 +155,11 @@ A footprint is *commutative* iff the edge was a `SET` edge at the base and every
 
 `TreeDiff.diff` uses the frontier algorithm over shared subtrees ([persistent tree](../storage/persistent-tree.md)), so the cost of the overlap check is proportional to the changed region, not the edge cardinality.
 
-### 5.3 Compaction fence
+### 5.3 Compaction and spilled pages
 
-Compaction moves pages without changing any root, so it doesn't affect other commits. A bulk load is different: a transaction that bulk-loaded stored subtrees (`carriesStoredRoots()`: any `EdgeOp` with `EdgeAction.Load`) may have spilled pages that no generation reaches yet, so compaction can't see them and won't move them. Each transaction records `TransactionManager.compactions()` when it begins, and one that carries stored roots is rejected with a conflict if a compaction has finished since, on the fast path as well as the slow one. Retrying rebuilds the subtree.
+Compaction moves pages without changing any root, so it doesn't affect commits. That holds for bulk loads too. The pages a load spills before commit already have page numbers and directory entries, and compaction finds pages by reading through the victim segment and checking each one against the directory, so a spilled page is moved like any other and the transaction commits normally ([maintenance](../storage/maintenance.md#interaction-with-running-transactions)).
+
+The transaction keeps the numbers of the pages it spilled. If it aborts, its commit fails with a conflict or a page budget error, or its request id turns out to have committed already, it hands them to the reference counter, which marks them dead so the next checkpoint releases them. If it commits, any spilled page the committed trees don't reach is marked dead once the commit is counted.
 
 ### 5.4 Page budget
 
@@ -206,7 +208,7 @@ Under `SNAPSHOT` both commits succeed (R replays `Insert(p)` into B, which L nev
 
 | Code | Class | Retryable | Raised by |
 |---|---|---|---|
-| `RETRYABLE_CONFLICT` | `Conflict` | yes | replay preconditions, `verifyEdge`, `validateReads`, compaction fence, concurrent atom id/canonical key |
+| `RETRYABLE_CONFLICT` | `Conflict` | yes | replay preconditions, `verifyEdge`, `validateReads`, concurrent atom id/canonical key |
 | `RETRYABLE_IO` | `TransientIo` | yes | WAL/page/feed I/O failures; a broken commit pipeline (`"the commit pipeline stopped after a durability failure; restart the engine"`) |
 | `ABORTED_RESOURCE_LIMIT` | `ResourceLimit` | no | page budget, quotas |
 | `INVALID_SCHEMA` | `InvalidSchema` | no | caller errors |
