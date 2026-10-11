@@ -68,6 +68,9 @@ public final class PageStore implements AutoCloseable {
             Path journal = directory.resolve(ReferenceJournal.FILE);
             ReferenceJournal.read(journal, checkpointLsn).ifPresent(this::replay);
             ReferenceJournal.clear(journal);
+            if (references.fresh() && addresses.next() > 1) {
+                references.distrust();
+            }
             Map<Integer, SegmentInfo> byId = new ConcurrentHashMap<>();
             known.forEach(info -> byId.put(info.id(), info));
             try (Stream<Path> listing = Files.list(directory)) {

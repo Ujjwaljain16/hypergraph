@@ -26,25 +26,26 @@ final class MappedLongs implements AutoCloseable {
 
     private final Path path;
     private final FileChannel channel;
-    private final boolean fresh;
+    private boolean fresh;
     private volatile MemorySegment[] chunks = new MemorySegment[0];
 
-    private MappedLongs(Path path, FileChannel channel, boolean fresh) {
+    private MappedLongs(Path path, FileChannel channel) {
         this.path = path;
         this.channel = channel;
-        this.fresh = fresh;
     }
 
     static MappedLongs open(Path path, int magic, int format, String what) {
         try {
             FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
-            boolean fresh = channel.size() == 0;
-            MappedLongs longs = new MappedLongs(path, channel, fresh);
-            longs.mapThrough(fresh ? 0 : (int) ((channel.size() - 1) >>> CHUNK_SHIFT));
+            long size = channel.size();
+            MappedLongs longs = new MappedLongs(path, channel);
+            longs.mapThrough(size == 0 ? 0 : (int) ((size - 1) >>> CHUNK_SHIFT));
             MemorySegment header = longs.chunks[0];
-            if (fresh) {
+            longs.fresh = header.get(INT, 0) == 0 && header.get(INT, 4) == 0 && header.get(LONG, 8) == 0;
+            if (longs.fresh) {
                 header.set(INT, 0, magic);
                 header.set(INT, 4, format);
+                header.force();
             } else if (header.get(INT, 0) != magic || header.get(INT, 4) != format) {
                 channel.close();
                 throw HStoreException.invalid(what + " " + path + " has an unknown format");

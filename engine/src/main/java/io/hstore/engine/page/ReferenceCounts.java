@@ -59,6 +59,10 @@ public final class ReferenceCounts implements AutoCloseable {
         return file.header(STATE_OFFSET) == TRUSTED;
     }
 
+    boolean fresh() {
+        return file.fresh();
+    }
+
     public void distrust() {
         rebuilt = false;
         file.header(STATE_OFFSET, REBUILD);

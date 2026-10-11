@@ -18,6 +18,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
@@ -366,6 +367,22 @@ class ReferenceCountTest {
         try (StorageEngine recovered = StorageEngine.open(directory, options())) {
             recovered.verifyReferences();
             assertModel(recovered, model);
+        }
+    }
+
+    @Test
+    void aMissingCountsFileIsRebuilt() throws Exception {
+        Random random = new Random(19);
+        Map<Long, TreeSet<Long>> model = new HashMap<>();
+        try (StorageEngine engine = StorageEngine.open(directory, options())) {
+            for (int round = 0; round < 60; round++) {
+                step(engine, random, model);
+            }
+        }
+        Files.delete(counts());
+        try (StorageEngine engine = StorageEngine.open(directory, options())) {
+            engine.verifyReferences();
+            assertModel(engine, model);
         }
     }
 
