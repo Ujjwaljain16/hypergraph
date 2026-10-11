@@ -32,7 +32,7 @@ final class HStoreStore implements Store {
     private long writtenBeforeReopen;
     private long readBeforeReopen;
 
-    static final long DEFAULT_CACHE_BYTES = (1L << 20) * 16 * 1024;
+    static final long DEFAULT_CACHE_BYTES = Runtime.getRuntime().maxMemory() / 2;
 
     private final int history;
 
