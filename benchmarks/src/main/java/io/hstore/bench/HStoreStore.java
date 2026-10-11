@@ -131,18 +131,18 @@ final class HStoreStore implements Store {
     @Override
     public long incidence(int[] probes, int from, int to) {
         return database.read(reader -> {
-            long total = 0;
+            IdCount count = new IdCount();
             for (int i = from; i < to; i++) {
-                total += reader.incident(nodes[probes[i]]).filter(incident -> incident.edge() != 0).count();
+                reader.forEachIncidentEdge(nodes[probes[i]], count);
             }
-            return total;
+            return count.total;
         });
     }
 
     @Override
     public long members(int[] probes, int from, int to) {
         return database.read(reader -> {
-            MemberCount count = new MemberCount();
+            IdCount count = new IdCount();
             for (int i = from; i < to; i++) {
                 reader.forEachMemberId(edges[probes[i]], count);
             }
@@ -170,7 +170,7 @@ final class HStoreStore implements Store {
             for (int i = from; i < to; i++) {
                 long start = nodes[probes[i]];
                 reached.size = 0;
-                reader.incident(start).forEach(incident -> reader.forEachMemberId(incident.edge(), reached));
+                reader.forEachIncidentEdge(start, edge -> reader.forEachMemberId(edge, reached));
                 total += reached.distinctExcept(start);
             }
             return total;
@@ -203,7 +203,7 @@ final class HStoreStore implements Store {
     @Override
     public long scanLargeEdge() {
         return database.read(reader -> {
-            MemberCount count = new MemberCount();
+            IdCount count = new IdCount();
             reader.forEachMemberId(large, count);
             return count.total;
         });
@@ -299,7 +299,7 @@ final class HStoreStore implements Store {
         }
     }
 
-    private static final class MemberCount implements LongConsumer {
+    private static final class IdCount implements LongConsumer {
         long total;
 
         @Override

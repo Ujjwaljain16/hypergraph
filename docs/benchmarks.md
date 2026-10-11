@@ -42,15 +42,15 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 |---|---|---|---|
 | `ingest.nodes` | insert nodes, 1,000 per transaction | `Writer.node` | `graph.add(String)` in `transact` |
 | `ingest.edges` | insert hyperedges, 1,000 per transaction | `Writer.edge` + `Writer.load` | `graph.add(new HGPlainLink(…))` |
-| `read.incidence` | enumerate a node's incidence set, 1,000 probes per read transaction | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
+| `read.incidence` | enumerate a node's incidence set, 1,000 probes per read transaction | `Reader.forEachIncidentEdge` | `getIncidenceSet(h).getSearchResult()` |
 | `read.members` | enumerate a hyperedge's members | `Reader.forEachMemberId` | `HGLink.getTargetAt` over `graph.get(h)` |
 | `read.comembership` | count hyperedges containing both nodes of a pair | `TreeAlgebra.intersectKeys` (leapfrog) | `hg.count(hg.and(hg.incident(a), hg.incident(b)))` |
-| `read.twohop` | count the distinct nodes that share a hyperedge with a node, 10,000 probes | `Reader.incident` + `Reader.forEachMemberId` | `getIncidenceSet` + the link's targets |
+| `read.twohop` | count the distinct nodes that share a hyperedge with a node, 10,000 probes | `Reader.forEachIncidentEdge` + `Reader.forEachMemberId` | `getIncidenceSet` + the link's targets |
 | `read.incidence.parallel` | `read.incidence` from one thread per core | same | same |
-| `latency.read` | one incidence lookup per read transaction, each timed on its own | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
+| `latency.read` | one incidence lookup per read transaction, each timed on its own | `Reader.forEachIncidentEdge` | `getIncidenceSet(h).getSearchResult()` |
 | `write.update` | replace a node's value, 1,000 per transaction | `Writer.set` | `graph.replace` |
 | `latency.commit` | 5,000 write transactions of one update each, each timed on its own | `Writer.set` | `graph.replace` |
-| `mixed.read` | single incidence lookups from `threads − 1` threads for 10 s while `mixed.write` runs | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
+| `mixed.read` | single incidence lookups from `threads − 1` threads for 10 s while `mixed.write` runs | `Reader.forEachIncidentEdge` | `getIncidenceSet(h).getSearchResult()` |
 | `mixed.write` | one thread committing 10 updates at a time on a fixed schedule of 1,000 updates/s | `Writer.set` | `graph.replace` |
 | `large.ingest` | one hyperedge containing every node | `Writer.load` | one `HGPlainLink` |
 | `large.scan` | enumerate the large hyperedge 400 times, after the warm-up described below | `Reader.forEachMemberId` | `getTargetAt` loop |
