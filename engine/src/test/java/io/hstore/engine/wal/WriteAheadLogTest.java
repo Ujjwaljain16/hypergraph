@@ -33,7 +33,7 @@ class WriteAheadLogTest {
             random.nextBytes(bytes);
             records.add(switch (i % 4) {
                 case 0 -> new WalRecord.Begin(i, random.nextInt(4), random.nextLong(1_000_000));
-                case 1 -> new WalRecord.Page(i, random.nextLong(), bytes);
+                case 1 -> new WalRecord.Page(i, random.nextLong(), random.nextLong(), bytes);
                 case 2 -> new WalRecord.Feed(i, bytes);
                 default -> new WalRecord.Commit(i, i, random.nextLong(), random.nextLong(1 << 30), random.nextLong(1 << 30));
             });
@@ -43,7 +43,7 @@ class WriteAheadLogTest {
 
     private static String describe(WalRecord record) {
         return switch (record) {
-            case WalRecord.Page(long txn, long page, byte[] image) -> "page " + txn + " " + page + " " + HexFormat.of().formatHex(image);
+            case WalRecord.Page(long txn, long page, long address, byte[] image) -> "page " + txn + " " + page + " " + address + " " + HexFormat.of().formatHex(image);
             case WalRecord.Feed(long txn, byte[] payload) -> "feed " + txn + " " + HexFormat.of().formatHex(payload);
             default -> record.toString();
         };
@@ -94,7 +94,7 @@ class WriteAheadLogTest {
 
     @Test
     void aSmallFrameAfterALargeOneReadsBackIntact() {
-        List<WalRecord> written = List.of(new WalRecord.Feed(1, new byte[]{1, 2, 3}), new WalRecord.Page(2, 9, new byte[30_000]),
+        List<WalRecord> written = List.of(new WalRecord.Feed(1, new byte[]{1, 2, 3}), new WalRecord.Page(2, 9, 10, new byte[30_000]),
                 new WalRecord.Feed(3, new byte[]{4, 5}), new WalRecord.Commit(4, 4, 5, 6, 7), new WalRecord.Feed(5, new byte[0]));
         try (WriteAheadLog wal = WriteAheadLog.open(directory, 1 << 20)) {
             written.forEach(wal::append);

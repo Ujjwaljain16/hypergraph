@@ -1,5 +1,7 @@
 package io.hstore.engine.page;
 
+import io.hstore.engine.HStoreException;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -18,6 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -39,7 +42,7 @@ class PageStoreTest {
         try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
             for (int i = 0; i < 16_000; i++) {
                 byte[] image = image(random, PageHeader.SIZE + random.nextInt(PAGE_SIZE - PageHeader.SIZE + 1));
-                long pageId = store.allocate(1, image.length);
+                long pageId = store.allocate(image.length);
                 store.write(pageId, MemorySegment.ofArray(image));
                 written.put(pageId, image);
                 ids.add(pageId);
@@ -56,7 +59,7 @@ class PageStoreTest {
             written.forEach((pageId, image) -> assertArrayEquals(image, bytes(reopened.read(pageId))));
             long first = ids.getFirst();
             reopened.read(first);
-            assertTrue(reopened.mappedBytes(PageId.segmentOf(first)) > 0);
+            assertTrue(reopened.mappedBytes(reopened.segmentOf(first)) > 0);
         }
     }
 
@@ -81,14 +84,44 @@ class PageStoreTest {
             long growing = write(store, PAGE_SIZE);
             store.read(finished);
             store.read(growing);
-            assertTrue(store.mappedBytes(PageId.segmentOf(finished)) >= (long) PAGES_PER_SEGMENT * PAGE_SIZE - PAGE_SIZE);
-            assertEquals(0, store.mappedBytes(PageId.segmentOf(growing)));
+            assertTrue(store.mappedBytes(store.segmentOf(finished)) >= (long) PAGES_PER_SEGMENT * PAGE_SIZE - PAGE_SIZE);
+            assertEquals(0, store.mappedBytes(store.segmentOf(growing)));
             for (int i = 0; i < 1100; i++) {
                 write(store, PAGE_SIZE);
             }
             long later = write(store, PAGE_SIZE);
             store.read(later);
-            assertTrue(store.mappedBytes(PageId.segmentOf(later)) > 4L << 20);
+            assertTrue(store.mappedBytes(store.segmentOf(later)) > 4L << 20);
+        }
+    }
+
+    @Test
+    void pagesAreNumberedInOrderWhicheverSegmentHoldsThem() {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+            List<Long> ids = new ArrayList<>();
+            while (store.segments().size() < 3) {
+                ids.add(write(store, PAGE_SIZE / 2));
+            }
+            for (int i = 0; i < ids.size(); i++) {
+                assertEquals(i + 1, PageId.indexOf(ids.get(i)));
+            }
+            assertNotEquals(store.segmentOf(ids.getFirst()), store.segmentOf(ids.getLast()));
+        }
+    }
+
+    @Test
+    void aNumberWithoutAnAddressIsReportedAsCorrupt() {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+            write(store, 200);
+            assertThrows(HStoreException.CorruptPage.class, () -> store.read(PageId.pack(99, 0)));
+        }
+    }
+
+    @Test
+    void aPageCannotBeWrittenPastWhatWasAllocatedForIt() {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+            long pageId = store.allocate(100);
+            assertThrows(IllegalArgumentException.class, () -> store.write(pageId, MemorySegment.ofArray(image(new Random(1), 200))));
         }
     }
 
@@ -119,7 +152,7 @@ class PageStoreTest {
             Random random = new Random(11);
             for (int i = 0; i < pages; i++) {
                 images[i] = image(random, PAGE_SIZE - random.nextInt(64));
-                ids[i] = store.allocate(1, images[i].length);
+                ids[i] = store.allocate(images[i].length);
                 store.write(ids[i], MemorySegment.ofArray(images[i]));
                 written.incrementAndGet();
             }
@@ -131,7 +164,7 @@ class PageStoreTest {
 
     private static long write(PageStore store, int length) {
         byte[] image = image(new Random(length), length);
-        long pageId = store.allocate(1, image.length);
+        long pageId = store.allocate(image.length);
         store.write(pageId, MemorySegment.ofArray(image));
         return pageId;
     }
