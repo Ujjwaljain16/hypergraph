@@ -72,6 +72,11 @@ public final class ChangeLog {
             Ref.write(out, after);
             return;
         }
+        if (Math.abs(after.count() - base.count()) > MAX_DELTA) {
+            out.putByte(ROOT);
+            Ref.write(out, durable.of(pending, schema));
+            return;
+        }
         List<TreeDiff.Delta<V>> deltas = TreeDiff.diff(new Tree<>(schema, source, base), new Tree<>(schema, source, after))
                 .limit(MAX_DELTA + 1)
                 .toList();
