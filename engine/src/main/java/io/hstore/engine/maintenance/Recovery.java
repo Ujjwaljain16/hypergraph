@@ -129,7 +129,7 @@ public final class Recovery {
                     branches.put(branch, target.withRoots(target.roots().with(slot, root)));
                 }
                 case WalRecord.Feed(long _, byte[] payload) -> feed.append(codec.decode(payload));
-                case WalRecord.Begin _, WalRecord.PageRef _, WalRecord.Commit _, WalRecord.Abort _, WalRecord.Checkpoint _ -> {
+                case WalRecord.Begin _, WalRecord.PageRef _, WalRecord.Changes _, WalRecord.Commit _, WalRecord.Abort _, WalRecord.Checkpoint _ -> {
                 }
             }
         }

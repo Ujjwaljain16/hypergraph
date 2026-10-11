@@ -7,6 +7,8 @@ import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageId;
 
 import java.lang.foreign.MemorySegment;
+import java.util.IdentityHashMap;
+import java.util.Map;
 
 public final class Materializer {
 
@@ -19,6 +21,7 @@ public final class Materializer {
     private final Sink sink;
     private final long epoch;
     private final int pageSize;
+    private final Map<Node, Ref> written = new IdentityHashMap<>();
     private long pages;
 
     public Materializer(Sink sink, long epoch, int pageSize) {
@@ -40,7 +43,17 @@ public final class Materializer {
         PageHeader.assign(image, pageId);
         sink.accept(pageId, image, frozen);
         pages++;
-        return new Ref.Stored(pageId, PageId.unitsFor(image.byteSize()), frozen.summary());
+        Ref stored = new Ref.Stored(pageId, PageId.unitsFor(image.byteSize()), frozen.summary());
+        written.put(node, stored);
+        return stored;
+    }
+
+    public Ref writtenAs(Node node) {
+        Ref ref = written.get(node);
+        if (ref == null) {
+            throw new IllegalStateException("node was not written by this materializer");
+        }
+        return ref;
     }
 
     public long pagesWritten() {
@@ -92,7 +105,12 @@ public final class Materializer {
     }
 
     private Ref inlineOrMaterialize(Ref ref, TreeSchema<?> schema) {
-        return ref instanceof Ref.Pending(Leaf leaf) && Ref.fitsInline(leaf) ? new Ref.Inline(freeze(leaf)) : materialize(ref, schema);
+        if (ref instanceof Ref.Pending(Leaf leaf) && Ref.fitsInline(leaf)) {
+            Ref inline = new Ref.Inline(freeze(leaf));
+            written.put(leaf, inline);
+            return inline;
+        }
+        return materialize(ref, schema);
     }
 
     private static <V> Object mapRefs(TreeSchema<V> schema, Object value, ValueCodec.RefMapper mapper) {

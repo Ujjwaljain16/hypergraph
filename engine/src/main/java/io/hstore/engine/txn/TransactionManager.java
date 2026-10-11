@@ -404,6 +404,10 @@ public final class TransactionManager {
                 records.add(new WalRecord.Root(txnId, changed.id(), slot, stored.get(slot)));
             }
         });
+        if (meta.isEmpty()) {
+            records.add(new WalRecord.Changes(txnId, changed.id(), ChangeLog.encode(before, changed.roots(), storage.slots(), storage.source(),
+                    (pending, _) -> materializer.writtenAs(pending.node()))));
+        }
         records.addAll(meta);
         long wallTime = System.currentTimeMillis();
         CommitEvent event = new CommitEvent(generationId, txnId, wallTime, changed.id(), members, slotChanges);
