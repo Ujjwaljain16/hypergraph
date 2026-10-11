@@ -35,7 +35,7 @@ Leaf                                   Branch
   Summary  summary   (volatile, recomputed lazily after mutation)
 ```
 
-**Routing.** `Branch.route(key)` binary-searches `separators[1..size-1]` for the last separator `<= key` and returns index 0 when there is none. `separators[0]` therefore never takes part in routing. A freshly grown root stores `Long.MIN_VALUE` there. When a branch is frozen (`Branch.frozenWith`), `separators[0]` is rewritten to the first child's `summary().min()`, so the encoded page carries its real lower bound and delta-encodes compactly.
+**Routing.** `Branch.route(key)` searches `separators[1..size-1]` for the last separator `<= key` and returns index 0 when there is none. In a branch with 16 or more children it first guesses the position from where `key` falls between the first and last separator, checks a window of 8 around the guess, and only then falls back to a binary search over what is left. Page numbers and atom ids are handed out in order, so the guess is usually right. `Leaf.search` does the same over a leaf's keys and returns exactly what `Arrays.binarySearch` would. `separators[0]` therefore never takes part in routing. A freshly grown root stores `Long.MIN_VALUE` there. When a branch is frozen (`Branch.frozenWith`), `separators[0]` is rewritten to the first child's `summary().min()`, so the encoded page carries its real lower bound and delta-encodes compactly.
 
 **Page budget.** `Layout.of(pageSize)` computes:
 

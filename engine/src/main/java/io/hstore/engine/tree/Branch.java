@@ -47,6 +47,23 @@ public final class Branch extends Node {
         int low = 1;
         int high = size - 1;
         int result = 0;
+        if (size >= Trees.INTERPOLATE_FROM && key > separators[1] && key < separators[size - 1]) {
+            long first = separators[1];
+            int guess = Math.clamp(1 + (long) (((double) key - first) / ((double) separators[size - 1] - first) * (size - 2)), 1, size - 1);
+            if (separators[guess] <= key) {
+                int end = Math.min(size - 1, guess + Trees.INTERPOLATE_WINDOW);
+                result = separators[end] <= key ? end : guess;
+                low = result + 1;
+                high = separators[end] <= key ? high : end - 1;
+            } else {
+                int start = Math.max(1, guess - Trees.INTERPOLATE_WINDOW);
+                if (separators[start] <= key) {
+                    result = start;
+                    low = start + 1;
+                }
+                high = separators[start] <= key ? guess - 1 : start - 1;
+            }
+        }
         while (low <= high) {
             int mid = (low + high) >>> 1;
             if (separators[mid] <= key) {
