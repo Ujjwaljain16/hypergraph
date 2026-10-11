@@ -7,6 +7,7 @@ import io.hstore.engine.catalog.CatalogImage;
 import io.hstore.engine.catalog.CatalogStore;
 import io.hstore.engine.catalog.Generation;
 import io.hstore.engine.feed.ChangeFeed;
+import io.hstore.engine.page.FileHandle;
 import io.hstore.engine.page.PageStore;
 import io.hstore.engine.txn.CrashPoint;
 import io.hstore.engine.txn.TransactionManager;
@@ -55,6 +56,10 @@ public final class Checkpointer {
     }
 
     public Result checkpoint() {
+        return FileHandle.uninterrupted(this::take);
+    }
+
+    private Result take() {
         pages.checkpoint();
         Result result = transactions.exclusive(() -> {
             references.pause();

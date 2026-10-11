@@ -380,24 +380,31 @@ public final class StorageEngine implements AutoCloseable {
     }
 
     private void shutdown() {
-        closed = true;
-        transactions.shutdown();
-        references.close();
-        maintainer.interrupt();
+        boolean interrupted = Thread.interrupted();
         try {
-            maintainer.join(MAINTENANCE_INTERVAL.multipliedBy(4));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        feed.close();
-        wal.close();
-        pages.close();
-        cache.clear();
-        try {
-            lock.release();
-            lockChannel.close();
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
+            closed = true;
+            transactions.shutdown();
+            references.close();
+            maintainer.interrupt();
+            try {
+                maintainer.join(MAINTENANCE_INTERVAL.multipliedBy(4));
+            } catch (InterruptedException e) {
+                interrupted = true;
+            }
+            feed.close();
+            wal.close();
+            pages.close();
+            cache.clear();
+            try {
+                lock.release();
+                lockChannel.close();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 }
