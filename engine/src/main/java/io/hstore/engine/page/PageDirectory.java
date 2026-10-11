@@ -40,13 +40,14 @@ final class PageDirectory implements AutoCloseable {
         try {
             FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
             PageDirectory directory = new PageDirectory(path, channel);
-            boolean fresh = channel.size() == 0;
-            directory.mapThrough(fresh ? 0 : (int) ((channel.size() - 1) >>> CHUNK_SHIFT));
+            long size = channel.size();
+            directory.mapThrough(size == 0 ? 0 : (int) ((size - 1) >>> CHUNK_SHIFT));
             MemorySegment header = directory.chunks[0];
-            if (fresh) {
+            if (header.get(INT, 0) == 0 && header.get(INT, 4) == 0 && header.get(LONG, NEXT_OFFSET) == 0) {
                 header.set(INT, 0, MAGIC);
                 header.set(INT, 4, FORMAT);
                 header.set(LONG, NEXT_OFFSET, 1L);
+                header.force();
             } else if (header.get(INT, 0) != MAGIC || header.get(INT, 4) != FORMAT) {
                 channel.close();
                 throw HStoreException.invalid("page directory " + path + " has an unknown format");
