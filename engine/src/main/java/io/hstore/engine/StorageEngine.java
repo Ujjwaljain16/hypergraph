@@ -9,6 +9,7 @@ import io.hstore.engine.catalog.CatalogStore;
 import io.hstore.engine.catalog.SlotRegistry;
 import io.hstore.engine.feed.ChangeFeed;
 import io.hstore.engine.feed.FeedCodec;
+import io.hstore.engine.maintenance.ChangeLogCheck;
 import io.hstore.engine.maintenance.Checkpointer;
 import io.hstore.engine.maintenance.Compactor;
 import io.hstore.engine.maintenance.Recovery;
@@ -306,6 +307,11 @@ public final class StorageEngine implements AutoCloseable {
     public ReferenceCounter.Verification verifyReferences() {
         requireOpen();
         return transactions.exclusive(() -> references.verify(transactions.current(), transactions.history()));
+    }
+
+    public ChangeLogCheck.Result verifyChangeLog() {
+        requireOpen();
+        return transactions.exclusive(() -> ChangeLogCheck.verify(wal, transactions.history(), slots, transactions.source()));
     }
 
     public EngineStats stats() {
