@@ -1,9 +1,12 @@
 package io.hstore.engine;
 
+import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.txn.CrashPoint;
+import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.Transaction;
+import io.hstore.engine.txn.TxnOptions;
 import io.hstore.engine.txn.WalMode;
 
 import org.junit.jupiter.api.Test;
@@ -110,6 +113,31 @@ class CrashRecoveryTest {
         }
         try (StorageEngine reopened = StorageEngine.open(directory, options)) {
             assertTrue(reopened.read(snapshot -> snapshot.resolve(0, EngineTest.NODE, "afterwards")).isPresent());
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(WalMode.class)
+    void aBranchCreatedSinceTheLastCheckpointComesBackFromTheLog(WalMode mode) {
+        EngineOptions options = EngineTest.small().withWalMode(mode).withCheckpointWalBytes(Long.MAX_VALUE);
+        StorageEngine engine = StorageEngine.open(directory, options);
+        long edge = engine.write(txn -> {
+            long e = txn.createEdge(EngineTest.EDGE, EdgeKind.SET);
+            txn.insert(e, 1);
+            return e;
+        });
+        Branch branch = engine.createBranch("draft", Branch.MAIN);
+        engine.write(TxnOptions.defaults().onBranch(branch.id()), txn -> {
+            txn.insert(edge, 2);
+            return null;
+        });
+        engine.halt();
+        try (StorageEngine recovered = StorageEngine.open(directory, options)) {
+            assertEquals(List.of("draft"), recovered.branches().stream().map(Branch::name).filter("draft"::equals).toList());
+            assertEquals(1L, (long) recovered.read(snapshot -> snapshot.requireEdge(edge).size()));
+            try (Snapshot draft = recovered.snapshot(branch.id())) {
+                assertEquals(2L, draft.requireEdge(edge).size());
+            }
         }
     }
 

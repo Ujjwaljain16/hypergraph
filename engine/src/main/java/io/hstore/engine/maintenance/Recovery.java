@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.stream.Stream;
 
 public final class Recovery {
 
@@ -107,7 +108,9 @@ public final class Recovery {
     private static Generation redo(Generation base, WalRecord.Commit commit, List<WalRecord> records,
                                    PageStore pages, ChangeFeed feed, FeedCodec codec) {
         Map<Integer, Branch> branches = new TreeMap<>(base.branches());
-        for (WalRecord record : records) {
+        List<WalRecord> metaFirst = Stream.concat(records.stream().filter(WalRecord.BranchMeta.class::isInstance),
+                records.stream().filter(record -> !(record instanceof WalRecord.BranchMeta))).toList();
+        for (WalRecord record : metaFirst) {
             switch (record) {
                 case WalRecord.Page(long _, long pageId, long _, byte[] image) -> pages.write(pageId, MemorySegment.ofArray(image));
                 case WalRecord.BranchMeta(long _, int id, String name, int parent, long baseGeneration, long created, Branch.State state) -> {
