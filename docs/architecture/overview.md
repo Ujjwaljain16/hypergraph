@@ -83,7 +83,7 @@ The engine has no dependencies outside `java.base`. All three modules build into
 | Package | Purpose |
 |---|---|
 | `io.hstore.engine` | `StorageEngine` (open/close, maintenance thread, checkpoint/compact entry points), `EngineOptions`, `EngineStats`, `Dictionary` (interned role names and role sets), `HStoreException` (error codes, retryable conflicts). |
-| `engine.page` | Byte-level storage. `PageStore` and `SegmentFile` hold segment files and allocation. `PageHeader` is the 80-byte header and crc32c seal. `PageId` is a page's permanent number, `PageAddress` its place in a segment, and `PageDirectory` the memory-mapped `pages.dir` that maps one to the other. `ByteCursor` provides little-endian and varint codecs over `MemorySegment`. `IoTrace` counts page visits per query through a `ScopedValue`. |
+| `engine.page` | Byte-level storage. `PageStore` and `SegmentFile` hold segment files and allocation. `PageHeader` is the 80-byte header and crc32c seal. `PageId` is a page's permanent number, `PageAddress` its place in a segment, and `PageDirectory` the memory-mapped `pages.dir` that maps one to the other. `ReferenceCounts` is `pages.ref`, the count of references to each page, with its checkpoint journal. `ByteCursor` provides little-endian and varint codecs over `MemorySegment`. `IoTrace` counts page visits per query through a `ScopedValue`. |
 | `engine.tree` | The copy-on-write counted B+tree. `Tree` is the immutable handle and `TreeWriter` does path-copy updates. Nodes are `Leaf` and `Branch`, referenced by `Ref` (`Empty`, `Pending` or `Stored`). Also here: `Summary` (monoid annotations), `TreeCursor`, `TreeAlgebra` (leapfrog, set algebra), `TreeDiff`, `BulkBuilder`, `NodeCodec`, `NodeCache`, `Materializer`, `TreeWalker` and `TreeVerifier`. |
 | `engine.topology` | Hyperedge representation: `Hyperedge` (members tree plus order index), `Incidence` (one member's role set, weight, validity, payload and qualifier), `IncidenceCodec` (columnar leaf encoding), `MemberChange`, `Weight` (fixed point) and `Validity`. |
 | `engine.index` | `PostingIndex`, a two-level index from a key to a postings set. Small sets are inlined and large ones are promoted to their own tree. Used by the reverse incidence, type, canonical-key and symbol indexes. |
@@ -91,7 +91,7 @@ The engine has no dependencies outside `java.base`. All three modules build into
 | `engine.txn` | `TransactionManager` (commit lock, append, publication, pins, history), `Transaction` (op log, read sets, rebase), `Snapshot`, `View` (read API shared by both), `Workspace` (mutable root vector plus derivations), `GroupCommitter`, `Op`/`EdgeAction`, `Derivation`/`EngineDerivations`, `CrashPoint`, `Durability`, `WalMode`, `Isolation` and `TxnOptions`. |
 | `engine.wal` | `WriteAheadLog` (segmented, checksummed records) and `WalRecord` (`Begin`, `Page`, `PageRef`, `Root`, `BranchMeta`, `Feed`, `Commit`, `Abort`, `Checkpoint`). |
 | `engine.feed` | `ChangeFeed` (segmented append-only `feed/*.feed` files, sparse generation index, retention, tailing subscriptions), `CommitEvent` and `FeedCodec`; see [change-feed.md](../storage/change-feed.md). |
-| `engine.maintenance` | `Checkpointer`, `Compactor` (liveness, moving live pages out of victim segments, reclamation) and `Recovery` (catalog discovery, WAL redo, durable-prefix rule). |
+| `engine.maintenance` | `Checkpointer`, `ReferenceCounter` (counts references after each commit, releases pages no reader can reach), `Compactor` (moving live pages out of victim segments, reclamation) and `Recovery` (catalog discovery, WAL redo, durable-prefix rule). |
 
 ### `io.hstore.db`
 
@@ -209,7 +209,8 @@ The ordering above is what makes recovery safe. Under `PAGE_REFERENCES` the WAL 
 |---|---|---|---|
 | Caller threads | any (the server uses virtual threads) | — | Run reads without locks. Run a transaction's operations without locks, then take `commitLock` only for append (encoding, WAL append, page writes). They then block in `GroupCommitter.await` outside the lock. |
 | `hstore-group-commit` | platform, daemon | `GroupCommitter` constructor | Takes every queued `Pending` as one batch and calls `makeDurable(batchSize)` once: data sync in `PAGE_REFERENCES` mode, then WAL sync, both only under `Durability.SYNC`. It then runs each publication in generation order and wakes the waiters. One fsync pair covers the whole batch (`averageGroupCommit` in the statistics). A failure poisons the pipeline, and every later commit fails until restart. |
-| `hstore-maintenance` | virtual | `StorageEngine` constructor | Every 500 ms, under the `maintenance` lock (`tryLock`): checkpoint once the WAL written since the last checkpoint exceeds `checkpoint_wal_mb`, then reclaim retired segments that no pinned reader can still see. |
+| `hstore-maintenance` | virtual | `StorageEngine` constructor | Every 500 ms, under the `maintenance` lock (`tryLock`): checkpoint once the WAL or the pages written since the last checkpoint exceed `checkpoint_wal_mb`, compact one segment if any has fallen below `compaction_live_ratio`, then reclaim retired segments that no pinned reader can still see. |
+| `hstore-references` | platform, daemon | `StorageEngine` constructor | Takes the generations that publications queue, in order, and updates the reference counts of the pages each commit added or dropped. The queue holds up to 4 096 commits; past that, publication waits for it. |
 | `feed-subscriber` | virtual, one per subscription | `ChangeFeed.subscribe` | Tails the feed segments, waiting on a condition signalled by `append` (with a 250 ms timeout). Subscribers are `SemanticPlane`, `MaterializedViews` and `Statistics`. |
 | Server connections | virtual, one per socket | `Server` (`Executors.newVirtualThreadPerTaskExecutor`) | Each connection runs a `Session`. |
 | Studio requests | virtual | `Studio` (`HttpServer.setExecutor`) | HTTP API and static assets. |
@@ -219,6 +220,7 @@ Locks:
 * `TransactionManager.commitLock` serializes generation assignment and the WAL append order.
 * `StorageEngine.maintenance` serializes checkpoint and compaction.
 * `TransactionManager.exclusive` holds `commitLock` and drains the group committer, so a checkpoint sees exactly the published state.
+* `ReferenceCounter.pause` takes the counter's lock after counting every queued commit, so a checkpoint journals counts that match the generation it publishes. The checkpoint keeps it until the journal is applied, after it has let go of `commitLock`.
 
 Readers take no locks at all.
 
@@ -227,15 +229,17 @@ Readers take no locks at all.
 The following is real output from `hstore init` followed by loading `examples/clinical-claims.hql` and running `CHECKPOINT;` (default 16 KiB pages):
 
 ```text
-FORMAT                                   55 B  format=4, page-size=16384 (java.util.Properties)
+FORMAT                                   55 B  format=5, page-size=16384 (java.util.Properties)
 LOCK                                      0 B  FileChannel.tryLock() held while open
-hstore.conf                            2397 B  server configuration template written by `hstore init`
+hstore.conf                            2863 B  server configuration template written by `hstore init`
 catalog/manifest                         20 B  name of the latest catalog file
 catalog/generations/0000000000000000.cat 37 B  checkpoint of generation 0
-catalog/generations/000000000000009d.cat 49147 B  checkpoint of generation 157 (current + retained history)
-data/segments/00000001.seg           1210439 B  segment 1: packed node images
+catalog/generations/000000000000009d.cat 49851 B  checkpoint of generation 157 (current + retained history)
+data/segments/00000001.seg           1213651 B  segment 1: packed node images
 data/segments/pages.dir              8388608 B  page directory, one 8 MiB chunk mapped so far (sparse)
-wal/segments/0000000000000000.wal      156180 B  WAL segment starting at LSN 0
+data/segments/pages.ref              8388608 B  reference counts, same layout (sparse)
+data/segments/pages.ref.journal            0 B  emptied after every checkpoint
+wal/segments/0000000000000000.wal      165595 B  WAL segment starting at LSN 0
 feed/0000000000000000.feed             29846 B  change feed segment starting at byte 0
 payload/000001.pay                        0 B  payload segment (database layer)
 semantic/state                           53 B  persisted HNSW index state (database layer)
@@ -243,12 +247,13 @@ semantic/state                           53 B  persisted HNSW index state (datab
 
 | Path | Owner | Format |
 |---|---|---|
-| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=4` (page numbers resolved through a page directory) and `page-size` (the maximum node size). Opening a directory written in an older format, or opening with a different page size, fails. |
+| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=5` (page numbers resolved through a page directory, reference counts per page) and `page-size` (the maximum node size). Opening a directory written in an older format, or opening with a different page size, fails. |
 | `LOCK` | `StorageEngine.open` | An exclusive OS file lock. A second process gets `database ... is opened by another process`. |
 | `catalog/generations/%016x.cat` | `CatalogStore.publish` | `int magic 0x54414348`, `int crc32c(payload)`, `long length`, then the `CatalogImage` payload. Written to `*.tmp`, fsynced, atomically renamed, and the directory fsynced. The three newest files are kept. |
 | `catalog/manifest` | `CatalogStore` | The file name of the latest `.cat`, written durably the same way. |
 | `data/segments/%08x.seg` | `PageStore` / `SegmentFile` | Append-only extents of node images packed at 64-byte alignment, up to 256 MiB per segment by default (1 GiB maximum); see [pages.md](../storage/pages.md). |
 | `data/segments/pages.dir` | `PageDirectory` | 64-byte header, then one `i64` address (segment, offset, units) per page number, memory-mapped in 8 MiB chunks; see [pages.md](../storage/pages.md#page-numbers-and-the-page-directory). |
+| `data/segments/pages.ref`, `pages.ref.journal` | `ReferenceCounts`, `ReferenceJournal` | One `i64` reference count per page number in the same layout, changed only at checkpoints through the journal; see [pages.md](../storage/pages.md#reference-counts). |
 | `wal/segments/%016x.wal` | `WriteAheadLog` | Each segment is named by its starting LSN; see [wal-and-recovery.md](../transactions/wal-and-recovery.md). |
 | `feed/%016x.feed` | `ChangeFeed` | Segments (64 MiB, named by starting byte offset) of frames `int length`, `int crc32c`, `long generation`, `payload`, trimmed by retention after checkpoints; see [change-feed.md](../storage/change-feed.md). |
 | `payload/%06x.pay` | `db.payload.PayloadStore` | Append-only payload extents. |

@@ -12,6 +12,7 @@ Source of truth:
 | Crash points | `engine/src/main/java/io/hstore/engine/txn/CrashPoint.java` |
 | Recovery | `engine/src/main/java/io/hstore/engine/maintenance/Recovery.java` |
 | Checkpoints | `engine/src/main/java/io/hstore/engine/maintenance/Checkpointer.java`, `catalog/CatalogStore.java` |
+| Reference counts | `engine/src/main/java/io/hstore/engine/maintenance/ReferenceCounter.java`, `page/ReferenceCounts.java`, `page/ReferenceJournal.java` |
 | Byte encodings | `engine/src/main/java/io/hstore/engine/page/ByteCursor.java`, `tree/Ref.java`, `tree/Summary.java` |
 | Crash test matrix | `engine/src/test/java/io/hstore/engine/CrashRecoveryTest.java` |
 
@@ -23,12 +24,14 @@ Related: [transactions](transactions.md), [change feed](../storage/change-feed.m
 
 ```text
 <db>/
-  FORMAT                         properties: format=4, page-size=<bytes>
+  FORMAT                         properties: format=5, page-size=<bytes>
   LOCK                           exclusive FileLock held while open
   catalog/manifest               name of the current catalog image file
   catalog/generations/%016x.cat  checkpointed catalog images (3 newest retained)
   data/segments/*.seg            page segments (see pages.md)
   data/segments/pages.dir        page directory: the address of every page number (see pages.md)
+  data/segments/pages.ref        reference count of every page number, as of the last checkpoint
+  data/segments/pages.ref.journal  counts and released entries of a checkpoint, empty once applied
   wal/segments/%016x.wal         WAL segments, named by their starting LSN in hex
   feed/%016x.feed                change feed segments, named by global byte position (see change-feed.md)
 ```
@@ -162,7 +165,7 @@ PAGE < WAL_APPEND < DATA_WRITE < COMMIT_APPEND < DATA_SYNC < WAL_SYNC < CATALOG_
 
 The `Commit` record is appended in a separate call **after** the data pages were written. It is the atomic commit point: a transaction is part of the recovered state if and only if its `Commit` frame is valid in the recovered log and the durability-prefix rule (section 8) admits it. Consequently a crash at any point `>= COMMIT_APPEND` that preserves the operating system's page cache recovers the commit, and a crash at any point `< COMMIT_APPEND` recovers the prior state.
 
-Spilled subtrees (`TransactionManager.spill`, only for bulk loads) are handled earlier, outside the commit lock: the page images are written to their segments **first**, then the `Page`/`PageRef` records are appended, carrying the transaction id but no `Begin`. Recovery attaches them to the transaction's body by id. The data-before-log order matters for checkpoints, which can run while a spill is in progress. A checkpoint reads its LSN *before* it syncs pages and the page directory (section 9), so every spill record below that LSN was appended after its page was written and its directory entry set, and both are made durable before `truncateBefore` drops the record. If the transaction is aborted, `WalRecord.Abort` follows the spill records.
+Spilled subtrees (`TransactionManager.spill`, only for bulk loads) are handled earlier, outside the commit lock: the page images are written to their segments **first**, then the `Page`/`PageRef` records are appended, carrying the transaction id but no `Begin`. Recovery attaches them to the transaction's body by id. The data-before-log order matters for checkpoints, which can run while a spill is in progress. A checkpoint reads its LSN *before* it syncs pages and the page directory (section 9), so every spill record below that LSN was appended after its page was written and its directory entry set, and both are made durable before `truncateBefore` drops the record. If the transaction is aborted, `WalRecord.Abort` follows the spill records and its pages are marked dead for the next checkpoint to release ([maintenance](../storage/maintenance.md#reference-counts)).
 
 ## 6. WAL modes
 
@@ -176,7 +179,7 @@ Every materialized page is logged in full (`Page`). At commit (`SYNC`) only the 
 
 Every materialized page is logged as a 47 or 48 byte `PageRef` holding its id, address, length and CRC-32C. The image itself lives only in the data segment. This is safe because of two invariants:
 
-1. **Pages are never overwritten in place while reachable.** The tree is copy-on-write: a commit writes new versions of changed nodes to *freshly allocated* `PageId`s and never modifies a page that any generation, pinned snapshot or retained catalog image can reach. Compaction copies live pages to new ids and only reclaims a segment after a checkpoint has moved the WAL past every record that could reference it ([maintenance](../storage/maintenance.md)). A page number is never handed out twice, and `PageHeader.verify` rejects an image whose stored number differs from the requested one.
+1. **Pages are never overwritten in place while reachable.** The tree is copy-on-write: a commit writes new versions of changed nodes to *freshly allocated* `PageId`s and never modifies a page that any generation, pinned snapshot or retained catalog image can reach. Compaction copies live pages to new addresses under the same numbers and only reclaims a segment after a checkpoint has moved the WAL past every record that could reference it ([maintenance](../storage/maintenance.md)). A page number is never handed out twice, and `PageHeader.verify` rejects an image whose stored number differs from the requested one.
 2. **Data is forced before the log.** `makeDurable` calls `pages.sync()` (every dirty segment file, `force(false)`) and only then `wal.sync()`. When the commit's `Commit` frame is durable, so is every page it references.
 
 Invariant 2 alone is not enough: the OS may write the WAL segment back to disk on its own *before* `pages.sync()` runs, and a power failure at that moment leaves a durable `Commit` frame whose pages are missing. That commit was never acknowledged (acknowledgement happens after `WAL_SYNC` and publication). Recovery detects the situation by verifying every `PageRef` (section 8) and discards the commit together with everything after it.
@@ -231,14 +234,15 @@ sequenceDiagram
     participant R as Recovery
     participant CK as Checkpointer
     SE->>CS: Recovery.discover = loadLatest() or CatalogImage.initial()
-    SE->>PS: open(segments from the image)
+    SE->>PS: open(segments and checkpoint lsn from the image): apply pages.ref.journal if it matches
     SE->>WAL: open: truncate the last segment's torn tail
     SE->>CF: open: truncate the feed's torn tail
     SE->>R: recover(image, wal, pages, feed, codec)
-    R-->>SE: Outcome(image, replayedCommits, discardedTransactions, discardedCommits)
+    R-->>SE: Outcome(image, replayed, discardedTransactions, discardedCommits)
+    SE->>SE: ReferenceCounter.recover: count the replayed generations, scan for unreferenced pages
     SE->>SE: new TransactionManager(recovered current, history)
-    SE->>CK: checkpoint() (publish image, truncate WAL)
-    SE->>SE: compactor.reclaim(), start maintenance thread
+    SE->>CK: checkpoint() (release dead pages, publish image, truncate WAL)
+    SE->>SE: compactor.reclaim(), start the reference counter and maintenance threads
 ```
 
 `Recovery.recover(checkpoint, wal, pages, feed, codec)`:
@@ -246,9 +250,11 @@ sequenceDiagram
 1. **Scan.** Read the WAL from `checkpoint.checkpointLsn()` (may throw `CORRUPT_LOG`, section 3). `Commit` frames are collected in log order; `Abort` drops the transaction's buffered spill records; `Checkpoint` is ignored; every other record is buffered in `pending[txnId]`.
 2. **Filter.** For each commit in log order, remove its body from `pending`. Skip it if `commit.generation <= checkpoint.current().id()` (already in the image). Otherwise write the address of every `Page` and `PageRef` in the body back into the page directory (`PageStore.place`), which also moves the directory's next index past that number. Entries written after the last checkpoint may not have reached the disk; this restores them.
 3. **Durability prefix.** If any earlier commit was discarded, discard this one too. Otherwise check `intact(body, pages)`: for every `PageRef` in the body, read the page, run `PageHeader.verify(page, pageId)` (magic, format, identity, header checksum), and require `page.byteSize() >= length` and `crc32c(page[0, length)) == checksum`. Any exception or mismatch means the page never reached storage; log a warning once (`durable prefix ends before generation g`) and discard this and every later commit. `Page` records need no verification because they carry their own bytes, protected by the frame CRC.
-4. **Redo.** Apply the body in order: `Page` writes the image at the address it carries; `BranchMeta` inserts or updates the branch (keeping its current roots); `Root` sets one slot root of one branch; `Feed` appends the decoded event to the change feed (a no-op if the feed already holds that generation). Build `Generation(commit.generation, commit.wallTime, commit.txnId, max(nextAtom), max(nextTxn), branches)` and append it to the history.
+4. **Redo.** Apply the body's `BranchMeta` records first, then the rest in order. `createBranch` logs a new branch's `Root` records ahead of its `BranchMeta`, so the branch has to exist before its roots are set. `Page` writes the image at the address it carries; `BranchMeta` inserts or updates the branch (keeping its current roots); `Root` sets one slot root of one branch; `Feed` appends the decoded event to the change feed (a no-op if the feed already holds that generation). Build `Generation(commit.generation, commit.wallTime, commit.txnId, max(nextAtom), max(nextTxn), branches)` and append it to the history.
 5. **Seal.** `pages.sync()`; `feed.truncateAfter(recovered generation)` drops feed frames for commits that did not survive (possible under `ASYNC`, or after the prefix rule fired); `feed.sync()`.
-6. **Result.** `CatalogImage(recovered generation, history, segments, wal.end(), feed.size())` and `Outcome(image, replayedCommits, discardedTransactions = pending.size(), discardedCommits)`. `discardedTransactions` counts transactions that wrote records but neither a `Commit` nor an `Abort` (crashed mid-commit, or spilled and then lost to a crash before committing or aborting).
+6. **Result.** `CatalogImage(recovered generation, history, segments, wal.end(), feed.size())` and `Outcome(image, replayed, discardedTransactions = pending.size(), discardedCommits)`, where `replayed` lists the generations redone, in order. `discardedTransactions` counts transactions that wrote records but neither a `Commit` nor an `Abort` (crashed mid-commit, or spilled and then lost to a crash before committing or aborting).
+
+The reference counts in `pages.ref` describe the checkpointed generation. `ReferenceCounter.recover` brings them forward by counting each replayed generation against the one before it, as the counter does after a commit, and then scans the page directory. A page with an address but no count and no death mark was written by a transaction that never committed, or by a commit the prefix rule discarded, so its entry is cleared. If `pages.ref` is marked for rebuilding, the counts are recomputed from the retained generations instead ([maintenance](../storage/maintenance.md#reference-counts)).
 
 The prefix rule is what makes recovery produce *the state after some prefix of the commit order*. Without it, a durable commit `k+1` whose pages survived could be replayed on top of a lost commit `k`, and its root records (which point at pages built on `k`'s trees) would expose a mixture.
 
@@ -262,20 +268,24 @@ LOG:  [recovery] recovered generation 158: replayed 0 commits from lsn 156,490, 
 
 ## 9. Checkpoints
 
-`Checkpointer.checkpoint()` runs inside `TransactionManager.exclusive(...)`, which takes the commit lock **and** drains the group committer, so `current == head` and nothing is in flight:
+`Checkpointer.checkpoint()` first calls `pages.checkpoint()` without any lock, so the data written since the last checkpoint is mostly on disk before commits are held up. Steps 1 to 5 then run inside `TransactionManager.exclusive(...)`, which takes the commit lock **and** drains the group committer, so `current == head` and nothing is in flight. Inside that, `ReferenceCounter.pause` counts every published commit that is still queued and keeps the counter paused until step 6 is done.
 
 1. `lsn = wal.end()`. It is read first so that everything logged below it was written before the syncs that follow.
-2. `pages.checkpoint()` (every dirty segment, then the page directory), `feed.sync()` (forces the active feed segment; earlier feed segments were forced when the feed rolled). `history` = retained generations other than `current`, newest first, at most `historyLimit`.
-3. `catalog.publish(CatalogImage(current, history, segments, lsn, feed.size()))`. The image is framed as `i32 magic 0x54414348`, `i32 crc32c(payload)`, `i64 length`, payload; written to `generations/%016x.cat.tmp`, forced, atomically renamed, the directory forced; then `manifest` is rewritten the same way. The three newest `.cat` files are kept; `loadLatest()` falls back to the newest valid file if the manifest is missing or names a corrupt file.
-4. `wal.append(Checkpoint(0, current.id, lsn))`, `wal.sync()`, `wal.truncateBefore(lsn)`.
+2. Dead pages that no retained or pinned generation can reach are released ([maintenance](../storage/maintenance.md#releasing-pages)).
+3. `pages.checkpoint()` (every dirty segment, then the page directory), then `pages.journal(lsn)`: every count changed since the last checkpoint and every released directory entry, as absolute values, go to `pages.ref.journal` behind a header holding `lsn` and with a CRC-32C at the end, and the file is forced. `feed.sync()` (forces the active feed segment; earlier feed segments were forced when the feed rolled). `history` = retained generations other than `current`, newest first, at most `historyLimit`.
+4. `catalog.publish(CatalogImage(current, history, segments, lsn, feed.size()))`. The image is framed as `i32 magic 0x54414348`, `i32 crc32c(payload)`, `i64 length`, payload; written to `generations/%016x.cat.tmp`, forced, atomically renamed, the directory forced; then `manifest` is rewritten the same way. The three newest `.cat` files are kept; `loadLatest()` falls back to the newest valid file if the manifest is missing or names a corrupt file.
+5. `wal.append(Checkpoint(0, current.id, lsn))`, `wal.sync()`, `wal.truncateBefore(lsn)`.
+6. With the commit lock released, `pages.applyJournal()` writes the journaled values into `pages.ref` and `pages.dir`, forces both and truncates the journal to zero bytes. Commits run meanwhile; the counter queues their changes and resumes once the journal is applied.
+
+Because the journal holds absolute values, applying it twice gives the same files. If the process dies after step 4 but before step 6 is finished, the next open finds a journal whose LSN matches the published catalog and applies it again. If it dies before step 4, the journal's LSN doesn't match and it is ignored: `pages.ref` and `pages.dir` were not touched, so they still match the previous catalog. `ReferenceCountTest` crashes at `CHECKPOINT_JOURNAL`, between steps 5 and 6, and checks the counts after reopening.
 
 The checkpoint LSN is the position of the `Checkpoint` record itself, so the next recovery starts there and skips it. Triggers:
 
 | Trigger | Where |
 |---|---|
 | Every open, right after recovery | `StorageEngine` constructor |
-| WAL grew by more than `checkpointWalBytes` (default 256 MiB) since the last checkpoint; checked every 500 ms | `StorageEngine.maintain` |
-| Compaction, after moving pages and before deleting segments | `StorageEngine.compact` |
+| WAL or page writes grew by more than `checkpointWalBytes` (default 256 MiB) since the last checkpoint, or more than 1 048 576 reference counts changed; checked every 500 ms | `StorageEngine.maintain` |
+| Compaction, before choosing victims and again after moving pages, before deleting segments | `StorageEngine.compact` |
 | Clean shutdown | `StorageEngine.close` |
 | On demand | `StorageEngine.checkpoint()`, HQL `CHECKPOINT` |
 
