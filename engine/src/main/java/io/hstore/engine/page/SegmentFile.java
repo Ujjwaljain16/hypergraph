@@ -14,7 +14,6 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -25,23 +24,22 @@ final class SegmentFile implements AutoCloseable {
 
     private final int id;
     private final Path path;
-    private final FileChannel channel;
+    private final FileHandle file;
     private final AtomicBoolean dirty = new AtomicBoolean();
     private final ReentrantLock remapping = new ReentrantLock();
     private volatile MemorySegment mapped = MemorySegment.NULL;
     private Arena arena;
     private volatile boolean sealed;
 
-    private SegmentFile(int id, Path path, FileChannel channel) {
+    private SegmentFile(int id, Path path, FileHandle file) {
         this.id = id;
         this.path = path;
-        this.channel = channel;
+        this.file = file;
     }
 
     static SegmentFile open(int id, Path path) {
         try {
-            FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
-            return new SegmentFile(id, path, channel);
+            return new SegmentFile(id, path, FileHandle.open(path));
         } catch (IOException e) {
             throw new UncheckedIOException("cannot open segment " + path, e);
         }
@@ -62,7 +60,7 @@ final class SegmentFile implements AutoCloseable {
 
     long unitsOnDisk() {
         try {
-            return PageId.unitsFor(channel.size());
+            return PageId.unitsFor(file.size());
         } catch (IOException e) {
             throw HStoreException.io("cannot size segment " + path, e);
         }
@@ -104,7 +102,7 @@ final class SegmentFile implements AutoCloseable {
 
     MemorySegment view() {
         try {
-            MemorySegment whole = covering(channel.size());
+            MemorySegment whole = covering(file.size());
             return whole == null ? MemorySegment.NULL : whole;
         } catch (IOException e) {
             throw HStoreException.io("cannot size segment " + path, e);
@@ -135,13 +133,13 @@ final class SegmentFile implements AutoCloseable {
             if (required <= current.byteSize()) {
                 return current;
             }
-            long size = channel.size();
+            long size = file.size();
             if (size < required) {
                 return null;
             }
             Arena replacement = Arena.ofShared();
             try {
-                current = channel.map(FileChannel.MapMode.READ_ONLY, 0, size, replacement);
+                current = file.call(channel -> channel.map(FileChannel.MapMode.READ_ONLY, 0, size, replacement));
             } catch (IOException | RuntimeException e) {
                 replacement.close();
                 throw e;
@@ -177,11 +175,13 @@ final class SegmentFile implements AutoCloseable {
 
     private void fill(ByteBuffer buffer, long position) {
         try {
-            while (buffer.hasRemaining()) {
-                if (channel.read(buffer, position + buffer.position()) < 0) {
-                    return;
+            file.run(channel -> {
+                while (buffer.hasRemaining()) {
+                    if (channel.read(buffer, position + buffer.position()) < 0) {
+                        return;
+                    }
                 }
-            }
+            });
         } catch (IOException e) {
             throw HStoreException.io("read failed in segment " + id + " at byte " + position, e);
         }
@@ -190,9 +190,11 @@ final class SegmentFile implements AutoCloseable {
     void write(long position, MemorySegment image) {
         ByteBuffer buffer = image.asByteBuffer();
         try {
-            while (buffer.hasRemaining()) {
-                channel.write(buffer, position + buffer.position());
-            }
+            file.run(channel -> {
+                while (buffer.hasRemaining()) {
+                    channel.write(buffer, position + buffer.position());
+                }
+            });
             dirty.set(true);
         } catch (IOException e) {
             throw HStoreException.io("write failed in segment " + id + " at byte " + position, e);
@@ -202,7 +204,7 @@ final class SegmentFile implements AutoCloseable {
     void force() {
         if (dirty.getAndSet(false)) {
             try {
-                channel.force(false);
+                file.run(channel -> channel.force(false));
             } catch (IOException e) {
                 dirty.set(true);
                 throw HStoreException.io("sync failed for segment " + id, e);
@@ -236,7 +238,7 @@ final class SegmentFile implements AutoCloseable {
             remapping.unlock();
         }
         try {
-            channel.close();
+            file.close();
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
