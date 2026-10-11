@@ -26,6 +26,7 @@ enum Setting {
     WAL_MODE("wal_mode", "references", "references logs page checksums and syncs data first; images logs full page images"),
     NODE_CACHE_MB("node_cache_mb", "256", "megabytes of heap for decoded tree nodes, each counted at an estimate of its size"),
     CHECKPOINT_WAL_MB("checkpoint_wal_mb", "256", "write-ahead log volume that triggers a background checkpoint"),
+    WRITE_BUFFER_MB("write_buffer_mb", "64", "megabytes of committed tree nodes kept in memory until a checkpoint writes them"),
     HISTORY_LIMIT("history_limit", "64", "committed generations retained for time travel"),
     COMPACTION_LIVE_RATIO("compaction_live_ratio", "0.5", "sealed segments whose live node images fall below this ratio are compacted"),
     FEED_RETENTION_GENERATIONS("feed_retention_generations", "100000", "change-feed generations kept for HISTORY and subscribers"),
