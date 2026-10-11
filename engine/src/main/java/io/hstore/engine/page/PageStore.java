@@ -68,6 +68,11 @@ public final class PageStore implements AutoCloseable {
                     activeSegment = info.id();
                     nextUnit = Math.toIntExact(info.units());
                 });
+        files.forEach((id, file) -> {
+            if (id != activeSegment) {
+                file.seal();
+            }
+        });
     }
 
     public int pageSize() {
@@ -96,6 +101,10 @@ public final class PageStore implements AutoCloseable {
     private void rollSegment() {
         if (activeSegment != 0) {
             segments.computeIfPresent(activeSegment, (_, info) -> info.withState(SegmentState.SEALED, 0));
+            SegmentFile previous = files.get(activeSegment);
+            if (previous != null) {
+                previous.seal();
+            }
         }
         int id = segments.isEmpty() ? 1 : segments.lastKey() + 1;
         files.put(id, SegmentFile.open(id, SegmentFile.pathFor(directory, id)));
@@ -119,6 +128,11 @@ public final class PageStore implements AutoCloseable {
         segments.computeIfPresent(segment, (_, info) -> info.units() >= end ? info : info.withAllocation(info.pages() + 1, end));
         pagesWritten.incrementAndGet();
         bytesWritten.addAndGet(image.byteSize());
+    }
+
+    long mappedBytes(int segment) {
+        SegmentFile file = files.get(segment);
+        return file == null ? 0 : file.mappedBytes();
     }
 
     public MemorySegment read(long pageId) {

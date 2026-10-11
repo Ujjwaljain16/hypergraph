@@ -216,7 +216,8 @@ The [`Dockerfile`](../../Dockerfile) has two stages:
 
 1. **build**: `ghcr.io/graalvm/native-image-community:25`. Runs `./mvnw install -DskipTests` and then
    `./mvnw -Pnative package -pl server`, producing a native `hstore` executable linked against glibc (Serial GC, `-O2`,
-   `-march=compatibility` so the image runs on any CPU of the target architecture). A BuildKit cache mount
+   `-march=compatibility` so the image runs on any CPU of the target architecture, and shared arenas so segment maps
+   can be closed when a segment is deleted). A BuildKit cache mount
    keeps `~/.m2` between builds.
 2. **runtime**: `debian:bookworm-slim` plus the binary, the entrypoint and the non-root user.
 
