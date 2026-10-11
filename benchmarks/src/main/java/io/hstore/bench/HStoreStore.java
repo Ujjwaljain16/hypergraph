@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.IntConsumer;
+import java.util.function.LongConsumer;
 
 final class HStoreStore implements Store {
 
@@ -140,11 +141,11 @@ final class HStoreStore implements Store {
     @Override
     public long members(int[] probes, int from, int to) {
         return database.read(reader -> {
-            long total = 0;
+            MemberCount count = new MemberCount();
             for (int i = from; i < to; i++) {
-                total += reader.memberIds(edges[probes[i]]).filter(atom -> atom != 0).count();
+                reader.forEachMemberId(edges[probes[i]], count);
             }
-            return total;
+            return count.total;
         });
     }
 
@@ -198,7 +199,11 @@ final class HStoreStore implements Store {
 
     @Override
     public long scanLargeEdge() {
-        return database.read(reader -> reader.memberIds(large).filter(atom -> atom != 0).count());
+        return database.read(reader -> {
+            MemberCount count = new MemberCount();
+            reader.forEachMemberId(large, count);
+            return count.total;
+        });
     }
 
     @Override
@@ -265,5 +270,16 @@ final class HStoreStore implements Store {
     @Override
     public void close() {
         database.close();
+    }
+
+    private static final class MemberCount implements LongConsumer {
+        long total;
+
+        @Override
+        public void accept(long atom) {
+            if (atom != 0) {
+                total++;
+            }
+        }
     }
 }

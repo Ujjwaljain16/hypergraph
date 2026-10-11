@@ -70,6 +70,8 @@ public final class Comparison {
     }
 
     private static final int BATCH = 1_000;
+    private static final int SCAN_PASSES = 400;
+    private static final int SCAN_WARMUP = 40;
     private static final int COMMITS = 5_000;
     private static final int ID_BYTES = 8;
     private static final int UPDATE_BYTES = ID_BYTES + 24;
@@ -167,10 +169,13 @@ public final class Comparison {
                 store.largeEdge(largeSize);
                 return largeSize;
             })));
-            store.scanLargeEdge();
-            results.add(reading(store, () -> measure("large.scan", "enumerate all members of the large hyperedge (x20)", 20L * largeSize, () -> {
+            for (int i = 0; i < SCAN_WARMUP; i++) {
+                store.scanLargeEdge();
+            }
+            results.add(reading(store, () -> measureReading("large.scan", "enumerate all members of the large hyperedge (x%d, after %d warm-up passes)"
+                    .formatted(SCAN_PASSES, SCAN_WARMUP), (long) SCAN_PASSES * largeSize, () -> {
                 long total = 0;
-                for (int i = 0; i < 20; i++) {
+                for (int i = 0; i < SCAN_PASSES; i++) {
                     total += store.scanLargeEdge();
                 }
                 return total;
@@ -295,6 +300,13 @@ public final class Comparison {
         return new Result(workload, description, operations, (System.nanoTime() - started) / 1e6, checksum).using(JvmUsage.now().since(usage));
     }
 
+    private static Result measureReading(String workload, String description, long operations, LongSupplier work) {
+        JvmUsage usage = JvmUsage.onThisThread();
+        long started = System.nanoTime();
+        long checksum = work.getAsLong();
+        return new Result(workload, description, operations, (System.nanoTime() - started) / 1e6, checksum).using(JvmUsage.onThisThread().since(usage));
+    }
+
     private static long batched(int length, Slice slice) {
         long total = 0;
         for (int from = 0; from < length; from += BATCH) {
@@ -307,7 +319,7 @@ public final class Comparison {
         if (warm) {
             batched(Math.max(BATCH, operations / 10), slice);
         }
-        return reading(store, () -> measure(workload, description, operations, () -> batched(operations, slice)));
+        return reading(store, () -> measureReading(workload, description, operations, () -> batched(operations, slice)));
     }
 
     private static Result writing(Store store, long logicalBytes, Supplier<Result> workload) {

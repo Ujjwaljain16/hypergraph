@@ -43,7 +43,7 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `ingest.nodes` | insert nodes, 1,000 per transaction | `Writer.node` | `graph.add(String)` in `transact` |
 | `ingest.edges` | insert hyperedges, 1,000 per transaction | `Writer.edge` + `Writer.load` | `graph.add(new HGPlainLink(…))` |
 | `read.incidence` | enumerate a node's incidence set, 1,000 probes per read transaction | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
-| `read.members` | enumerate a hyperedge's members | `Reader.members` | `HGLink.getTargetAt` over `graph.get(h)` |
+| `read.members` | enumerate a hyperedge's members | `Reader.forEachMemberId` | `HGLink.getTargetAt` over `graph.get(h)` |
 | `read.comembership` | count hyperedges containing both nodes of a pair | `TreeAlgebra.intersectKeys` (leapfrog) | `hg.count(hg.and(hg.incident(a), hg.incident(b)))` |
 | `read.twohop` | count the distinct nodes that share a hyperedge with a node, 10,000 probes | `Reader.incident` + `Reader.memberIds` | `getIncidenceSet` + the link's targets |
 | `read.incidence.parallel` | `read.incidence` from one thread per core | same | same |
@@ -53,7 +53,7 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `mixed.read` | single incidence lookups from `threads − 1` threads for 10 s while `mixed.write` runs | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
 | `mixed.write` | one thread committing 10 updates at a time on a fixed schedule of 1,000 updates/s | `Writer.set` | `graph.replace` |
 | `large.ingest` | one hyperedge containing every node | `Writer.load` | one `HGPlainLink` |
-| `large.scan` | enumerate the large hyperedge twenty times | `Reader.members` | `getTargetAt` loop |
+| `large.scan` | enumerate the large hyperedge 400 times, after 40 warm-up passes | `Reader.forEachMemberId` | `getTargetAt` loop |
 | `large.probe` | test whether a node belongs to the large hyperedge | `View.incidence(edge, node)` (membership-tree lookup) | `getIncidenceSet(node).contains(edge)` |
 | `reopen` | close and reopen, including recovery | `HypergraphDatabase.open` | `HGEnvironment.get` |
 | `read.incidence.cold` | `read.incidence` immediately after reopening | | |
@@ -144,8 +144,9 @@ then the rest of the page image if it's bigger. JE reports sequential plus rando
 cold reads and with a small `CACHE_MB`. The logical sizes are rough estimates; compare the two stores against each
 other rather than reading the ratios as absolute numbers.
 
-**Memory.** Every workload also records, from the JVM's own MXBeans, the bytes the whole process allocated
-(`getTotalThreadAllocatedBytes`) and the GC pause time (`GarbageCollectorMXBean.getCollectionTime`, which is
+**Memory.** Every workload also records, from the JVM's own MXBeans, the bytes allocated
+(`getTotalThreadAllocatedBytes` for the whole process; for the single-threaded read workloads, only the reading
+thread's `getCurrentThreadAllocatedBytes`, so background maintenance doesn't count against a read) and the GC pause time (`GarbageCollectorMXBean.getCollectionTime`, which is
 stop-the-world time with ParallelGC). Rows where both stores paused for 0 ms are left out. After ingest, the run
 forces a full GC and records how much heap the loaded store keeps. A baseline taken before the store opens is
 subtracted, so the shared dataset arrays don't count. This number mostly reflects how each engine's cache is
@@ -244,8 +245,9 @@ not what drives HStore's footprint:
   atom cache, which holds a Java array of target handles, so a scan is an array loop. HStore walks a B+tree
   cursor, decodes incidence columns, resolves role sets and builds a `Member` record for each member. That
   record carries roles, weight, validity, position and qualifier. The cost buys per-member metadata and
-  snapshot-consistent reads, which a plain link cannot express. This is the clearest optimisation target
-  (a raw `LongStream` member path that skips record materialisation).
+  snapshot-consistent reads, which a plain link cannot express. The benchmark now reads ids through
+  `Reader.forEachMemberId`, which builds neither `Member` records nor tree entries; the numbers below predate that.
+  What remains is that every hyperedge keeps its members in a tree of its own, one more page to read.
 * **Edge ingest at small batch sizes (about 0.6–0.8× in async mode).** Each commit rewrites the incident-tree
   paths of every touched member, which is copy-on-write write amplification. JE appends log records and
   defers the work to its cleaner. In `sync` mode group commit amortises the fsync and HStore leads (1.35×).
