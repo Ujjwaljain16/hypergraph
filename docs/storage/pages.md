@@ -157,9 +157,9 @@ lookup is a load from the OS page cache and the directory takes no Java heap. A 
 
 Trees, nested references, `NodeCache` and `Ref` use numbers and never see an address. Only `PageStore` resolves
 them, and the WAL logs each new page's address next to its number so that recovery can put the directory entry
-back. That is what will let compaction move an image by changing one directory entry, without rewriting the nodes
-that point at it. It doesn't do that yet; it still rebuilds the paths to the pages it moves
-([maintenance.md](maintenance.md)).
+back. That is what lets compaction move an image by copying its bytes and changing one directory entry, without
+rewriting the nodes that point at it ([maintenance.md](maintenance.md#compaction)). Entries are written and read with
+release and acquire ordering, so a reader racing a move sees either the old address or the new one, never a mix.
 
 Page `#1234`, stored as 3 units at unit 1234 of segment 1:
 
