@@ -17,6 +17,7 @@ import io.hstore.engine.txn.Durability;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.function.IntConsumer;
@@ -164,11 +165,13 @@ final class HStoreStore implements Store {
     @Override
     public long twoHop(int[] probes, int from, int to) {
         return database.read(reader -> {
+            Reached reached = new Reached();
             long total = 0;
             for (int i = from; i < to; i++) {
                 long start = nodes[probes[i]];
-                total += reader.incident(start).flatMapToLong(incident -> reader.memberIds(incident.edge()))
-                        .filter(atom -> atom != start).sorted().distinct().count();
+                reached.size = 0;
+                reader.incident(start).forEach(incident -> reader.forEachMemberId(incident.edge(), reached));
+                total += reached.distinctExcept(start);
             }
             return total;
         });
@@ -270,6 +273,30 @@ final class HStoreStore implements Store {
     @Override
     public void close() {
         database.close();
+    }
+
+    private static final class Reached implements LongConsumer {
+        long[] atoms = new long[64];
+        int size;
+
+        @Override
+        public void accept(long atom) {
+            if (size == atoms.length) {
+                atoms = Arrays.copyOf(atoms, size * 2);
+            }
+            atoms[size++] = atom;
+        }
+
+        long distinctExcept(long start) {
+            Arrays.sort(atoms, 0, size);
+            long distinct = 0;
+            for (int i = 0; i < size; i++) {
+                if (atoms[i] != start && (i == 0 || atoms[i] != atoms[i - 1])) {
+                    distinct++;
+                }
+            }
+            return distinct;
+        }
     }
 
     private static final class MemberCount implements LongConsumer {
