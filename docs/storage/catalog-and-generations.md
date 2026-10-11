@@ -72,6 +72,8 @@ The `TransactionManager` keeps two pointers:
 * **`head`**: the latest generation *appended* to the WAL. It is updated under `commitLock` inside `append`. The next committer builds on it, so commits pipeline without waiting for fsync.
 * **`current`**: the latest generation *published*, meaning durable when `Durability.SYNC`. It is set by the group committer's publication callback, strictly in generation order. New snapshots and transactions pin `current`, so readers never observe a commit that could be lost in a crash.
 
+A published generation is durable through its WAL records, not through pages. The trees a commit changed are in memory (`Ref.Pending` nodes on top of the last checkpoint's pages) until a checkpoint writes them; the checkpoint then swaps the stored references into `head` and `current` ([maintenance.md](maintenance.md#checkpoints)).
+
 ```mermaid
 sequenceDiagram
     participant T1 as commit g+1
@@ -82,8 +84,8 @@ sequenceDiagram
     T2->>TM: append (head = g+2, built on g+1)
     TM->>GC: submit g+1, g+2
     GC->>GC: one data sync + one WAL sync for the batch
-    GC->>TM: publish g+1: current = g+1, history.put, feed.append
-    GC->>TM: publish g+2: current = g+2, history.put, feed.append
+    GC->>TM: publish g+1: history.put, current = g+1, feed.append
+    GC->>TM: publish g+2: history.put, current = g+2, feed.append
     GC-->>T1: await returns g+1
     GC-->>T2: await returns g+2
 ```
@@ -100,9 +102,9 @@ Published generations are kept in `TransactionManager.history` (a `ConcurrentSki
 * `snapshotAt(generation, branch)` pins the generation and opens a snapshot over its root vector. A generation that has been trimmed fails with `generation N is no longer retained`.
 * `generationAsOf(wallTime)` returns the newest retained generation with `wallTime <= t`.
 
-Time travel needs no undo log. Copy-on-write never overwrites a page, so an old generation's root vector still points at valid pages, and reading the past is exactly as fast as reading the present. Compaction moves the pages a retained generation still needs and keeps their page numbers, so old root vectors stay valid after their segments are deleted ([maintenance.md](maintenance.md#reclaim)). Compaction therefore never shortens the time-travel window.
+Time travel needs no undo log. Copy-on-write never overwrites a page or changes a published node, so an old generation's root vector still points at valid pages, or at in-memory nodes that the generation keeps alive until a checkpoint has written them, and reading the past is exactly as fast as reading the present. Compaction moves the pages a retained generation still needs and keeps their page numbers, so old root vectors stay valid after their segments are deleted ([maintenance.md](maintenance.md#reclaim)). Compaction therefore never shortens the time-travel window.
 
-The retained history is also persisted. `Checkpointer` writes up to `historyLimit` past generations into the catalog image, and `Recovery` appends every replayed generation, so time travel survives restarts.
+The retained history is not persisted. A checkpoint writes the pages of one generation only, so the catalog image holds that generation and an empty history. After a restart, `Recovery` rebuilds the commits logged since that checkpoint, and the history holds the checkpointed generation and the generations replayed after it. `AT GENERATION` and `AS OF` can't reach anything older, and neither can a branch merge that needs an older base generation (see [Branches](#branches)). Older changes are still in the change feed, within `feed_retention_generations`.
 
 HQL:
 
@@ -119,9 +121,9 @@ Branches are named, independently writable lines of generations that share pages
 
 | Operation | `TransactionManager` method | Effect |
 |---|---|---|
-| create | `createBranch(name, parentId)` | `id = max(existing ids) + 1`. Copies the parent's `RootVector` *by reference*, so creating a branch is O(1) with no page writes. Records `baseGeneration = head.id` and appends a `BranchMeta` WAL record. Active names must be unique. |
+| create | `createBranch(name, parentId)` | `id = max(existing ids) + 1`. Copies the parent's `RootVector` *by reference*, so creating a branch is O(1) with no page writes. Records `baseGeneration = head.id` and appends a `BranchMeta` WAL record but no `Changes` record; replay gives a new branch its parent's roots. Active names must be unique. |
 | write | `begin(TxnOptions.onBranch(id))` | Commits change only that branch's entry in the next generation. |
-| merge | `markMerged(id)` → `closeBranch(id, MERGED)` | Sets the state to `MERGED` **and empties its roots**, so its pages are no longer reachable from the current generation. The actual three-way merge of contents happens in `db.temporal.BranchMerge` before this call. |
+| merge | `markMerged(id)` → `closeBranch(id, MERGED)` | Sets the state to `MERGED` **and empties its roots**, so its pages are no longer reachable from the current generation. The actual three-way merge of contents happens in `db.temporal.BranchMerge` before this call. It reads the branch's `baseGeneration` as the common ancestor, so that generation must still be retained; otherwise the merge fails with `cannot merge branch b: its fork generation g is no longer retained`. After a restart that is the case for any branch forked before the checkpoint the database reopened from. |
 | drop | `dropBranch(id)` → `closeBranch(id, DROPPED)` | The same, with state `DROPPED`. `Generation.branch` rejects a dropped id. |
 
 `main` (id 0) cannot be closed. `StorageEngine.branches()` lists only `ACTIVE` branches. Because closed branches carry empty root vectors, they keep no pages alive.
@@ -142,7 +144,7 @@ MERGE BRANCH what_if INTO main ON CONFLICT FAIL;
 Generation  := id | wallTime | txnId | nextAtom | nextTxn | branchCount | Branch*
 Branch      := id | name | parent | baseGeneration | createdAt | u8 state | rootCount | (slot | Ref)*
 Ref         := u8 0 (empty) | u8 1 | i64le pageId | varint units | Summary   (slot roots are never inline)
-CatalogImage:= Generation(current) | historyCount | Generation* | segmentCount
+CatalogImage:= Generation(current) | historyCount | Generation* | segmentCount           (historyCount is 0 since format 7)
                | (segmentId | u8 state | pages | retiredAt)* | checkpointLsn | feedEnd
 ```
 
