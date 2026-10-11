@@ -6,18 +6,24 @@ import java.util.concurrent.locks.ReentrantLock;
 
 public final class NodeCache {
 
-    private static final int SHARDS = 16;
-    private static final long MIN_SHARD_BYTES = 64 * 1024;
+    private static final int MAX_SHARDS = 16;
+    private static final long PAGES_PER_SHARD = 64;
 
-    private final Shard[] shards = new Shard[SHARDS];
+    private final Shard[] shards;
     private final LongAdder hits = new LongAdder();
     private final LongAdder misses = new LongAdder();
 
-    public NodeCache(long capacityBytes) {
-        long perShard = Math.max(MIN_SHARD_BYTES, capacityBytes / SHARDS);
-        for (int i = 0; i < SHARDS; i++) {
+    public NodeCache(long capacityBytes, int pageSize) {
+        shards = new Shard[shardsFor(capacityBytes, pageSize)];
+        long perShard = Math.max(1, capacityBytes / shards.length);
+        for (int i = 0; i < shards.length; i++) {
             shards[i] = new Shard(perShard);
         }
+    }
+
+    static int shardsFor(long capacityBytes, int pageSize) {
+        long fit = capacityBytes / (pageSize * PAGES_PER_SHARD);
+        return Math.clamp(Long.highestOneBit(fit), 1, MAX_SHARDS);
     }
 
     public Node get(long pageId) {
@@ -53,7 +59,7 @@ public final class NodeCache {
     }
 
     private Shard shard(long pageId) {
-        return shards[(int) (Hashing.mix(pageId) >>> 60) & (SHARDS - 1)];
+        return shards[(int) (Hashing.mix(pageId) >>> 60) & (shards.length - 1)];
     }
 
     private static final class Slot {
