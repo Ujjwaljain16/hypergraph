@@ -277,7 +277,7 @@ LOG:  [recovery] recovered generation 158: replayed 0 commits from lsn 156,490, 
 5. `wal.append(Checkpoint(0, current.id, lsn))`, `wal.sync()`, `wal.truncateBefore(lsn)`.
 6. With the commit lock released, `pages.applyJournal()` writes the journaled values into `pages.ref` and `pages.dir`, forces both and truncates the journal to zero bytes. Commits run meanwhile; the counter queues their changes and resumes once the journal is applied.
 
-Because the journal holds absolute values, applying it twice gives the same files. If the process dies after step 4 but before step 6 is finished, the next open finds a journal whose LSN matches the published catalog and applies it again. If it dies before step 4, the journal's LSN doesn't match and it is ignored: `pages.ref` and `pages.dir` were not touched, so they still match the previous catalog. `ReferenceCountTest` crashes at `CHECKPOINT_JOURNAL`, between steps 5 and 6, and checks the counts after reopening.
+Because the journal holds absolute values, applying it twice gives the same files. If the process dies after step 4 but before step 6 is finished, the next open finds a journal whose LSN matches the published catalog and applies it again. If it dies before step 4, the journal's LSN doesn't match and it is ignored: `pages.ref` and `pages.dir` were not touched, so they still match the previous catalog. If step 5 or 6 fails and the engine keeps running, the next checkpoint applies the old journal before writing a new one, and a failed step 4 marks `pages.ref` for rebuilding. `ReferenceCountTest` crashes at `CHECKPOINT_CATALOG`, just before step 4, and at `CHECKPOINT_JOURNAL`, between steps 5 and 6, and checks the counts after reopening, including after a checkpoint that failed at step 6 and a next one that crashed before step 4.
 
 The checkpoint LSN is the position of the `Checkpoint` record itself, so the next recovery starts there and skips it. Triggers:
 
@@ -293,7 +293,7 @@ After each completed checkpoint, `StorageEngine.timedCheckpoint` logs `checkpoin
 
 ## 10. What the crash tests prove
 
-`CrashRecoveryTest.recoveryYieldsPriorOrNewStateNeverAMixture` is parameterised over every `WalMode` x every `CrashPoint` (2 x 7 = 14 cases). Each case:
+`CrashRecoveryTest.recoveryYieldsPriorOrNewStateNeverAMixture` is parameterised over every `WalMode` x every commit-path `CrashPoint`, `PAGE` to `CATALOG_PUBLISH` (2 x 7 = 14 cases). Each case:
 
 1. Commits an ordered edge with 200 members (each a fresh node).
 2. Arms a fault injector that throws `CrashPoint.SimulatedCrash` (an `Error`) the first time the chosen point is reached.

@@ -42,6 +42,8 @@ Every checkpoint is logged, and then the checkpoint listeners run. The database 
 8. It appends a `WalRecord.Checkpoint(0, generation, lsn)` and calls `wal.sync()`.
 9. `wal.truncateBefore(lsn)` deletes WAL segment files that end before the checkpoint LSN. They are no longer needed, because the catalog image now covers them.
 10. The commit lock is released here, and commits carry on. `pages.applyJournal()` writes the journaled counts into `pages.ref` and clears the released directory entries, forces both files, and empties the journal. The counter stays paused until this is done, so the counts it writes next start from the applied state.
+
+If a step after the catalog is published fails and the engine keeps running, the journal on disk still belongs to the published catalog. The next checkpoint applies that journal before it writes its own, so the file never falls more than one checkpoint behind the catalog. If publishing the catalog itself fails, it isn't known whether the new catalog reached the disk, so `pages.ref` is marked for rebuilding and the next open recounts.
 11. It remembers `lastLsn = lsn` and resumes the counter.
 
 **Trigger threshold.** `walSinceCheckpoint() = wal.end() − lastLsn` is compared with `checkpoint_wal_mb` (default 256 MiB, `EngineOptions.checkpointWalBytes`). In the default `PAGE_REFERENCES` WAL mode a commit logs about 47 bytes per new node image instead of the image itself. The threshold therefore corresponds to far more committed work than in `PAGE_IMAGES` mode, and replay after a crash stays short.
@@ -124,7 +126,8 @@ the file as of one checkpoint or the next, never a mix. The background thread ch
 otherwise wait a long time to be released.
 
 **On open**, `PageStore.open` applies `pages.ref.journal` if it was written by the checkpoint the catalog points at
-and ignores it otherwise. `ReferenceCounter.recover` then counts the generations recovery replayed from the WAL, in
+and ignores it otherwise. A `pages.ref` that is missing while the directory already has pages is marked for
+rebuilding. `ReferenceCounter.recover` then counts the generations recovery replayed from the WAL, in
 order, exactly as it would have after each commit. Last, one pass over `pages.dir` and `pages.ref`:
 
 * releases every page that has an address but a count of zero and isn't marked dead. No committed generation
@@ -136,7 +139,10 @@ order, exactly as it would have after each commit. Last, one pass over `pages.di
 `pages.ref` for rebuilding. It releases nothing more until the engine restarts, so the worst case is space that
 isn't reclaimed. The next open sees the mark and recounts from the retained generations: every page reachable from
 the current state gets its exact count, and every page only older generations reach is marked dead as of the current
-generation. That walk reads every node of every retained tree, so it takes as long as `hstore check`.
+generation. That walk reads every node of every retained tree, so it takes as long as `hstore check`. The rebuild
+writes `pages.ref` directly but leaves the mark in place until the checkpoint at the end of the open has published
+its catalog, because until then the catalog still describes an older generation. A crash in between rebuilds again.
+A thread error such as running out of memory is handled the same way as a failed count.
 
 ### Releasing pages
 
@@ -174,7 +180,9 @@ moved if their segment is compacted.
    or the old copy of a page that has already moved, is skipped. The header holds the page number, not
    the address, so neither the header nor the checksum changes. Every 4 MiB of copies, the segments are synced and
    only then are the directory entries pointed at the copies, so an entry never reaches the disk pointing at bytes
-   that aren't there yet.
+   that aren't there yet. Afterwards the victim's live total has to be zero. If it isn't, some page the directory
+   points at couldn't be read where it should be, and the victim goes back to `SEALED` instead of being retired, so
+   its file is kept.
 4. Mark the victims `RETIRED` with `retiredAt` set to the current generation.
 
 The work is proportional to the size of the victims, not of the database, and the only memory it needs is a short
