@@ -26,6 +26,7 @@ final class SegmentFile implements AutoCloseable {
     private final AtomicBoolean dirty = new AtomicBoolean();
     private final ReentrantLock remapping = new ReentrantLock();
     private volatile MemorySegment mapped = MemorySegment.NULL;
+    private Arena arena;
     private volatile boolean sealed;
 
     private SegmentFile(int id, Path path, FileChannel channel) {
@@ -69,10 +70,22 @@ final class SegmentFile implements AutoCloseable {
     }
 
     MemorySegment read(long position, int maximum) {
-        MemorySegment view = covering(position + PageHeader.SIZE);
-        if (view == null) {
-            return copy(position, maximum);
+        while (true) {
+            MemorySegment view = covering(position + PageHeader.SIZE);
+            if (view == null) {
+                return copy(position, maximum);
+            }
+            try {
+                return read(view, position, maximum);
+            } catch (IllegalStateException closed) {
+                if (view.scope().isAlive()) {
+                    throw closed;
+                }
+            }
         }
+    }
+
+    private MemorySegment read(MemorySegment view, long position, int maximum) {
         long length = PageHeader.SIZE + Integer.toUnsignedLong(PageHeader.payloadLengthAt(view, position));
         if (length > maximum) {
             return onHeap(view, position, Math.min(maximum, view.byteSize() - position));
@@ -123,8 +136,16 @@ final class SegmentFile implements AutoCloseable {
             if (size < required) {
                 return null;
             }
-            current = channel.map(FileChannel.MapMode.READ_ONLY, 0, size, Arena.ofAuto());
+            Arena replacement = Arena.ofShared();
+            try {
+                current = channel.map(FileChannel.MapMode.READ_ONLY, 0, size, replacement);
+            } catch (IOException | RuntimeException e) {
+                replacement.close();
+                throw e;
+            }
             mapped = current;
+            unmap();
+            arena = replacement;
             return current;
         } catch (IOException e) {
             throw HStoreException.io("cannot map segment " + id, e);
@@ -195,9 +216,22 @@ final class SegmentFile implements AutoCloseable {
         }
     }
 
+    private void unmap() {
+        if (arena != null) {
+            arena.close();
+            arena = null;
+        }
+    }
+
     @Override
     public void close() {
-        mapped = MemorySegment.NULL;
+        remapping.lock();
+        try {
+            mapped = MemorySegment.NULL;
+            unmap();
+        } finally {
+            remapping.unlock();
+        }
         try {
             channel.close();
         } catch (IOException e) {
