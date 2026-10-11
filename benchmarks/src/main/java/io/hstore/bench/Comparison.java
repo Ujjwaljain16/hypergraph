@@ -392,8 +392,11 @@ public final class Comparison {
         Reservoir commits = new Reservoir(SAMPLES_PER_THREAD, SEED);
         AtomicReference<Throwable> failure = new AtomicReference<>();
         long[] compactNanos = new long[1];
+        long[] diskBefore = new long[1];
+        if (compact) {
+            store.reopen(() -> diskBefore[0] = store.diskBytes());
+        }
         long before = store.bytesWritten();
-        long diskBefore = store.diskBytes();
         JvmUsage usage = JvmUsage.now();
         long started = System.nanoTime();
         long deadline = started + COMPACTION_WINDOW_NANOS;
@@ -401,7 +404,9 @@ public final class Comparison {
             if (!compact) {
                 return;
             }
-            LockSupport.parkNanos(started + COMPACTION_DELAY_NANOS - System.nanoTime());
+            for (long wait = started + COMPACTION_DELAY_NANOS - System.nanoTime(); wait > 0; wait = started + COMPACTION_DELAY_NANOS - System.nanoTime()) {
+                LockSupport.parkNanos(wait);
+            }
             long begin = System.nanoTime();
             try {
                 store.compact();
@@ -436,8 +441,12 @@ public final class Comparison {
                 compact ? schedule + " while a full compaction runs" : schedule + " with no compaction, for comparison",
                 committed, millis, 0).using(used).with("latency", Reservoir.merge(commits).json()).with("checked", new Json.Bool(false))
                 .with("bytesWritten", number(store.bytesWritten() - before));
-        return compact ? result.with("compactionMillis", number(compactNanos[0] / 1_000_000)).with("reclaimed", number(diskBefore - store.diskBytes()))
-                : result;
+        if (!compact) {
+            return result;
+        }
+        long[] diskAfter = new long[1];
+        store.reopen(() -> diskAfter[0] = store.diskBytes());
+        return result.with("compactionMillis", number(compactNanos[0] / 1_000_000)).with("reclaimed", number(diskBefore[0] - diskAfter[0]));
     }
 
     private static Result concurrent(Store store, Dataset dataset, int threads) throws Exception {

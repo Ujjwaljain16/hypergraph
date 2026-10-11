@@ -49,7 +49,7 @@ final class Report {
         out.append("|---|---:|---:|---:|:---:|%n".formatted());
         for (Map.Entry<String, Map<String, Json>> entry : subject.results().entrySet()) {
             String workload = entry.getKey();
-            if (baselines.stream().anyMatch(run -> !run.results().containsKey(workload))) {
+            if (workload.startsWith("compaction") || baselines.stream().anyMatch(run -> !run.results().containsKey(workload))) {
                 continue;
             }
             boolean disk = workload.startsWith("disk");
