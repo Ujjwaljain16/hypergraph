@@ -116,7 +116,12 @@ public final class Compactor {
             return new Report(liveBytes, victims, transactions.current().id());
         }
         victims.forEach(id -> pages.transition(id, SegmentState.COMPACTING, 0));
-        move(live, Set.copyOf(victims));
+        try {
+            move(live, Set.copyOf(victims));
+        } catch (RuntimeException | Error failure) {
+            victims.forEach(id -> pages.transition(id, SegmentState.SEALED, 0));
+            throw failure;
+        }
         faults.reach(CrashPoint.COMPACTION_MOVE);
         long retiredAt = transactions.current().id();
         long checkpoints = checkpointer.completed();
