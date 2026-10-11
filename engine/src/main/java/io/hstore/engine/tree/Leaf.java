@@ -9,6 +9,7 @@ import java.util.AbstractList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.LongConsumer;
 
 public final class Leaf extends Node {
 
@@ -133,6 +134,12 @@ public final class Leaf extends Node {
 
     long key(int index) {
         return keys[index];
+    }
+
+    void forEachKey(LongConsumer action) {
+        for (int i = 0; i < size; i++) {
+            action.accept(keys[i]);
+        }
     }
 
     long[] impliedWords() {

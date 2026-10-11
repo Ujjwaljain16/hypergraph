@@ -317,7 +317,14 @@ class TreeTest {
             Ref.Inline inline = (Ref.Inline) read.members();
             assertTrue(Ref.same(new Ref.Inline(members), inline));
             assertEquals(members.summary(), inline.summary());
-            assertEquals(List.of(10L, 20L, 30L), new Tree<>(TopologySchemas.SET_MEMBERS, NodeSource.ephemeral(4096), inline).keys().boxed().toList());
+            Tree<Incidence> tree = new Tree<>(TopologySchemas.SET_MEMBERS, NodeSource.ephemeral(4096), inline);
+            assertEquals(List.of(10L, 20L, 30L), tree.keys().boxed().toList());
+            LongStream.Builder keys = LongStream.builder();
+            tree.forEachKey(keys::add);
+            assertArrayEquals(new long[]{10, 20, 30}, keys.build().toArray());
+            List<Long> visited = new ArrayList<>();
+            tree.forEachValue(incidence -> visited.add(incidence.member()));
+            assertEquals(List.of(10L, 20L, 30L), visited);
         }
     }
 

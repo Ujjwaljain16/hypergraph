@@ -219,10 +219,20 @@ public record Tree<V>(TreeSchema<V> schema, NodeSource source, Ref root) {
     }
 
     public void forEachKey(LongConsumer action) {
+        if (root instanceof Ref.Inline(Leaf leaf)) {
+            leaf.forEachKey(action);
+            return;
+        }
         cursor().forEachRemainingKey(action);
     }
 
     public void forEachValue(Consumer<? super V> action) {
+        if (root instanceof Ref.Inline(Leaf leaf)) {
+            for (int i = 0, size = leaf.size(); i < size; i++) {
+                action.accept(schema.cast(leaf.value(i)));
+            }
+            return;
+        }
         for (TreeCursor<V> cursor = cursor(); cursor.hasNext(); cursor.advance()) {
             action.accept(cursor.value());
         }
