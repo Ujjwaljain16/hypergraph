@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Stream;
@@ -23,12 +24,15 @@ public final class PageStore implements AutoCloseable {
     public record Scan(long[] dead, long orphans, long unplaced) {
     }
 
+    private static final long PASS_BYTES = 4L << 20;
+
     private final Path directory;
     private final int pageSize;
     private final int segmentUnits;
     private final Map<Integer, SegmentFile> files = new ConcurrentHashMap<>();
     private final ConcurrentSkipListMap<Integer, SegmentInfo> segments = new ConcurrentSkipListMap<>();
     private final Map<Integer, AtomicLong> live = new ConcurrentHashMap<>();
+    private final Map<Integer, AtomicInteger> unwritten = new ConcurrentHashMap<>();
     private final ReentrantLock allocation = new ReentrantLock();
     private final AtomicLong pagesWritten = new AtomicLong();
     private final AtomicLong bytesWritten = new AtomicLong();
@@ -136,27 +140,84 @@ public final class PageStore implements AutoCloseable {
             long address = claim(units);
             addresses.put(index, address);
             adjustLive(address, 1);
+            unwritten.computeIfAbsent(PageAddress.segmentOf(address), _ -> new AtomicInteger()).incrementAndGet();
             return PageId.pack(index, 0);
         } finally {
             allocation.unlock();
         }
     }
 
-    public long copy(long pageId) {
-        long from = locate(pageId);
-        MemorySegment image = read(pageId);
-        PageHeader.verify(image, pageId);
-        long to;
+    public boolean settled(int segment) {
+        AtomicInteger pending = unwritten.get(segment);
+        return pending == null || pending.get() == 0;
+    }
+
+    public long evacuate(int segment) {
+        SegmentFile file = files.get(segment);
+        MemorySegment view = file == null ? MemorySegment.NULL : file.view();
+        long units = view.byteSize() / PageId.UNIT_BYTES;
+        long[] moved = new long[96];
+        int count = 0;
+        long pass = 0;
+        long total = 0;
+        for (long unit = 0; unit < units; ) {
+            long position = unit * PageId.UNIT_BYTES;
+            long address = PageHeader.startsAt(view, position) ? addresses.get(PageId.indexOf(PageHeader.pageIdAt(view, position))) : PageAddress.NONE;
+            if (address == PageAddress.NONE || PageAddress.segmentOf(address) != segment || PageAddress.offsetOf(address) != unit) {
+                unit++;
+                continue;
+            }
+            long pageId = PageHeader.pageIdAt(view, position);
+            int pageUnits = PageAddress.unitsOf(address);
+            MemorySegment image = view.asSlice(position, Math.min((long) pageUnits * PageId.UNIT_BYTES, view.byteSize() - position));
+            MemorySegment bytes = image.asSlice(0, PageHeader.SIZE + PageHeader.verify(image, pageId).payloadLength());
+            long to;
+            allocation.lock();
+            try {
+                to = claim(pageUnits);
+            } finally {
+                allocation.unlock();
+            }
+            files.get(PageAddress.segmentOf(to)).write((long) PageAddress.offsetOf(to) * PageId.UNIT_BYTES, bytes);
+            pagesWritten.incrementAndGet();
+            bytesWritten.addAndGet(bytes.byteSize());
+            if (count + 3 > moved.length) {
+                moved = Arrays.copyOf(moved, moved.length * 2);
+            }
+            moved[count++] = pageId;
+            moved[count++] = address;
+            moved[count++] = to;
+            pass += bytes.byteSize();
+            total += bytes.byteSize();
+            if (pass >= PASS_BYTES) {
+                repoint(moved, count);
+                count = 0;
+                pass = 0;
+            }
+            unit += pageUnits;
+        }
+        repoint(moved, count);
+        return total;
+    }
+
+    private void repoint(long[] moved, int count) {
+        if (count == 0) {
+            return;
+        }
+        sync();
         allocation.lock();
         try {
-            to = claim(PageAddress.unitsOf(from));
+            for (int i = 0; i < count; i += 3) {
+                long index = PageId.indexOf(moved[i]);
+                if (addresses.get(index) == moved[i + 1]) {
+                    addresses.put(index, moved[i + 2]);
+                    adjustLive(moved[i + 1], -1);
+                    adjustLive(moved[i + 2], 1);
+                }
+            }
         } finally {
             allocation.unlock();
         }
-        files.get(PageAddress.segmentOf(to)).write((long) PageAddress.offsetOf(to) * PageId.UNIT_BYTES, image);
-        pagesWritten.incrementAndGet();
-        bytesWritten.addAndGet(image.byteSize());
-        return to;
     }
 
     private long claim(int units) {
@@ -204,6 +265,10 @@ public final class PageStore implements AutoCloseable {
             return SegmentFile.open(id, SegmentFile.pathFor(directory, id));
         });
         file.write((long) offset * PageId.UNIT_BYTES, image);
+        AtomicInteger pending = unwritten.get(segment);
+        if (pending != null) {
+            pending.updateAndGet(value -> Math.max(0, value - 1));
+        }
         long end = offset + (long) PageId.unitsFor(image.byteSize());
         segments.computeIfPresent(segment, (_, info) -> info.units() >= end ? info : info.withAllocation(info.pages() + 1, end));
         pagesWritten.incrementAndGet();
@@ -370,6 +435,7 @@ public final class PageStore implements AutoCloseable {
         }
         segments.remove(segment);
         live.remove(segment);
+        unwritten.remove(segment);
     }
 
     public long pagesWritten() {

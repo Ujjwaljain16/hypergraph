@@ -152,21 +152,24 @@ class CompactionTest {
     }
 
     @Test
-    void aBulkLoadStartedBeforeCompactionHasToRetry() {
-        try (StorageEngine engine = StorageEngine.open(directory, options())) {
+    void aBulkLoadStartedBeforeCompactionStillCommits() {
+        EngineOptions options = options().withCompactionLiveRatio(0.99);
+        List<Incidence> members = Stream.iterate(2_000_000L, i -> i + 7_919).limit(20_000).map(Incidence::of).toList();
+        long target;
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
             long edge = churn(engine);
-            long target = engine.write(txn -> txn.createEdge(EngineTest.EDGE, EdgeKind.SET));
-            List<Incidence> members = Stream.iterate(2_000_000L, i -> i + 1).limit(5_000).map(Incidence::of).toList();
+            target = engine.write(txn -> txn.createEdge(EngineTest.EDGE, EdgeKind.SET));
             Transaction early = engine.begin();
             early.load(target, members);
+            churn(engine);
             assertFalse(engine.compact().compacted().isEmpty());
-            assertThrows(HStoreException.Conflict.class, early::commit);
-            engine.write(txn -> {
-                txn.load(target, members);
-                return null;
-            });
-            assertEquals(5_000L, (long) engine.read(snapshot -> snapshot.requireEdge(target).size()));
+            early.commit();
+            assertEquals(members, engine.read(snapshot -> snapshot.requireEdge(target).stream().toList()));
             assertEquals(expected(), members(engine, edge));
+        }
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
+            assertEquals(members, engine.read(snapshot -> snapshot.requireEdge(target).stream().toList()));
+            engine.verifyReferences();
         }
     }
 

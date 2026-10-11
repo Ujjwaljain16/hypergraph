@@ -1,7 +1,5 @@
 package io.hstore.engine.tree;
 
-import java.util.function.LongPredicate;
-
 public final class TreeWalker {
 
     public static final int UNKNOWN_HEIGHT = -1;
@@ -15,18 +13,6 @@ public final class TreeWalker {
 
     public TreeWalker(NodeSource source) {
         this.source = source;
-    }
-
-    public void visit(Ref root, TreeSchema<?> schema, LongPredicate firstVisit) {
-        if (root instanceof Ref.Stored(long pageId, int _, Summary _)) {
-            visit(pageId, schema, UNKNOWN_HEIGHT, firstVisit);
-        }
-    }
-
-    private void visit(long pageId, TreeSchema<?> schema, int height, LongPredicate firstVisit) {
-        if (firstVisit.test(pageId)) {
-            references(pageId, schema, height, (child, childSchema, childHeight) -> visit(child, childSchema, childHeight, firstVisit));
-        }
     }
 
     public void references(long pageId, TreeSchema<?> schema, int height, Reference into) {

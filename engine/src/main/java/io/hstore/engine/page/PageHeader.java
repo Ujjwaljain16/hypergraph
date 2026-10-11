@@ -28,6 +28,7 @@ public record PageHeader(
     private static final int PAYLOAD_LENGTH_OFFSET = 24;
     private static final int CHECKSUM_OFFSET = 72;
     private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+    private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
 
     public boolean refersToPages() {
         return (flags & REFERS_TO_PAGES) != 0;
@@ -65,6 +66,14 @@ public record PageHeader(
 
     static int payloadLengthAt(MemorySegment file, long position) {
         return file.get(INT, position + PAYLOAD_LENGTH_OFFSET);
+    }
+
+    static boolean startsAt(MemorySegment file, long position) {
+        return position + SIZE <= file.byteSize() && file.get(INT, position) == MAGIC;
+    }
+
+    static long pageIdAt(MemorySegment file, long position) {
+        return file.get(LONG, position + PAGE_ID_OFFSET);
     }
 
     public static void seal(MemorySegment page, int payloadLength) {

@@ -86,6 +86,15 @@ final class SegmentFile implements AutoCloseable {
         return onHeap(view, position, length);
     }
 
+    MemorySegment view() {
+        try {
+            MemorySegment whole = covering(channel.size());
+            return whole == null ? MemorySegment.NULL : whole;
+        } catch (IOException e) {
+            throw HStoreException.io("cannot size segment " + path, e);
+        }
+    }
+
     long mappedBytes() {
         return mapped.byteSize();
     }

@@ -63,7 +63,7 @@ public final class StorageEngine implements AutoCloseable {
     private final ReentrantLock maintenance = new ReentrantLock();
     private final Thread maintainer;
     private final List<Runnable> checkpointListeners = new CopyOnWriteArrayList<>();
-    private long writtenAtCompaction;
+    private long writtenAtCheckpoint;
     private volatile boolean closed;
 
     private StorageEngine(Path directory, EngineOptions options, FileChannel lockChannel, FileLock lock) {
@@ -89,7 +89,7 @@ public final class StorageEngine implements AutoCloseable {
         this.transactions = new TransactionManager(storage, recovery.image().current(), recovery.image().history());
         this.checkpointer = new Checkpointer(transactions, pages, wal, feed, catalog, references, options.faults(), options.historyLimit(),
                 checkpoint.checkpointLsn());
-        this.compactor = new Compactor(transactions, pages, slots, checkpointer, options.faults());
+        this.compactor = new Compactor(transactions, pages, checkpointer, options.faults());
         this.dictionary = new Dictionary(transactions);
         checkpointer.checkpoint();
         compactor.reclaim();
@@ -262,6 +262,7 @@ public final class StorageEngine implements AutoCloseable {
     private Checkpointer.Result timedCheckpoint() {
         long started = System.nanoTime();
         Checkpointer.Result result = checkpointer.checkpoint();
+        writtenAtCheckpoint = pages.bytesWritten();
         LOG.log(System.Logger.Level.INFO, "checkpoint complete: generation {0}, lsn {1}, {2} wal segments retained, {3} ms",
                 result.generation(), result.lsn(), result.walSegments(), (System.nanoTime() - started) / 1_000_000);
         for (Runnable listener : checkpointListeners) {
@@ -279,6 +280,7 @@ public final class StorageEngine implements AutoCloseable {
         requireOpen();
         maintenance.lock();
         try {
+            timedCheckpoint();
             Compactor.Report report = compactor.compact(options.compactionLiveRatio());
             timedCheckpoint();
             List<Integer> reclaimed = compactor.reclaim();
@@ -313,11 +315,12 @@ public final class StorageEngine implements AutoCloseable {
                     continue;
                 }
                 try {
-                    if (checkpointer.walSinceCheckpoint() > options.checkpointWalBytes() || references.pending() > CHANGED_COUNTS_LIMIT) {
+                    if (checkpointer.walSinceCheckpoint() > options.checkpointWalBytes()
+                            || pages.bytesWritten() - writtenAtCheckpoint > options.checkpointWalBytes()
+                            || references.pending() > CHANGED_COUNTS_LIMIT) {
                         timedCheckpoint();
                     }
-                    if (pages.bytesWritten() - writtenAtCompaction > options.checkpointWalBytes()) {
-                        writtenAtCompaction = pages.bytesWritten();
+                    if (compactor.worthwhile(options.compactionLiveRatio())) {
                         Compactor.Report report = compactor.compact(options.compactionLiveRatio(), 1);
                         if (!report.compacted().isEmpty()) {
                             timedCheckpoint();

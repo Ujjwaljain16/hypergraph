@@ -82,7 +82,6 @@ public final class TransactionManager {
     private final LongAdder readOnly = new LongAdder();
     private final LongAdder pagesWritten = new LongAdder();
     private final LongAdder walBytes = new LongAdder();
-    private final AtomicLong compactions = new AtomicLong();
 
     public TransactionManager(Storage storage, Generation recovered, Collection<Generation> retained) {
         this.storage = storage;
@@ -211,10 +210,6 @@ public final class TransactionManager {
                     || Ref.same(txn.baseRoots().get(EngineSlots.REQUESTS), branch.roots().get(EngineSlots.REQUESTS));
             boolean serializable = txn.options().isolation() == Isolation.SERIALIZABLE;
             fast = branch.roots().sameAs(txn.baseRoots()) || (requestsStable && txn.workspace().untouchedSince(branch.roots(), serializable));
-            if (txn.compactionsAtStart() < compactions.get() && txn.carriesStoredRoots()) {
-                conflicts.increment();
-                throw HStoreException.conflict("bulk-loaded roots of transaction " + txn.id() + " predate a compaction");
-            }
             try {
                 if (fast) {
                     workspace = txn.workspace();
@@ -317,14 +312,6 @@ public final class TransactionManager {
 
     private static WalRecord meta(long txn, Branch branch) {
         return new WalRecord.BranchMeta(txn, branch.id(), branch.name(), branch.parent(), branch.baseGeneration(), branch.createdAt(), branch.state());
-    }
-
-    public void compacted() {
-        compactions.incrementAndGet();
-    }
-
-    long compactions() {
-        return compactions.get();
     }
 
     public <T> T exclusive(Supplier<T> action) {
