@@ -97,10 +97,23 @@ public sealed interface Ref {
     static boolean same(Ref a, Ref b) {
         return switch (a) {
             case Empty _ -> b instanceof Empty;
-            case Stored(long page, _, _) -> b instanceof Stored(long other, _, _) && page == other;
-            case Pending(Node node) -> b instanceof Pending(Node other) && node == other;
-            case Inline inline -> inline.equals(b);
+            case Stored(long page, _, _) -> b instanceof Stored(long other, _, _) ? page == other : b instanceof Pending(Node node) && sameWritten(node, a);
+            case Pending(Node node) -> b instanceof Pending(Node other)
+                    ? node == other || sameWritten(node, b) || sameSmallLeaf(node, other)
+                    : sameWritten(node, b) || b instanceof Inline(Leaf leaf) && sameSmallLeaf(node, leaf);
+            case Inline inline -> b instanceof Pending(Node other) ? sameWritten(other, a) || sameSmallLeaf(other, inline.leaf()) : inline.equals(b);
         };
+    }
+
+    private static boolean sameSmallLeaf(Node a, Node b) {
+        return a instanceof Leaf left && b instanceof Leaf right && fitsInline(left) && fitsInline(right) && left.sameEntries(right);
+    }
+
+    private static boolean sameWritten(Node node, Ref other) {
+        Ref written = node.published();
+        return written != null && !(written instanceof Pending) && (other instanceof Pending(Node that)
+                ? that.published() != null && same(written, that.published())
+                : same(written, other));
     }
 
     static boolean fitsInline(Leaf leaf) {

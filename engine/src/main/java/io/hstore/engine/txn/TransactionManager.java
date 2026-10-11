@@ -23,6 +23,7 @@ import io.hstore.engine.tree.Node;
 import io.hstore.engine.tree.PagedNodeSource;
 import io.hstore.engine.tree.Ref;
 import io.hstore.engine.tree.Tree;
+import io.hstore.engine.tree.Epoch;
 import io.hstore.engine.tree.TreeSchema;
 import io.hstore.engine.tree.WriteScope;
 import io.hstore.engine.wal.WalRecord;
@@ -31,17 +32,20 @@ import io.hstore.engine.wal.WriteAheadLog;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.LongConsumer;
@@ -54,7 +58,7 @@ public final class TransactionManager {
 
     public record Storage(PageStore pages, PagedNodeSource source, WriteAheadLog wal, ChangeFeed feed, FeedCodec feedCodec,
                           SlotRegistry slots, List<Derivation> derivations, Durability durability, WalMode walMode,
-                          CrashPoint.Injector faults, int historyLimit, ReferenceTracker references) {
+                          CrashPoint.Injector faults, int historyLimit, ReferenceTracker references, long writeBufferBytes) {
     }
 
     public record Statistics(long commits, long rebases, long conflicts, long readOnly, long pagesWritten, long walBytes,
@@ -68,6 +72,8 @@ public final class TransactionManager {
     }
 
     private static final long[] NO_PAGES = new long[0];
+    private static final long ROOM_WAIT_NANOS = 30_000_000_000L;
+    private static final long ROOM_POLL_NANOS = 50_000_000L;
 
     private final Storage storage;
     private final List<Derivation> derivations;
@@ -77,6 +83,14 @@ public final class TransactionManager {
     private final ConcurrentSkipListMap<Long, Generation> history = new ConcurrentSkipListMap<>();
     private final ConcurrentSkipListMap<Long, Integer> pins = new ConcurrentSkipListMap<>();
     private final ReentrantLock commitLock = new ReentrantLock();
+    private final ConcurrentSkipListMap<Long, Long> commitEnds = new ConcurrentSkipListMap<>();
+    private final AtomicLong unwritten = new AtomicLong();
+    private volatile Epoch published = publishedEpoch(new Epoch());
+    private final ReentrantLock roomLock = new ReentrantLock();
+    private final Condition room = roomLock.newCondition();
+    private volatile Runnable full = () -> {
+    };
+    private volatile boolean stopped;
     private final AtomicLong atoms;
     private final AtomicLong txns;
     private final LongAdder commits = new LongAdder();
@@ -96,6 +110,7 @@ public final class TransactionManager {
         this.txns = new AtomicLong(recovered.nextTxn());
         retained.forEach(generation -> history.put(generation.id(), generation));
         history.put(recovered.id(), recovered);
+        commitEnds.put(recovered.id(), storage.wal().end());
     }
 
     public PagedNodeSource source() {
@@ -196,6 +211,7 @@ public final class TransactionManager {
             readOnly.increment();
             return new CommitResult(txn.id(), txn.generation(), CommitResult.Outcome.READ_ONLY, 0, 0, 0, 0);
         }
+        awaitRoom();
         Appended appended;
         boolean fast;
         Workspace workspace;
@@ -228,7 +244,7 @@ public final class TransactionManager {
                     _ -> Optional.of(new RequestRecord(id, txn.id(), latest.id() + 1))));
             RootVector merged = fast ? workspace.rebasedOnto(branch.roots()) : workspace.roots();
             appended = append(latest, branch.withRoots(merged), txn.id(), workspace.memberChanges(), workspace.slotChanges(),
-                    List.of(), txn.options().maxPages() - txn.spilledPages(), txn.spilled());
+                    List.of(), txn.options().maxPages() - txn.spilledPages(), txn.spilled(), workspace.scope());
         } finally {
             commitLock.unlock();
         }
@@ -263,7 +279,7 @@ public final class TransactionManager {
             RootVector roots = workspace.roots();
             if (!roots.sameAs(branch.roots())) {
                 appended = Optional.of(append(latest, branch.withRoots(roots), txns.getAndIncrement(), workspace.memberChanges(),
-                        workspace.slotChanges(), List.of(), Long.MAX_VALUE, NO_PAGES));
+                        workspace.slotChanges(), List.of(), Long.MAX_VALUE, NO_PAGES, workspace.scope()));
             }
         } finally {
             commitLock.unlock();
@@ -286,7 +302,7 @@ public final class TransactionManager {
             int id = new TreeSet<>(latest.branches().keySet()).last() + 1;
             long txn = txns.getAndIncrement();
             created = new Branch(id, name, parentId, latest.id(), System.currentTimeMillis(), Branch.State.ACTIVE, parent.roots());
-            appended = append(latest, created, txn, List.of(), List.of(), List.of(meta(txn, created)), Long.MAX_VALUE, NO_PAGES);
+            appended = append(latest, created, txn, List.of(), List.of(), List.of(meta(txn, created)), Long.MAX_VALUE, NO_PAGES, null);
         } finally {
             commitLock.unlock();
         }
@@ -305,7 +321,7 @@ public final class TransactionManager {
             Generation latest = head.get();
             long txn = txns.getAndIncrement();
             Branch closed = latest.branch(id).withState(state).withRoots(RootVector.EMPTY);
-            appended = append(latest, closed, txn, List.of(), List.of(), List.of(meta(txn, closed)), Long.MAX_VALUE, NO_PAGES);
+            appended = append(latest, closed, txn, List.of(), List.of(), List.of(meta(txn, closed)), Long.MAX_VALUE, NO_PAGES, null);
         } finally {
             commitLock.unlock();
         }
@@ -328,6 +344,8 @@ public final class TransactionManager {
     }
 
     public void shutdown() {
+        stopped = true;
+        signalRoom();
         commitLock.lock();
         try {
             committer.close();
@@ -365,6 +383,10 @@ public final class TransactionManager {
     }
 
     private Materializer materializer(long epoch, long txnId, List<WalRecord> records, List<PageWrite> writes) {
+        return materializer(epoch, txnId, records, writes, null);
+    }
+
+    private Materializer materializer(long epoch, long txnId, List<WalRecord> records, List<PageWrite> writes, Epoch stamping) {
         return new Materializer(new Materializer.Sink() {
             @Override
             public long allocate(int length) {
@@ -379,35 +401,35 @@ public final class TransactionManager {
                 writes.add(new PageWrite(pageId, image));
                 storage.source().admit(pageId, frozen);
             }
-        }, epoch, storage.pages().pageSize());
+        }, epoch, storage.pages().pageSize(), stamping, stamping);
     }
 
     private Appended append(Generation latest, Branch changed, long txnId, List<MemberChange> members,
-                            List<SlotChange<?>> slotChanges, List<WalRecord> meta, long pageBudget, long[] spilled) {
-        long pendingPages = changed.roots().roots().entrySet().stream()
-                .mapToLong(entry -> Materializer.pendingNodes(entry.getValue(), storage.slots().slot(entry.getKey()).schema()))
-                .sum();
-        if (pendingPages > pageBudget) {
-            throw HStoreException.limit("transaction " + txnId + " would write " + pendingPages + " pages, over its quota");
+                            List<SlotChange<?>> slotChanges, List<WalRecord> meta, long pageBudget, long[] spilled, WriteScope scope) {
+        long unwrittenNodes = 0;
+        long unwrittenHeap = 0;
+        if (scope != null) {
+            for (Map.Entry<Integer, Ref> root : changed.roots().roots().entrySet()) {
+                Materializer.Unwritten unwritten = Materializer.unwritten(root.getValue(), storage.slots().slot(root.getKey()).schema(), scope);
+                unwrittenNodes += unwritten.nodes();
+                unwrittenHeap += unwritten.heapBytes();
+            }
+        }
+        if (unwrittenNodes > pageBudget) {
+            throw HStoreException.limit("transaction " + txnId + " would write " + unwrittenNodes + " pages, over its quota");
         }
         long generationId = latest.id() + 1;
         List<WalRecord> records = new ArrayList<>();
         List<PageWrite> writes = new ArrayList<>();
         records.add(new WalRecord.Begin(txnId, changed.id(), latest.id()));
-        Materializer materializer = materializer(generationId, txnId, records, writes);
-        RootVector stored = changed.roots().map((slot, ref) -> materializer.materialize(ref, storage.slots().slot(slot).schema()));
-        storage.faults().reach(CrashPoint.PAGE);
+        Materializer grafts = materializer(generationId, txnId, records, writes, published);
         Branch previous = latest.branches().get(changed.id());
         RootVector before = previous == null ? RootVector.EMPTY : previous.roots();
-        new TreeSet<>(Stream.concat(before.roots().keySet().stream(), stored.roots().keySet().stream()).toList()).forEach(slot -> {
-            if (!Ref.same(before.get(slot), stored.get(slot))) {
-                records.add(new WalRecord.Root(txnId, changed.id(), slot, stored.get(slot)));
-            }
-        });
         if (meta.isEmpty()) {
             records.add(new WalRecord.Changes(txnId, changed.id(), ChangeLog.encode(before, changed.roots(), storage.slots(), storage.source(),
-                    (pending, _) -> materializer.writtenAs(pending.node()))));
+                    grafts::materialize)));
         }
+        storage.faults().reach(CrashPoint.PAGE);
         records.addAll(meta);
         long wallTime = System.currentTimeMillis();
         CommitEvent event = new CommitEvent(generationId, txnId, wallTime, changed.id(), members, slotChanges);
@@ -419,32 +441,137 @@ public final class TransactionManager {
         storage.faults().reach(CrashPoint.WAL_APPEND);
         writes.forEach(write -> storage.pages().write(write.pageId(), write.image()));
         storage.faults().reach(CrashPoint.DATA_WRITE);
-        Generation next = latest.successor(txnId, wallTime, atoms.get(), txns.get(), changed.withRoots(stored));
+        Generation next = latest.successor(txnId, wallTime, atoms.get(), txns.get(), changed);
         storage.wal().append(new WalRecord.Commit(txnId, next.id(), wallTime, next.nextAtom(), next.nextTxn()));
         storage.faults().reach(CrashPoint.COMMIT_APPEND);
+        long end = storage.wal().end();
+        commitEnds.put(next.id(), end);
         head.set(next);
-        long written = storage.wal().end() - walStart;
-        pagesWritten.add(materializer.pagesWritten());
+        unwritten.addAndGet(unwrittenHeap);
+        long written = end - walStart;
+        pagesWritten.add(grafts.pagesWritten());
         walBytes.add(written);
+        long[] provisional = provisional(spilled, writes);
         GroupCommitter.Pending pending = new GroupCommitter.Pending(next, () -> {
             history.put(next.id(), next);
             current.set(next);
-            storage.references().committed(latest, next, spilled);
+            storage.references().provisional(next.id(), provisional);
             if (!event.isEmpty()) {
                 storage.feed().append(event);
             }
             trimHistory();
             storage.faults().reach(CrashPoint.CATALOG_PUBLISH);
-        });
+        }, provisional.length > 0);
         committer.submit(pending);
-        return new Appended(pending, materializer.pagesWritten(), written);
+        return new Appended(pending, grafts.pagesWritten(), written);
     }
 
-    private void makeDurable(int batchSize) {
+    private static long[] provisional(long[] spilled, List<PageWrite> writes) {
+        if (writes.isEmpty()) {
+            return spilled;
+        }
+        long[] pages = Arrays.copyOf(spilled, spilled.length + writes.size());
+        for (int i = 0; i < writes.size(); i++) {
+            pages[spilled.length + i] = writes.get(i).pageId();
+        }
+        return pages;
+    }
+
+    public void whenFull(Runnable action) {
+        full = action;
+    }
+
+    public long recountUnwritten() {
+        long bytes = head.get().branches().values().stream()
+                .flatMap(branch -> branch.roots().roots().values().stream())
+                .mapToLong(Materializer::unwrittenHeap)
+                .sum();
+        unwritten.set(bytes);
+        return bytes;
+    }
+
+    private void awaitRoom() {
+        if (unwritten.get() <= storage.writeBufferBytes() || recountUnwritten() <= storage.writeBufferBytes()) {
+            return;
+        }
+        full.run();
+        long deadline = System.nanoTime() + ROOM_WAIT_NANOS;
+        roomLock.lock();
+        try {
+            while (unwritten.get() > storage.writeBufferBytes() && !stopped) {
+                long left = deadline - System.nanoTime();
+                if (left <= 0) {
+                    LOG.log(System.Logger.Level.WARNING, "the write buffer stayed full for {0} s; committing anyway",
+                            ROOM_WAIT_NANOS / 1_000_000_000L);
+                    return;
+                }
+                room.awaitNanos(Math.min(left, ROOM_POLL_NANOS));
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            roomLock.unlock();
+        }
+    }
+
+    private void signalRoom() {
+        roomLock.lock();
+        try {
+            room.signalAll();
+        } finally {
+            roomLock.unlock();
+        }
+    }
+
+    public Epoch publishedEpoch() {
+        return published;
+    }
+
+    private static Epoch publishedEpoch(Epoch epoch) {
+        epoch.publish();
+        return epoch;
+    }
+
+    public long unwrittenBytes() {
+        return unwritten.get();
+    }
+
+    public long commitEnd(long generation) {
+        Long end = commitEnds.get(generation);
+        if (end == null) {
+            throw new IllegalStateException("the log end of generation " + generation + " is not known");
+        }
+        return end;
+    }
+
+    public void checkpointed(Generation materialized, Epoch epoch) {
+        epoch.publish();
+        published = epoch;
+        commitEnds.headMap(materialized.id(), false).clear();
+        exclusive(() -> {
+            rebind(epoch);
+            return null;
+        });
+        recountUnwritten();
+        signalRoom();
+    }
+
+    private void rebind(Epoch epoch) {
+        Generation latest = head.get();
+        Map<Integer, Branch> branches = new TreeMap<>();
+        latest.branches().forEach((id, branch) -> branches.put(id, branch.withRoots(branch.roots().map((slot, ref) ->
+                Materializer.rebound(ref, storage.slots().slot(slot).schema(), epoch)))));
+        Generation rebound = new Generation(latest.id(), latest.wallTime(), latest.txnId(), latest.nextAtom(), latest.nextTxn(), branches);
+        head.set(rebound);
+        current.set(rebound);
+        history.put(rebound.id(), rebound);
+    }
+
+    private void makeDurable(int batchSize, boolean wrotePages) {
         if (storage.durability() != Durability.SYNC) {
             return;
         }
-        if (storage.walMode() == WalMode.PAGE_REFERENCES) {
+        if (wrotePages && storage.walMode() == WalMode.PAGE_REFERENCES) {
             storage.pages().sync();
         }
         storage.faults().reach(CrashPoint.DATA_SYNC);

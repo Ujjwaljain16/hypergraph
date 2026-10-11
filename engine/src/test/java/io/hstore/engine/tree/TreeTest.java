@@ -341,7 +341,11 @@ class TreeTest {
         assertEquals(a.hashCode(), b.hashCode());
         assertFalse(Ref.same(a, c));
         assertFalse(Ref.same(a, d));
-        assertFalse(Ref.same(a, new Ref.Pending(memberLeaf(1, 2, 3))));
+        assertTrue(Ref.same(a, new Ref.Pending(memberLeaf(1, 2, 3))));
+        assertTrue(Ref.same(new Ref.Pending(memberLeaf(1, 2, 3)), a));
+        assertTrue(Ref.same(new Ref.Pending(memberLeaf(1, 2, 3)), new Ref.Pending(memberLeaf(1, 2, 3))));
+        assertFalse(Ref.same(a, new Ref.Pending(memberLeaf(1, 2, 4))));
+        assertFalse(Ref.same(new Ref.Pending(memberLeaf(1, 2, 3)), new Ref.Pending(memberLeaf(1, 2, 4))));
         assertFalse(Ref.same(a, Ref.EMPTY));
     }
 

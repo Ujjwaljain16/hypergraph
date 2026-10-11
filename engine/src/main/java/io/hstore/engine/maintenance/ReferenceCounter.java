@@ -24,12 +24,15 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
+import java.util.stream.LongStream;
 
 import static io.hstore.engine.tree.TreeWalker.UNKNOWN_HEIGHT;
 
@@ -41,21 +44,21 @@ public final class ReferenceCounter implements ReferenceTracker, AutoCloseable {
     private sealed interface Change {
     }
 
-    private record Committed(Generation before, Generation after, long[] spilled) implements Change {
+    private record Discarded(long[] spilled) implements Change {
     }
 
-    private record Discarded(long[] spilled) implements Change {
+    private record Provisional(long generation, long[] pages) {
     }
 
     private static final System.Logger LOG = System.getLogger("hstore.references");
     private static final int QUEUE_LIMIT = 4096;
-    private static final long[] NO_PAGES = new long[0];
 
     private final PageStore pages;
     private final ReferenceCounts counts;
     private final TreeWalker walker;
     private final SlotRegistry slots;
     private final LinkedBlockingQueue<Change> queue = new LinkedBlockingQueue<>(QUEUE_LIMIT);
+    private final ConcurrentLinkedQueue<Provisional> provisional = new ConcurrentLinkedQueue<>();
     private final Semaphore ready = new Semaphore(0);
     private final ReentrantLock processing = new ReentrantLock();
     private final LongLongMap deltas = new LongLongMap(1 << 10);
@@ -79,34 +82,24 @@ public final class ReferenceCounter implements ReferenceTracker, AutoCloseable {
     }
 
     public static ReferenceCounter recover(PageStore pages, PagedNodeSource source, SlotRegistry slots, Generation checkpointed,
-                                           List<Generation> replayed, Collection<Generation> retained, Generation current) {
-        ReferenceCounter counter = new ReferenceCounter(pages, source, slots, current.id());
-        counter.catchUp(checkpointed, replayed, retained, current);
+                                           Collection<Generation> retained, long head) {
+        ReferenceCounter counter = new ReferenceCounter(pages, source, slots, checkpointed.id());
+        counter.catchUp(checkpointed, retained, head);
         return counter;
     }
 
-    private void catchUp(Generation checkpointed, List<Generation> replayed, Collection<Generation> retained, Generation current) {
-        if (counts.trusted()) {
-            try {
-                Generation before = checkpointed;
-                for (Generation after : replayed) {
-                    account(before, after, NO_PAGES);
-                    before = after;
-                }
-            } catch (RuntimeException failure) {
-                LOG.log(System.Logger.Level.WARNING, "reference counts could not follow the log, rebuilding them", failure);
-                counts.distrust();
-            }
-        }
+    private void catchUp(Generation checkpointed, Collection<Generation> retained, long head) {
         if (!counts.trusted()) {
             long started = System.nanoTime();
-            rebuild(retained, current);
+            rebuild(retained, checkpointed);
             LOG.log(System.Logger.Level.INFO, "rebuilt reference counts in {0} ms", (System.nanoTime() - started) / 1_000_000);
         }
-        PageStore.Scan scan = pages.scan(true);
+        PageStore.Scan scan = pages.scan();
         limbo.restore(scan.dead());
-        if (scan.orphans() > 0) {
-            LOG.log(System.Logger.Level.INFO, "released {0} pages that no committed generation refers to", scan.orphans());
+        if (scan.unreferenced().length > 0) {
+            provisional.add(new Provisional(head, scan.unreferenced()));
+            LOG.log(System.Logger.Level.INFO, "{0} pages are not counted yet; the first checkpoint counts them or releases them",
+                    scan.unreferenced().length);
         }
         if (scan.unplaced() > 0) {
             LOG.log(System.Logger.Level.WARNING, "{0} referenced pages have no address", scan.unplaced());
@@ -118,8 +111,42 @@ public final class ReferenceCounter implements ReferenceTracker, AutoCloseable {
     }
 
     @Override
-    public void committed(Generation before, Generation after, long[] spilled) {
-        enqueue(new Committed(before, after, spilled));
+    public void provisional(long generation, long[] pages) {
+        if (pages.length > 0) {
+            provisional.add(new Provisional(generation, pages));
+        }
+    }
+
+    public void checkpointed(Generation before, Generation after) {
+        if (!processing.isHeldByCurrentThread()) {
+            throw new IllegalStateException("reference counts change at a checkpoint only while counting is paused");
+        }
+        if (broken != null) {
+            return;
+        }
+        try {
+            account(before, after, provisionalThrough(after.id()));
+        } catch (RuntimeException | Error failure) {
+            broken = failure;
+            LOG.log(System.Logger.Level.ERROR, "reference counting stopped; the counts will be rebuilt when the database next opens", failure);
+            counts.distrust();
+        }
+    }
+
+    private long[] provisionalThrough(long generation) {
+        LongStream.Builder pages = LongStream.builder();
+        for (Iterator<Provisional> entries = provisional.iterator(); entries.hasNext(); ) {
+            Provisional entry = entries.next();
+            if (entry.generation() <= generation) {
+                Arrays.stream(entry.pages()).forEach(pages::add);
+                entries.remove();
+            }
+        }
+        return pages.build().toArray();
+    }
+
+    public boolean isProvisional(long pageId) {
+        return provisional.stream().anyMatch(entry -> Arrays.stream(entry.pages()).anyMatch(page -> page == pageId));
     }
 
     @Override
@@ -170,7 +197,6 @@ public final class ReferenceCounter implements ReferenceTracker, AutoCloseable {
             }
             try {
                 switch (change) {
-                    case Committed(Generation before, Generation after, long[] spilled) -> account(before, after, spilled);
                     case Discarded(long[] spilled) -> orphaned(spilled, generation);
                 }
             } catch (RuntimeException | Error failure) {
@@ -432,7 +458,7 @@ public final class ReferenceCounter implements ReferenceTracker, AutoCloseable {
                     return;
                 }
                 long entry = counts.entry(index);
-                if (entry == 0) {
+                if (entry == 0 && !isProvisional(pageId)) {
                     problems.add("page #" + index + " is still readable from generation " + reader[0] + " but is not counted");
                 } else if (ReferenceCounts.dead(entry) && ReferenceCounts.deadAt(entry) <= reader[0]) {
                     problems.add("page #" + index + " is readable from generation " + reader[0] + " but counted " + describe(entry));
@@ -444,7 +470,8 @@ public final class ReferenceCounter implements ReferenceTracker, AutoCloseable {
             };
             for (Generation generation : retained.stream().sorted(Comparator.comparingLong(Generation::id)).toList()) {
                 reader[0] = generation.id();
-                forEachRoot(generation, readable);
+                generation.branches().values().forEach(branch -> branch.roots().roots().forEach((slot, ref) ->
+                        TreeWalker.forEachStored(ref, slots.slot(slot).schema(), readable)));
                 while (!pending.isEmpty()) {
                     pending.pop();
                     walker.references(pending.page, pending.schema, pending.height, readable);

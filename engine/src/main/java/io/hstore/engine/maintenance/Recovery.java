@@ -8,11 +8,15 @@ import io.hstore.engine.catalog.CatalogImage;
 import io.hstore.engine.catalog.CatalogStore;
 import io.hstore.engine.catalog.Generation;
 import io.hstore.engine.catalog.RootVector;
+import io.hstore.engine.catalog.SlotRegistry;
 import io.hstore.engine.feed.ChangeFeed;
 import io.hstore.engine.feed.FeedCodec;
 import io.hstore.engine.page.Checksums;
 import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageStore;
+import io.hstore.engine.tree.NodeSource;
+import io.hstore.engine.tree.WriteScope;
+import io.hstore.engine.txn.ChangeLog;
 import io.hstore.engine.wal.WalRecord;
 import io.hstore.engine.wal.WriteAheadLog;
 
@@ -42,7 +46,8 @@ public final class Recovery {
         return catalog.loadLatest().orElseGet(CatalogImage::initial);
     }
 
-    public static Outcome recover(CatalogImage checkpoint, WriteAheadLog wal, PageStore pages, ChangeFeed feed, FeedCodec codec) {
+    public static Outcome recover(CatalogImage checkpoint, WriteAheadLog wal, PageStore pages, ChangeFeed feed, FeedCodec codec,
+                                  SlotRegistry slots, NodeSource source) {
         Map<Long, List<WalRecord>> pending = new HashMap<>();
         List<WalRecord.Commit> commits = new ArrayList<>();
         wal.read(checkpoint.checkpointLsn()).forEach(positioned -> {
@@ -73,7 +78,7 @@ public final class Recovery {
                 discarded++;
                 continue;
             }
-            generation = redo(generation, commit, body, pages, feed, codec);
+            generation = redo(generation, commit, body, pages, feed, codec, slots, source);
             history.add(generation);
             replayed.add(generation);
         }
@@ -113,7 +118,7 @@ public final class Recovery {
     }
 
     private static Generation redo(Generation base, WalRecord.Commit commit, List<WalRecord> records,
-                                   PageStore pages, ChangeFeed feed, FeedCodec codec) {
+                                   PageStore pages, ChangeFeed feed, FeedCodec codec, SlotRegistry slots, NodeSource source) {
         Map<Integer, Branch> branches = new TreeMap<>(base.branches());
         List<WalRecord> metaFirst = Stream.concat(records.stream().filter(WalRecord.BranchMeta.class::isInstance),
                 records.stream().filter(record -> !(record instanceof WalRecord.BranchMeta))).toList();
@@ -121,15 +126,22 @@ public final class Recovery {
             switch (record) {
                 case WalRecord.Page(long _, long pageId, long _, byte[] image) -> pages.write(pageId, MemorySegment.ofArray(image));
                 case WalRecord.BranchMeta(long _, int id, String name, int parent, long baseGeneration, long created, Branch.State state) -> {
-                    RootVector roots = branches.containsKey(id) ? branches.get(id).roots() : RootVector.EMPTY;
+                    RootVector roots = state != Branch.State.ACTIVE ? RootVector.EMPTY
+                            : branches.containsKey(id) ? branches.get(id).roots() : branches.get(parent).roots();
                     branches.put(id, new Branch(id, name, parent, baseGeneration, created, state, roots));
+                }
+                case WalRecord.Changes(long _, int branch, byte[] payload) -> {
+                    Branch target = branches.get(branch);
+                    WriteScope scope = new WriteScope();
+                    branches.put(branch, target.withRoots(ChangeLog.apply(target.roots(), payload, slots, source, scope)));
+                    scope.freeze();
                 }
                 case WalRecord.Root(long _, int branch, int slot, var root) -> {
                     Branch target = branches.get(branch);
                     branches.put(branch, target.withRoots(target.roots().with(slot, root)));
                 }
                 case WalRecord.Feed(long _, byte[] payload) -> feed.append(codec.decode(payload));
-                case WalRecord.Begin _, WalRecord.PageRef _, WalRecord.Changes _, WalRecord.Commit _, WalRecord.Abort _, WalRecord.Checkpoint _ -> {
+                case WalRecord.Begin _, WalRecord.PageRef _, WalRecord.Commit _, WalRecord.Abort _, WalRecord.Checkpoint _ -> {
                 }
             }
         }
