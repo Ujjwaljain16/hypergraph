@@ -68,6 +68,7 @@ class CrashRecoveryTest {
         engine.halt();
 
         try (StorageEngine recovered = StorageEngine.open(directory, EngineTest.small().withWalMode(mode))) {
+            recovered.verifyReferences();
             recovered.read(snapshot -> {
                 long size = snapshot.requireEdge(edge).size();
                 boolean committed = point.ordinal() >= CrashPoint.COMMIT_APPEND.ordinal();

@@ -61,6 +61,7 @@ class CompactionTest {
         try (StorageEngine engine = StorageEngine.open(directory, options())) {
             assertTrue(engine.liveness().keySet().stream().allMatch(segmentIds(engine)::contains));
             assertEquals(expected(), members(engine, onlyEdge(engine)));
+            engine.verifyReferences();
         }
     }
 
@@ -110,6 +111,7 @@ class CompactionTest {
         }
         try (StorageEngine engine = StorageEngine.open(directory, options())) {
             assertEquals(expected(), members(engine, onlyEdge(engine)));
+            engine.verifyReferences();
         }
     }
 
@@ -148,6 +150,7 @@ class CompactionTest {
         }
         try (StorageEngine engine = StorageEngine.open(directory, options())) {
             assertEquals(all, members(engine, onlyEdge(engine)));
+            engine.verifyReferences();
         }
     }
 
@@ -202,11 +205,13 @@ class CompactionTest {
         }
         try (StorageEngine recovered = StorageEngine.open(directory, options())) {
             assertEquals(expected(), members(recovered, edge));
+            recovered.verifyReferences();
             recovered.compact();
             assertEquals(expected(), members(recovered, edge));
         }
         try (StorageEngine reopened = StorageEngine.open(directory, options())) {
             assertEquals(expected(), members(reopened, edge));
+            reopened.verifyReferences();
         }
     }
 

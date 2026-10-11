@@ -16,6 +16,7 @@ import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -119,6 +120,62 @@ class PageStoreTest {
             long pageId = store.allocate(100);
             assertThrows(IllegalArgumentException.class, () -> store.write(pageId, MemorySegment.ofArray(image(new Random(1), 200))));
         }
+    }
+
+    @Test
+    void aSegmentIsNotSettledWhileAPageAllocatedInItIsUnwritten() {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+            long pending = store.allocate(PAGE_SIZE);
+            int segment = store.segmentOf(pending);
+            fillPastOneSegment(store);
+            assertFalse(store.settled(segment));
+            store.write(pending, MemorySegment.ofArray(image(new Random(3), PAGE_SIZE)));
+            assertTrue(store.settled(segment));
+        }
+    }
+
+    @Test
+    void evacuatingASegmentMovesOnlyThePagesTheDirectoryStillPointsAt() {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+            Map<Long, byte[]> kept = new LinkedHashMap<>();
+            List<Long> released = new ArrayList<>();
+            int segment = store.activeSegment() == 0 ? 1 : store.activeSegment();
+            Random random = new Random(9);
+            while (store.activeSegment() <= segment) {
+                int length = PageHeader.SIZE + random.nextInt(PAGE_SIZE - PageHeader.SIZE + 1);
+                long pageId = store.allocate(length);
+                byte[] image = page(random, pageId, length);
+                store.write(pageId, MemorySegment.ofArray(image));
+                if (store.segmentOf(pageId) != segment) {
+                    kept.put(pageId, image);
+                } else if (random.nextInt(3) == 0) {
+                    store.release(pageId);
+                    released.add(pageId);
+                } else {
+                    kept.put(pageId, image);
+                }
+            }
+            store.journal(1);
+            store.applyJournal();
+            long before = store.liveBytes().get(segment);
+            long moved = store.evacuate(segment);
+            assertTrue(moved > 0 && moved <= before, "moved " + moved + " of " + before);
+            assertEquals(null, store.liveBytes().get(segment));
+            kept.forEach((pageId, image) -> {
+                assertNotEquals(segment, store.segmentOf(pageId));
+                assertArrayEquals(image, bytes(store.read(pageId)));
+            });
+            released.forEach(pageId -> assertEquals(PageAddress.NONE, store.addressOrNone(pageId)));
+            assertFalse(released.isEmpty());
+        }
+    }
+
+    private static byte[] page(Random random, long pageId, int length) {
+        byte[] image = new byte[length];
+        random.nextBytes(image);
+        new PageHeader(PageType.LEAF, 1, 0, pageId, 1, length - PageHeader.SIZE, 0, 0, 0, 0, 0, 0).writeTo(ByteCursor.wrap(image));
+        PageHeader.assign(MemorySegment.ofArray(image), pageId);
+        return image;
     }
 
     private static long write(PageStore store, int length) {
