@@ -137,6 +137,34 @@ class DatabaseTest {
     }
 
     @Test
+    void incidentEdgeVisitorsSeeTheSameEdgesAsTheIncidenceStream() {
+        long[] people = database.write(writer -> {
+            long hub = writer.node("Person", "hub", Map.of("name", "Hub"));
+            long alice = writer.node("Person", "alice", Map.of("name", "Alice"));
+            long loner = writer.node("Person", "loner", Map.of("name", "Loner"));
+            for (int i = 0; i < 120; i++) {
+                long edge = writer.edge("Coauthorship", Map.of("year", 2000 + i));
+                writer.add(edge, hub, MemberSpec.roles("author"));
+                if (i % 40 == 0) {
+                    writer.add(edge, alice, MemberSpec.roles("lead"));
+                }
+            }
+            return new long[]{hub, alice, loner};
+        });
+        database.read(reader -> {
+            for (long person : people) {
+                LongStream.Builder visited = LongStream.builder();
+                reader.forEachIncidentEdge(person, visited::add);
+                assertEquals(reader.incident(person).map(Incident::edge).toList(), visited.build().boxed().toList());
+            }
+            LongStream.Builder hub = LongStream.builder();
+            reader.forEachIncidentEdge(people[0], hub::add);
+            assertEquals(120, hub.build().count());
+            return null;
+        });
+    }
+
+    @Test
     void documentsAndJsonPathIndexes() {
         database.write(writer -> {
             long paper = writer.node("Paper", "hypergraphs", Map.of("title", "Hypergraphs"));

@@ -237,6 +237,12 @@ public sealed class Reader permits Writer {
         return view.incident(atom).map(incident -> new Incident(incident.edge(), roles(incident.roleSet()), incident.locator()));
     }
 
+    public void forEachIncidentEdge(long atom, LongConsumer action) {
+        if (onlyDefaultTenant() || visible(atom)) {
+            view.forEachIncidentEdge(atom, action);
+        }
+    }
+
     public long position(Incident incident) {
         return view.atom(incident.edge())
                 .filter(record -> record instanceof AtomRecord.EdgeRecord edge && edge.kind() == EdgeKind.ORDERED)

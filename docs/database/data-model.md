@@ -469,5 +469,6 @@ Optional.empty
 | `memberIds(edge)` | member ids only, as a `LongStream` in membership order, without building `Member` records |
 | `forEachMemberId(edge, action)` | the same ids handed to a `LongConsumer`, with nothing allocated per member |
 | `cardinality`, `degree`, `incident`, `position` | topology statistics and reverse lookup |
+| `forEachIncidentEdge(atom, action)` | the ids of the hyperedges containing an atom, handed to a `LongConsumer` without building `Incident` records |
 | `lookup`, `range` | property and JSON index access with exact re-check |
 | `similar(text, k, consistency)`, `similar(model, vector, k, consistency)`, `embedding` | [semantic](semantic.md) |

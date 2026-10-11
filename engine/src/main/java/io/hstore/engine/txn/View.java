@@ -18,6 +18,7 @@ import io.hstore.engine.tree.Tree;
 
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.function.LongConsumer;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
@@ -88,6 +89,10 @@ public abstract sealed class View permits Snapshot, Transaction {
 
     public Stream<IncidentEdge> incident(long atom) {
         return Views.incident(lazyTree(EngineSlots.REVERSE), atom);
+    }
+
+    public void forEachIncidentEdge(long atom, LongConsumer action) {
+        EngineSlots.REVERSE_INDEX.forEachPosting(lazyTree(EngineSlots.REVERSE), atom, action);
     }
 
     public Tree<?> incidentTree(long atom) {
