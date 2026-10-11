@@ -244,10 +244,14 @@ If the image ends past the map, the file may need mapping again:
 * The active segment is remapped only after the file has grown 4 MiB past the map. Until then, reads near the end
   of the file use `pread`. This keeps a segment that is still filling up from being remapped on every new page.
 
-Maps are created in `Arena.ofAuto()` and are unmapped once nothing references them, so a thread that is copying a
-page when compaction deletes its segment still finishes the copy. `Arena.ofShared()` is not used, because closing
-one in a Native Image build needs the experimental `-H:+SharedArenaSupport`. Segment files are only ever appended to
-or deleted, never truncated, so a map can't end up pointing past the end of its file.
+Each map has its own `Arena.ofShared()`. When a segment is remapped, the old map is closed as soon as the new one is
+in place, and deleting or closing a segment closes its map. A deleted segment's disk space therefore comes back
+straight away instead of whenever the garbage collector gets to the map. A read that was copying from a map when it
+was closed gets an `IllegalStateException`, sees that the map is no longer alive, and reads again from the current
+one. Readers only touch a map for the length of one copy, and compaction only deletes segments that no reader can
+reach, so this retry is rare. Closing a shared arena in a Native Image build needs `-H:+SharedArenaSupport`, which
+GraalVM still lists as experimental; the `native` profile in `server/pom.xml` turns it on. Segment files are only
+ever appended to or deleted, never truncated, so a map can't end up pointing past the end of its file.
 
 `pread` doesn't know how long an image is until it has the header, so it takes one or two system calls:
 
