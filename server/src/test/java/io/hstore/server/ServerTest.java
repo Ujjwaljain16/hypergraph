@@ -124,6 +124,10 @@ class ServerTest {
             failures.add(assertThrows(IllegalArgumentException.class,
                     () -> ServerConfig.load(Optional.empty(), Map.of(), Map.of(old.replace('_', '-'), "4096"))));
         }
+        for (String outOfRange : List.of("0", "-1", "99999999999999")) {
+            failures.add(assertThrows(IllegalArgumentException.class,
+                    () -> ServerConfig.load(Optional.empty(), Map.of("HSTORE_NODE_CACHE_MB", outOfRange), Map.of()).engineOptions()));
+        }
         failures.forEach(failure -> assertTrue(failure.getMessage().contains("node_cache_mb"), failure.getMessage()));
     }
 

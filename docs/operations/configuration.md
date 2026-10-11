@@ -152,7 +152,7 @@ bigger cache means longer pauses. Size it for what every lookup touches: the int
 plus the leaves you read all the time. The Dashboard *Cache hit rate* tile and `STATS;` show whether it is big
 enough.
 
-Two older names are refused at startup, whether they come from `hstore.conf`, the environment or a flag:
+The value must be between 1 and 16,777,216 (16 TiB). Two older names are refused at startup, whether they come from `hstore.conf`, the environment or a flag:
 `cache_mb`, the name this setting had before it was released, and `cache_nodes`, a node count. Both messages name
 `node_cache_mb`.
 
