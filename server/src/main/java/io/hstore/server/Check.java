@@ -6,6 +6,7 @@ import io.hstore.engine.catalog.Generation;
 import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.maintenance.ReferenceCounter;
 import io.hstore.engine.tree.TreeVerifier;
+import io.hstore.engine.txn.Snapshot;
 
 import java.util.Map;
 
@@ -15,8 +16,13 @@ final class Check {
     }
 
     static String run(StorageEngine engine) {
+        try (Snapshot pinned = engine.snapshot()) {
+            return run(engine, pinned.catalog());
+        }
+    }
+
+    private static String run(StorageEngine engine, Generation generation) {
         StringBuilder report = new StringBuilder();
-        Generation generation = engine.transactions().current();
         TreeVerifier verifier = new TreeVerifier(engine.source());
         report.append("generation ").append(generation.id()).append(", recovered ")
                 .append(engine.recovery().replayedCommits()).append(" commits from the log\n");
