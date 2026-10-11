@@ -51,8 +51,22 @@ class PageDirectoryTest {
     @Test
     void aFileInAnotherFormatIsRefused() throws Exception {
         Path file = directory.resolve(PageDirectory.FILE);
-        Files.write(file, new byte[64]);
+        byte[] header = new byte[64];
+        header[0] = 0x2A;
+        Files.write(file, header);
         assertThrows(HStoreException.InvalidSchema.class, () -> PageDirectory.open(file));
+    }
+
+    @Test
+    void aFileWhoseHeaderNeverReachedTheDiskStartsOver() throws Exception {
+        Path file = directory.resolve(PageDirectory.FILE);
+        Files.write(file, new byte[1 << 20]);
+        try (PageDirectory pages = PageDirectory.open(file)) {
+            assertEquals(1, pages.allocate());
+        }
+        try (PageDirectory pages = PageDirectory.open(file)) {
+            assertEquals(2, pages.allocate());
+        }
     }
 
     private static long address(long index) {
