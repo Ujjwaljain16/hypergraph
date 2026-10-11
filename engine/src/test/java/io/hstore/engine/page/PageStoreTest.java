@@ -11,6 +11,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -85,6 +89,43 @@ class PageStoreTest {
             long later = write(store, PAGE_SIZE);
             store.read(later);
             assertTrue(store.mappedBytes(PageId.segmentOf(later)) > 4L << 20);
+        }
+    }
+
+    @Test
+    void readersKeepSeeingWholePagesWhileOldMapsAreClosed() throws Exception {
+        int pages = 6_000;
+        long[] ids = new long[pages];
+        byte[][] images = new byte[pages][];
+        AtomicInteger written = new AtomicInteger();
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of());
+             ExecutorService readers = Executors.newFixedThreadPool(4)) {
+            List<Future<Long>> checks = new ArrayList<>();
+            for (int t = 0; t < 4; t++) {
+                Random random = new Random(t);
+                checks.add(readers.submit(() -> {
+                    long reads = 0;
+                    while (written.get() < pages) {
+                        int known = written.get();
+                        if (known > 0) {
+                            int i = random.nextInt(known);
+                            assertArrayEquals(images[i], bytes(store.read(ids[i])), "page " + i);
+                            reads++;
+                        }
+                    }
+                    return reads;
+                }));
+            }
+            Random random = new Random(11);
+            for (int i = 0; i < pages; i++) {
+                images[i] = image(random, PAGE_SIZE - random.nextInt(64));
+                ids[i] = store.allocate(1, images[i].length);
+                store.write(ids[i], MemorySegment.ofArray(images[i]));
+                written.incrementAndGet();
+            }
+            for (Future<Long> check : checks) {
+                assertTrue(check.get() > 0);
+            }
         }
     }
 
