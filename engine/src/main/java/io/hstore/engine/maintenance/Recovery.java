@@ -61,6 +61,7 @@ public final class Recovery {
         });
         Generation generation = checkpoint.current();
         List<Generation> history = new ArrayList<>(checkpoint.history());
+        history.add(generation);
         List<Generation> replayed = new ArrayList<>();
         int discarded = 0;
         for (WalRecord.Commit commit : commits) {

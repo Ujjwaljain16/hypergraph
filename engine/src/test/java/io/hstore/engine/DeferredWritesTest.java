@@ -8,6 +8,7 @@ import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.tree.Ref;
 import io.hstore.engine.txn.CommitResult;
 import io.hstore.engine.txn.CrashPoint;
+import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.Transaction;
 import io.hstore.engine.txn.View;
 
@@ -65,6 +66,37 @@ class DeferredWritesTest {
             long only = engine.read(DeferredWritesTest::onlyEdge);
             assertEquals(300L, (long) engine.read(snapshot -> snapshot.cardinality(only)));
             engine.verifyReferences();
+        }
+    }
+
+    @Test
+    void aRestartKeepsTheCheckpointedGenerationAndTheReplayedOnes() {
+        long edge;
+        long checkpointed;
+        long replayed;
+        StorageEngine engine = StorageEngine.open(directory, options());
+        edge = engine.write(txn -> txn.createEdge(EngineTest.EDGE, EdgeKind.SET));
+        engine.write(txn -> {
+            txn.insert(edge, 1);
+            return null;
+        });
+        checkpointed = engine.checkpoint().generation();
+        engine.write(txn -> {
+            txn.insert(edge, 2);
+            return null;
+        });
+        replayed = engine.stats().generation();
+        engine.write(txn -> {
+            txn.insert(edge, 3);
+            return null;
+        });
+        engine.halt();
+        try (StorageEngine reopened = StorageEngine.open(directory, options());
+             Snapshot atCheckpoint = reopened.snapshotAt(checkpointed, 0);
+             Snapshot atReplayed = reopened.snapshotAt(replayed, 0)) {
+            assertEquals(List.of(1L), atCheckpoint.requireEdge(edge).memberIds().boxed().toList());
+            assertEquals(List.of(1L, 2L), atReplayed.requireEdge(edge).memberIds().boxed().toList());
+            assertEquals(3L, (long) reopened.read(snapshot -> snapshot.cardinality(edge)));
         }
     }
 
