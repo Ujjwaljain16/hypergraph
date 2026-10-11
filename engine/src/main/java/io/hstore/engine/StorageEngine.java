@@ -109,7 +109,12 @@ public final class StorageEngine implements AutoCloseable {
                 channel.close();
                 throw HStoreException.invalid("database " + directory + " is opened by another process");
             }
-            return new StorageEngine(directory, options, channel, lock);
+            try {
+                return new StorageEngine(directory, options, channel, lock);
+            } catch (RuntimeException | Error failure) {
+                channel.close();
+                throw failure;
+            }
         } catch (IOException e) {
             throw new UncheckedIOException("cannot open database at " + directory, e);
         }
