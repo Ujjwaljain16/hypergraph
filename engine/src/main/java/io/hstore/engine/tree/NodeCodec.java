@@ -9,6 +9,7 @@ import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageType;
 
 import java.lang.foreign.MemorySegment;
+import java.util.Arrays;
 import java.util.List;
 
 public final class NodeCodec {
@@ -36,7 +37,8 @@ public final class NodeCodec {
         }
         int payloadLength = Math.toIntExact(out.position() - PageHeader.SIZE);
         PageType type = node instanceof Leaf ? PageType.LEAF : PageType.INTERNAL;
-        new PageHeader(type, node.schema.id(), 0, pageId, epoch, payloadLength, node.size(), summary.count(),
+        int flags = node instanceof Leaf leaf && refersToPages(leaf) ? PageHeader.REFERS_TO_PAGES : 0;
+        new PageHeader(type, node.schema.id(), flags, pageId, epoch, payloadLength, node.size(), summary.count(),
                 summary.min(), summary.max(), node.height(), summary.fingerprint()).writeTo(out);
         MemorySegment image = out.segment().asSlice(0, PageHeader.SIZE + payloadLength);
         PageHeader.seal(image, payloadLength);
@@ -58,6 +60,19 @@ public final class NodeCodec {
         schema.codec().encode(out, keys, values);
     }
 
+    private static boolean refersToPages(Leaf leaf) {
+        return leaf.schema.codec().holdsRefs() && refersToPages(leaf.schema, leaf.valueList());
+    }
+
+    private static <V> boolean refersToPages(TreeSchema<V> schema, List<?> values) {
+        for (Object value : values) {
+            if (schema.codec().refersToPages(schema.cast(value))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static void encodeBranch(ByteCursor out, Branch branch) {
         long[] separators = branch.separatorArray();
         Ref[] children = branch.childArray();
@@ -71,7 +86,10 @@ public final class NodeCodec {
     }
 
     public static Node decode(MemorySegment page, long pageId, TreeSchema<?> schema) {
-        PageHeader header = PageHeader.verify(page, pageId);
+        return decode(page, PageHeader.verify(page, pageId), pageId, schema);
+    }
+
+    public static Node decode(MemorySegment page, PageHeader header, long pageId, TreeSchema<?> schema) {
         if (header.schema() != schema.id()) {
             throw HStoreException.corrupt(pageId, "page belongs to schema " + header.schema() + ", expected " + schema);
         }
@@ -89,6 +107,9 @@ public final class NodeCodec {
             case LEAF -> {
                 Object[] values = new Object[count];
                 schema.codec().decode(in, keys, values);
+                if (header.refersToPages() != (schema.codec().holdsRefs() && refersToPages(schema, Arrays.asList(values)))) {
+                    throw HStoreException.corrupt(pageId, "page header and contents disagree on whether it refers to other pages");
+                }
                 yield Leaf.decoded(schema, keys, values, summary);
             }
             case INTERNAL -> {

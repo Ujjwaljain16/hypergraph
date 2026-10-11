@@ -78,7 +78,7 @@ During replay (`Workspace.replaying() == true`) a failed precondition, a duplica
 
 ### Spilling large workspaces
 
-`Transaction` constructs its `WriteScope` with a `PageSink` that calls `TransactionManager.spill`. Only `BulkBuilder` spills (every `SPILL_BATCH = 32` leaves during `Hyperedge.build`, used by `Transaction.load`), so very large bulk loads do not have to hold every new leaf in memory. `spill` materializes the subtree, **writes the page images to their data segments first**, then appends the matching `Page`/`PageRef` WAL records under the transaction id (before the transaction commits), and returns a `Ref.Stored`. Writing data before logging means that by the time a checkpoint can observe an LSN past the spill records, the pages are already in the page cache, so the checkpoint's `pages.sync()` makes them durable before the records are truncated. The spilled pages count against the transaction's page budget (`spilledPages`).
+`Transaction` constructs its `WriteScope` with a `PageSink` that calls `TransactionManager.spill`. Only `BulkBuilder` spills (every `SPILL_BATCH = 32` leaves during `Hyperedge.build`, used by `Transaction.load`), so very large bulk loads do not have to hold every new leaf in memory. `spill` materializes the subtree, **writes the page images to their data segments first**, then appends the matching `Page`/`PageRef` WAL records under the transaction id (before the transaction commits), and returns a `Ref.Stored`. Writing data before logging means that by the time a checkpoint can observe an LSN past the spill records, the pages are already in the page cache, so the checkpoint's `pages.sync()` makes them durable before the records are truncated. Until the records are appended, the pages still count as unwritten for their segment, so compaction can't move them before the log says where they were written. The spilled pages count against the transaction's page budget (`spilledPages`).
 
 If a transaction that spilled is aborted (explicitly, or by `close()` without commit), `abort()` appends `WalRecord.Abort(txnId)`; recovery then drops its buffered records instead of reporting them as an unfinished transaction. A transaction that spilled and then crashed before `Commit` or `Abort` still appears in `Outcome.discardedTransactions`. In both cases the spilled pages are unreachable garbage reclaimed by compaction (see [maintenance](../storage/maintenance.md)). A commit that throws marks the transaction `ABORTED` directly and does not log `Abort`.
 
@@ -97,10 +97,10 @@ flowchart LR
     PUB[publication of g+1] -->|history.put, trimHistory| H
 ```
 
-* `snapshot(branch)` and `begin(options)` call `pinCurrent()`: read `current`, increment `pins[id]`.
+* `snapshot(branch)` and `begin(options)` call `pinCurrent()`: read `current`, increment `pins[id]`, then check that `history` still holds that generation. If a trim removed it in between, it unpins and tries again with the new `current`. Publication puts a generation into `history` before it makes it `current`, so this only loops when a reader races a trim.
 * `snapshotAt(g, branch)` pins `g` first and then looks it up in `history`, so a concurrent trim cannot remove it between lookup and pin. If `g` is gone it unpins and throws `INVALID_SCHEMA` (`"generation g is no longer retained"`).
-* `trimHistory()` (run during publication) computes `excess = history.size() - historyLimit` and walks the history oldest first, removing every generation that is neither pinned nor `current` until `excess` reaches 0. Pinned generations are **skipped**, not barriers: a long-running snapshot on an old generation keeps exactly that generation, while newer unpinned ones are still trimmed, so the history size stays bounded by `historyLimit + number of distinct pinned generations`.
-* `oldestPinned()` exposes the oldest pinned generation to maintenance so that compaction never reclaims pages still reachable from a pinned snapshot.
+* `trimHistory()` (run during publication) computes `excess = history.size() - historyLimit` and walks the history oldest first, removing every generation that is neither pinned nor `current` until `excess` reaches 0. After removing one it checks the pins again and puts the generation back if a reader pinned it in the meantime. Pinned generations are **skipped**, not barriers: a long-running snapshot on an old generation keeps exactly that generation, while newer unpinned ones are still trimmed, so the history size stays bounded by `historyLimit + number of distinct pinned generations`.
+* `oldestPinned()` exposes the oldest pinned generation to maintenance so that compaction never deletes a segment a pinned snapshot may still read. `oldestReadable()`, the smaller of that and the oldest retained generation, tells a checkpoint which dead pages it may release ([maintenance](../storage/maintenance.md#releasing-pages)).
 * `generationAsOf(wallTime)` returns the newest retained generation with `wallTime <= t` (used by `AS OF` time travel).
 
 A `Snapshot` is a `View` whose trees are rooted at the pinned branch's root vector; `Snapshot.close()` unpins once (`AtomicBoolean` guard). Retention defaults: `EngineOptions.historyLimit = 64`.
@@ -118,7 +118,7 @@ commit(txn):
     if txn has requestId and REQUESTS[hash(id)] exists -> DUPLICATE (prior txn id, prior generation)
     fast = branch.roots sameAs txn.baseRoots
         || (requestsStable && workspace.untouchedSince(branch.roots, isolation == SERIALIZABLE))
-    if !fast and txn.generation < relocationFence and txn carries Load ops -> Conflict
+    if txn.compactionsAtStart < compactions and txn carries Load ops -> Conflict
     if fast: workspace = txn.workspace
     else:    txn.validateReads(branch.roots); workspace = txn.replay(branch.roots)
     if requestId: workspace.write(REQUESTS, hash(id), RequestRecord(id, txn.id, latest.id + 1))
@@ -155,9 +155,11 @@ A footprint is *commutative* iff the edge was a `SET` edge at the base and every
 
 `TreeDiff.diff` uses the frontier algorithm over shared subtrees ([persistent tree](../storage/persistent-tree.md)), so the cost of the overlap check is proportional to the changed region, not the edge cardinality.
 
-### 5.3 Relocation fence
+### 5.3 Compaction and spilled pages
 
-Compaction rewrites roots through `TransactionManager.rewrite`, which records `relocationFence = new generation id`. A transaction that bulk-loaded stored subtrees (`carriesStoredRoots()`: any `EdgeOp` with `EdgeAction.Load`) began before the fence and cannot take the fast path is rejected with a conflict, because its stored roots may point into segments that compaction is about to retire. Retrying rebuilds the subtree.
+Compaction moves pages without changing any root, so it doesn't affect commits. That holds for bulk loads too. The pages a load spills before commit already have page numbers and directory entries, and compaction finds pages by reading through the victim segment and checking each one against the directory, so a spilled page is moved like any other and the transaction commits normally ([maintenance](../storage/maintenance.md#interaction-with-running-transactions)).
+
+The transaction keeps the numbers of the pages it spilled. If it aborts, its commit fails with a conflict or a page budget error, or its request id turns out to have committed already, it hands them to the reference counter, which marks them dead so the next checkpoint releases them. If it commits, any spilled page the committed trees don't reach is marked dead once the commit is counted.
 
 ### 5.4 Page budget
 
@@ -206,7 +208,7 @@ Under `SNAPSHOT` both commits succeed (R replays `Insert(p)` into B, which L nev
 
 | Code | Class | Retryable | Raised by |
 |---|---|---|---|
-| `RETRYABLE_CONFLICT` | `Conflict` | yes | replay preconditions, `verifyEdge`, `validateReads`, relocation fence, concurrent atom id/canonical key |
+| `RETRYABLE_CONFLICT` | `Conflict` | yes | replay preconditions, `verifyEdge`, `validateReads`, concurrent atom id/canonical key |
 | `RETRYABLE_IO` | `TransientIo` | yes | WAL/page/feed I/O failures; a broken commit pipeline (`"the commit pipeline stopped after a durability failure; restart the engine"`) |
 | `ABORTED_RESOURCE_LIMIT` | `ResourceLimit` | no | page budget, quotas |
 | `INVALID_SCHEMA` | `InvalidSchema` | no | caller errors |
@@ -223,7 +225,7 @@ Under `SNAPSHOT` both commits succeed (R replays `Insert(p)` into B, which L nev
 |---|---|
 | Read `head`, duplicate-request check | Executing the transaction's operations (concurrent, lock-free) |
 | Fast/slow decision, read validation, replay | Spilling bulk-loaded subtrees |
-| Materialization of new nodes into page images (`Materializer`) | `fsync` of data segments and WAL (`GroupCommitter` flusher) |
+| Materialization of new nodes into page images (`Materializer`) | `fsync` of data segments and WAL (`GroupCommitter` leader) |
 | WAL append of `Begin`, `Page`/`PageRef`, `Root`, `BranchMeta`, `Feed` records | Publication: feed append, `current.set`, `history.put` |
 | Data page writes into the OS page cache | Waking the committing thread |
 | WAL append of `Commit`, `head.set(next)`, `committer.submit(pending)` | |
@@ -234,7 +236,7 @@ Because the lock is released before waiting for durability, the next committer c
 
 ## 9. Group commit
 
-`GroupCommitter` owns one platform daemon thread named `hstore-group-commit` and a FIFO `Deque<Pending>`.
+`GroupCommitter` has no thread of its own. It keeps a FIFO `Deque<Pending>`, and the committers waiting on it take turns leading.
 
 ```text
 Pending(generation, publication: Runnable, published: boolean)
@@ -243,22 +245,23 @@ Barrier.makeDurable(batchSize)    -- TransactionManager.makeDurable
 
 Protocol:
 
-1. `submit(pending)` (called inside the commit lock, so queue order equals WAL commit order) appends to the queue and signals `submitted`.
-2. The flusher waits until the queue is non-empty, copies **the whole queue** as the batch, releases the lock, and calls `barrier.makeDurable(batch.size())` once.
-3. It then runs each batch member's `publication` in order: `feed.append(event)` for non-empty events, then `current.set(next)`, `history.put`, `trimHistory()`, and `CrashPoint.CATALOG_PUBLISH`. Appending to the feed **before** making the generation current gives readers an invariant: any thread that observes `current == g` also observes `feed.lastGeneration()` covering every non-empty commit up to `g`. The semantic plane relies on this for `FRESH` queries (see [change feed](../storage/change-feed.md#5-consumers)).
-4. Under the lock it marks the batch `published`, pops it from the queue, updates `batches`/`flushedCommits`, and `signalAll`s `progressed`.
-5. `await(pending)` blocks (uninterruptibly) until its own `published` flag is set.
+1. `submit(pending)` (called inside the commit lock, so queue order equals WAL commit order) appends to the queue.
+2. `await(pending)` loops until its own `published` flag is set. If another committer is leading, it waits (uninterruptibly) on `progressed`. Otherwise it becomes the **leader**: it copies **the whole queue** as the batch, releases the lock, and calls `barrier.makeDurable(batch.size())` once.
+3. The leader then runs each batch member's `publication` in order: `current.set(next)`, `history.put`, then `feed.append(event)` for non-empty events, `trimHistory()`, and `CrashPoint.CATALOG_PUBLISH`. Making the generation current **before** appending to the feed means a subscriber can always read the commit it is told about (see [change feed](../storage/change-feed.md#2-when-events-are-written)).
+4. It retakes the lock, marks the batch `published`, pops it from the queue, updates `batches`/`flushedCommits`, stops leading, and `signalAll`s `progressed`. A waiter whose commit wasn't in that batch becomes the next leader.
 
-`makeDurable` for `Durability.SYNC`: if `walMode == PAGE_REFERENCES`, `pages.sync()` (force every dirty data segment); reach `DATA_SYNC`; `wal.sync()`; reach `WAL_SYNC`. For `Durability.ASYNC` it returns immediately: publication still happens in order on the flusher thread, but nothing is forced. A single `wal.sync()` covers every commit record appended so far, including records appended after the batch was copied; those commits are simply published in the next batch.
+A lone committer therefore finishes on its own thread, with no hand-off to another thread. Committers that arrive while a leader is syncing queue up and are published together by the next leader, sharing one `fsync`. Only one leader runs at a time, so publication stays in generation order. The durability step runs on the committing thread, which in the server is usually a virtual thread; the JDK compensates for virtual threads blocked in file I/O by adding a carrier thread temporarily.
 
-Failure handling: any `Throwable` from the barrier or a publication is stored in `failure`, logged at `ERROR`, and `progressed` is signalled; the flusher exits. Two checks consult it:
+`makeDurable` for `Durability.SYNC`: if `walMode == PAGE_REFERENCES`, `pages.sync()` (force every dirty data segment); reach `DATA_SYNC`; `wal.sync()`; reach `WAL_SYNC`. For `Durability.ASYNC` it returns immediately: the leader still publishes in order, but nothing is forced. A single `wal.sync()` covers every commit record appended so far, including records appended after the batch was copied; those commits are simply published in the next batch.
+
+Failure handling: any `Throwable` from the barrier or a publication is stored in `failure`, logged at `ERROR`, and `progressed` is signalled. The leader rethrows it, and every waiting and later committer gets it too. Two checks consult it:
 
 | Check | Used by | Fails when |
 |---|---|---|
 | `failIfFailed()` | `await`, `drain` | a durability failure was recorded: rethrows an `Error` as-is (this is how `CrashPoint.SimulatedCrash` reaches the committing thread in tests), wraps anything else in `RETRYABLE_IO` |
 | `failIfBroken()` | `submit` | `failIfFailed()` fails, or the committer is closed (`IllegalStateException: the commit pipeline is closed`) |
 
-`close()` sets `closed`, wakes the flusher, and joins it. The flusher drains the remaining queue before exiting because its wait condition is `queue.isEmpty() && !closed`. Because `await` does not treat `closed` as an error, a commit that was submitted before shutdown is reported to its caller exactly as it ends up on disk: published and acknowledged, never "failed but durable". `submit` still rejects work after `close()`. It runs inside the commit lock after the `Commit` record has been appended and `head` advanced, so a commit rejected there is in the WAL and recovery would replay it (the same "outcome unknown" case as a crash at `COMMIT_APPEND`, see [WAL and recovery](wal-and-recovery.md#10-what-the-crash-tests-prove)). `TransactionManager.shutdown()` closes the committer while holding the commit lock, so no commit can reach `submit` after close through the normal paths; `StorageEngine.requireOpen()` rejects new transactions once the engine is closed.
+`close()` sets `closed` and leads until the queue is empty, unless the pipeline has already failed. `drain()` leads the same way. Because `await` does not treat `closed` as an error, a commit that was submitted before shutdown is reported to its caller exactly as it ends up on disk: published and acknowledged, never "failed but durable". `submit` still rejects work after `close()`. It runs inside the commit lock after the `Commit` record has been appended and `head` advanced, so a commit rejected there is in the WAL and recovery would replay it (the same "outcome unknown" case as a crash at `COMMIT_APPEND`, see [WAL and recovery](wal-and-recovery.md#10-what-the-crash-tests-prove)). `TransactionManager.shutdown()` closes the committer while holding the commit lock, so no commit can reach `submit` after close through the normal paths; `StorageEngine.requireOpen()` rejects new transactions once the engine is closed.
 
 `averageBatch()` (`flushedCommits / batches`) is exported as `Statistics.averageGroupCommit` and appears on the Studio dashboard.
 
@@ -271,7 +274,7 @@ sequenceDiagram
     participant TM as TransactionManager (commitLock)
     participant W as WriteAheadLog
     participant D as PageStore
-    participant G as GroupCommitter flusher
+    participant G as GroupCommitter leader
     participant F as ChangeFeed
     C->>TM: commit(txn)
     activate TM
@@ -298,7 +301,7 @@ sequenceDiagram
     participant A as Txn A
     participant B as Txn B
     participant L as commitLock
-    participant G as flusher
+    participant G as commit leader
     participant Disk as fsync
     A->>L: lock, append records + Commit(g1), submit(g1), unlock
     A->>G: await(g1)
@@ -344,10 +347,9 @@ Had T2 also touched `m1`, or had `E` been an `ORDERED` edge, the overlap check w
 
 ## 10. Branch operations and internal writes
 
-`system(branchId, work)`, `createBranch`, `closeBranch` and `rewrite` reuse `append` and the group committer, so they are durable and ordered exactly like user commits:
+`system(branchId, work)`, `createBranch` and `closeBranch` reuse `append` and the group committer, so they are durable and ordered exactly like user commits:
 
 * `createBranch` appends a `BranchMeta` record and a branch whose roots are the parent's current roots (copy-on-write makes this O(number of slots)). Names must be unique among active branches; the new id is one past the largest existing id.
 * `closeBranch` (`MERGED` or `DROPPED`, never for `MAIN`) empties the root vector so the branch's pages become unreachable.
-* `rewrite` (compaction) replaces roots without member or slot changes and sets the relocation fence.
 
 These commits carry no member or slot changes, so their `CommitEvent` is empty and nothing is written to the change feed (see [change feed](../storage/change-feed.md)).

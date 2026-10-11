@@ -3,27 +3,18 @@
 
 package io.hstore.engine.maintenance;
 
-import io.hstore.engine.catalog.Branch;
-import io.hstore.engine.catalog.Generation;
-import io.hstore.engine.catalog.SlotRegistry;
-import io.hstore.engine.page.PageId;
 import io.hstore.engine.page.PageStore;
 import io.hstore.engine.page.SegmentInfo;
 import io.hstore.engine.page.SegmentState;
-import io.hstore.engine.tree.TreeWalker;
-import io.hstore.engine.tree.WriteScope;
+import io.hstore.engine.txn.CrashPoint;
 import io.hstore.engine.txn.TransactionManager;
 
+import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
-import java.util.Set;
-import java.util.TreeMap;
-import java.util.function.LongPredicate;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class Compactor {
 
@@ -32,23 +23,30 @@ public final class Compactor {
 
     private final TransactionManager transactions;
     private final PageStore pages;
-    private final SlotRegistry slots;
+    private final Checkpointer checkpointer;
+    private final CrashPoint.Injector faults;
+    private final Map<Integer, Long> retiredBeforeCheckpoint = new ConcurrentHashMap<>();
 
-    public Compactor(TransactionManager transactions, PageStore pages, SlotRegistry slots) {
+    public Compactor(TransactionManager transactions, PageStore pages, Checkpointer checkpointer, CrashPoint.Injector faults) {
         this.transactions = transactions;
         this.pages = pages;
-        this.slots = slots;
+        this.checkpointer = checkpointer;
+        this.faults = faults;
     }
 
-    public Map<Integer, Long> liveness() {
-        Map<Long, Integer> visited = new HashMap<>();
-        TreeWalker walker = new TreeWalker(transactions.source());
-        Stream.concat(transactions.history().stream(), Stream.of(transactions.current()))
-                .flatMap(generation -> generation.branches().values().stream())
-                .forEach(branch -> branch.roots().roots().forEach((slot, ref) ->
-                        walker.visit(ref, slots.slot(slot).schema(), visited)));
-        return visited.entrySet().stream().collect(Collectors.groupingBy(entry -> PageId.segmentOf(entry.getKey()), TreeMap::new,
-                Collectors.summingLong(entry -> (long) entry.getValue() * PageId.UNIT_BYTES)));
+    public boolean worthwhile(double liveThreshold) {
+        return !victims(pages.liveBytes(), liveThreshold, 1).isEmpty();
+    }
+
+    private List<Integer> victims(Map<Integer, Long> liveBytes, double liveThreshold, int maxVictims) {
+        int active = pages.activeSegment();
+        return pages.segments().stream()
+                .filter(segment -> segment.state() == SegmentState.SEALED && segment.id() != active && pages.settled(segment.id()))
+                .filter(segment -> liveBytes.getOrDefault(segment.id(), 0L) < segment.bytes() * liveThreshold)
+                .sorted(Comparator.comparingDouble(segment -> (double) liveBytes.getOrDefault(segment.id(), 0L) / Math.max(1, segment.bytes())))
+                .limit(maxVictims)
+                .map(SegmentInfo::id)
+                .toList();
     }
 
     public Report compact(double liveThreshold) {
@@ -56,44 +54,52 @@ public final class Compactor {
     }
 
     public Report compact(double liveThreshold, int maxVictims) {
-        Map<Integer, Long> live = liveness();
-        int active = pages.activeSegment();
-        List<Integer> victims = pages.segments().stream()
-                .filter(segment -> segment.state() == SegmentState.SEALED && segment.id() != active)
-                .filter(segment -> live.getOrDefault(segment.id(), 0L) < segment.bytes() * liveThreshold)
-                .sorted(Comparator.comparingDouble(segment -> (double) live.getOrDefault(segment.id(), 0L) / Math.max(1, segment.bytes())))
-                .limit(maxVictims)
-                .map(SegmentInfo::id)
-                .toList();
-        long generation = transactions.current().id();
-        if (victims.isEmpty()) {
-            return new Report(live, victims, generation);
+        Map<Integer, Long> liveBytes = pages.liveBytes();
+        List<Integer> victims = victims(liveBytes, liveThreshold, maxVictims);
+        List<Integer> emptied = new ArrayList<>();
+        RuntimeException failure = null;
+        for (int victim : victims) {
+            pages.transition(victim, SegmentState.COMPACTING, 0);
+            try {
+                pages.evacuate(victim);
+                emptied.add(victim);
+            } catch (RuntimeException e) {
+                pages.transition(victim, SegmentState.SEALED, 0);
+                failure = e;
+                break;
+            }
         }
-        victims.forEach(id -> pages.transition(id, SegmentState.COMPACTING, 0));
-        Set<Integer> victimSet = Set.copyOf(victims);
-        LongPredicate moving = pageId -> victimSet.contains(PageId.segmentOf(pageId));
-        TreeWalker walker = new TreeWalker(transactions.source());
-        List<Integer> branches = transactions.current().branches().values().stream()
-                .filter(Branch::isActive).map(Branch::id).toList();
-        for (int branch : branches) {
-            generation = transactions.rewrite(branch, roots -> roots.map((slot, ref) ->
-                    walker.relocate(ref, slots.slot(slot).schema(), moving, new WriteScope())));
+        if (!emptied.isEmpty()) {
+            faults.reach(CrashPoint.COMPACTION_MOVE);
         }
-        long retiredAt = generation;
-        victims.forEach(id -> pages.transition(id, SegmentState.RETIRED, retiredAt));
-        return new Report(live, victims, generation);
+        long retiredAt = transactions.current().id();
+        long checkpoints = checkpointer.completed();
+        emptied.forEach(id -> {
+            pages.transition(id, SegmentState.RETIRED, retiredAt);
+            retiredBeforeCheckpoint.put(id, checkpoints);
+        });
+        if (!emptied.isEmpty()) {
+            faults.reach(CrashPoint.COMPACTION_RETIRE);
+        }
+        if (failure != null) {
+            throw failure;
+        }
+        return new Report(liveBytes, emptied, retiredAt);
     }
 
     public List<Integer> reclaim() {
         OptionalLong pinned = transactions.oldestPinned();
-        long oldestRetained = transactions.history().stream().mapToLong(Generation::id).min().orElse(Long.MAX_VALUE);
+        long checkpoints = checkpointer.completed();
         List<Integer> reclaimable = pages.segments().stream()
                 .filter(segment -> segment.state() == SegmentState.RETIRED)
-                .filter(segment -> pinned.isEmpty() || pinned.getAsLong() >= segment.retiredAt())
-                .filter(segment -> oldestRetained >= segment.retiredAt())
+                .filter(segment -> pinned.isEmpty() || pinned.getAsLong() > segment.retiredAt())
+                .filter(segment -> checkpoints > retiredBeforeCheckpoint.getOrDefault(segment.id(), -1L))
                 .map(SegmentInfo::id)
                 .toList();
-        reclaimable.forEach(pages::delete);
+        reclaimable.forEach(id -> {
+            pages.delete(id);
+            retiredBeforeCheckpoint.remove(id);
+        });
         return reclaimable;
     }
 }

@@ -76,7 +76,7 @@ Without a password and without `HSTORE_AUTHENTICATION=off`, the container refuse
 ### Server settings
 
 Every [setting](configuration.md) is available as `HSTORE_<SETTING>`, for example `HSTORE_DURABILITY=async`,
-`HSTORE_LOG_STATEMENT=ddl`, `HSTORE_LOG_MIN_DURATION_MS=250`, `HSTORE_CACHE_NODES=262144`,
+`HSTORE_LOG_STATEMENT=ddl`, `HSTORE_LOG_MIN_DURATION_MS=250`, `HSTORE_NODE_CACHE_MB=512`,
 `HSTORE_STUDIO=off`, `HSTORE_EMBEDDING_PROVIDER=ollama`. Environment variables override
 `/var/lib/hstore/data/hstore.conf`. Flags appended to the `docker run` command line override both:
 
@@ -216,7 +216,8 @@ The [`Dockerfile`](../../Dockerfile) has two stages:
 
 1. **build**: `ghcr.io/graalvm/native-image-community:25`. Runs `./mvnw install -DskipTests` and then
    `./mvnw -Pnative package -pl server`, producing a native `hstore` executable linked against glibc (Serial GC, `-O2`,
-   `-march=compatibility` so the image runs on any CPU of the target architecture). A BuildKit cache mount
+   `-march=compatibility` so the image runs on any CPU of the target architecture, and shared arenas so segment maps
+   can be closed when a segment is deleted). A BuildKit cache mount
    keeps `~/.m2` between builds.
 2. **runtime**: `debian:bookworm-slim` plus the binary, the entrypoint and the non-root user.
 
@@ -258,8 +259,8 @@ skipped because `FORMAT` exists. To verify a backup, run
 `docker run --rm -v restored:/var/lib/hstore/data hstore check /var/lib/hstore/data`.
 
 To upgrade, stop the container, back up the volume, and start the new image on the same volume. `FORMAT`
-records the on-disk format version (`format=3`, sized page references) and the page size. Both are checked at
+records the on-disk format version (`format=5`, reference counts) and the page size. Both are checked at
 open. A directory written in another format is refused with
-`database … uses storage format N; this build reads format 2 (packed segment extents); export and reload it`,
+`database … uses storage format N; this build reads format 5 (reference counts); export and reload it`,
 so the server never misreads it. Export the data with HQL against the old version and reload it into a fresh
 volume.

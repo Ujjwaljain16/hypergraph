@@ -7,22 +7,30 @@ import io.hstore.engine.HStoreException;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 
 final class SegmentFile implements AutoCloseable {
 
     private static final int FIRST_READ = 4096;
+    private static final long REMAP_BYTES = 4L << 20;
 
     private final int id;
     private final Path path;
     private final FileChannel channel;
     private final AtomicBoolean dirty = new AtomicBoolean();
+    private final ReentrantLock remapping = new ReentrantLock();
+    private volatile MemorySegment mapped = MemorySegment.NULL;
+    private Arena arena;
+    private volatile boolean sealed;
 
     private SegmentFile(int id, Path path, FileChannel channel) {
         this.id = id;
@@ -60,19 +68,111 @@ final class SegmentFile implements AutoCloseable {
         }
     }
 
+    void seal() {
+        sealed = true;
+    }
+
     MemorySegment read(long position, int maximum) {
+        while (true) {
+            MemorySegment view = covering(position + PageHeader.SIZE);
+            if (view == null) {
+                return copy(position, maximum);
+            }
+            try {
+                return read(view, position, maximum);
+            } catch (IllegalStateException closed) {
+                if (view.scope().isAlive()) {
+                    throw closed;
+                }
+            }
+        }
+    }
+
+    private MemorySegment read(MemorySegment view, long position, int maximum) {
+        long length = PageHeader.SIZE + Integer.toUnsignedLong(PageHeader.payloadLengthAt(view, position));
+        if (length > maximum) {
+            return onHeap(view, position, Math.min(maximum, view.byteSize() - position));
+        }
+        if (position + length > view.byteSize()) {
+            view = covering(position + length);
+            if (view == null) {
+                return copy(position, maximum);
+            }
+        }
+        return onHeap(view, position, length);
+    }
+
+    MemorySegment view() {
+        try {
+            MemorySegment whole = covering(channel.size());
+            return whole == null ? MemorySegment.NULL : whole;
+        } catch (IOException e) {
+            throw HStoreException.io("cannot size segment " + path, e);
+        }
+    }
+
+    long mappedBytes() {
+        return mapped.byteSize();
+    }
+
+    private static MemorySegment onHeap(MemorySegment view, long position, long length) {
+        byte[] image = new byte[Math.toIntExact(length)];
+        MemorySegment.copy(view, ValueLayout.JAVA_BYTE, position, image, 0, image.length);
+        return MemorySegment.ofArray(image).asReadOnly();
+    }
+
+    private MemorySegment covering(long required) {
+        MemorySegment current = mapped;
+        if (required <= current.byteSize()) {
+            return current;
+        }
+        if (!sealed && required - current.byteSize() < REMAP_BYTES) {
+            return null;
+        }
+        remapping.lock();
+        try {
+            current = mapped;
+            if (required <= current.byteSize()) {
+                return current;
+            }
+            long size = channel.size();
+            if (size < required) {
+                return null;
+            }
+            Arena replacement = Arena.ofShared();
+            try {
+                current = channel.map(FileChannel.MapMode.READ_ONLY, 0, size, replacement);
+            } catch (IOException | RuntimeException e) {
+                replacement.close();
+                throw e;
+            }
+            mapped = current;
+            unmap();
+            arena = replacement;
+            return current;
+        } catch (IOException e) {
+            throw HStoreException.io("cannot map segment " + id, e);
+        } finally {
+            remapping.unlock();
+        }
+    }
+
+    private MemorySegment copy(long position, int maximum) {
         ByteBuffer first = ByteBuffer.allocate(Math.min(maximum, FIRST_READ));
         fill(first, position);
         if (first.position() < PageHeader.SIZE) {
-            return MemorySegment.ofBuffer(first.flip());
+            return MemorySegment.ofBuffer(first.flip()).asReadOnly();
         }
         int length = PageHeader.SIZE + PageHeader.payloadLength(MemorySegment.ofArray(first.array()));
-        if (length <= first.position() || length > maximum) {
-            return MemorySegment.ofBuffer(first.flip());
+        if (length < PageHeader.SIZE || length > maximum) {
+            return MemorySegment.ofBuffer(first.flip()).asReadOnly();
+        }
+        if (length <= first.position()) {
+            return MemorySegment.ofBuffer(first.flip()).asSlice(0, length).asReadOnly();
         }
         ByteBuffer whole = ByteBuffer.allocate(length).put(first.flip());
         fill(whole, position);
-        return MemorySegment.ofBuffer(whole.flip());
+        return MemorySegment.ofBuffer(whole.flip()).asReadOnly();
     }
 
     private void fill(ByteBuffer buffer, long position) {
@@ -119,8 +219,22 @@ final class SegmentFile implements AutoCloseable {
         }
     }
 
+    private void unmap() {
+        if (arena != null) {
+            arena.close();
+            arena = null;
+        }
+    }
+
     @Override
     public void close() {
+        remapping.lock();
+        try {
+            mapped = MemorySegment.NULL;
+            unmap();
+        } finally {
+            remapping.unlock();
+        }
         try {
             channel.close();
         } catch (IOException e) {

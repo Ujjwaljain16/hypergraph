@@ -56,6 +56,11 @@ public final class PropertySlots {
                 }
 
                 @Override
+                public boolean refersToPages(IndexRoot value) {
+                    return value.root() instanceof Ref.Stored;
+                }
+
+                @Override
                 public IndexRoot mapRefs(IndexRoot value, RefMapper mapper) {
                     return new IndexRoot(mapper.map(value.root(), VALUE_POSTINGS.schema()));
                 }

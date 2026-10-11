@@ -3,12 +3,18 @@
 
 package io.hstore.engine.tree;
 
+import io.hstore.engine.catalog.AtomRecord;
+import io.hstore.engine.catalog.EngineSlots;
 import io.hstore.engine.page.ByteCursor;
+import io.hstore.engine.page.PageHeader;
+import io.hstore.engine.page.PageId;
+import io.hstore.engine.topology.EdgeKind;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -230,6 +236,20 @@ class TreeTest {
         }
         Summary recomputed = verify(tree, tree.root());
         assertEquals(recomputed, tree.summary());
+    }
+
+    @Test
+    void aLeafSaysInItsHeaderWhetherItRefersToOtherPages() {
+        AtomRecord node = AtomRecord.NodeRecord.of(1, "n");
+        AtomRecord edge = new AtomRecord.EdgeRecord(2, EdgeKind.SET, new Ref.Stored(PageId.pack(7, 0), 1, Summary.EMPTY), Ref.EMPTY, 0, 0, 0, 0);
+        long pageId = PageId.pack(1, 0);
+        for (List<AtomRecord> values : List.of(List.of(node), List.of(node, edge))) {
+            Leaf leaf = Leaf.owned(EngineSlots.ATOM_SCHEMA, null, LongStream.range(0, values.size()).toArray(), values.toArray(), values.size());
+            MemorySegment image = NodeCodec.encode(leaf, pageId, 1, 4096);
+            assertEquals(values.contains(edge), PageHeader.verify(image, pageId).refersToPages());
+            Leaf decoded = (Leaf) NodeCodec.decode(image, pageId, EngineSlots.ATOM_SCHEMA);
+            assertEquals(values, decoded.valueList());
+        }
     }
 
     private static Summary verify(Tree<?> tree, Ref ref) {

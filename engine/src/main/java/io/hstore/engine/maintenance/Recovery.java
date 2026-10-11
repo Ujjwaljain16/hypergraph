@@ -22,10 +22,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.stream.Stream;
 
 public final class Recovery {
 
-    public record Outcome(CatalogImage image, int replayedCommits, int discardedTransactions, int discardedCommits) {
+    public record Outcome(CatalogImage image, List<Generation> replayed, int discardedTransactions, int discardedCommits) {
+
+        public int replayedCommits() {
+            return replayed.size();
+        }
     }
 
     private static final System.Logger LOG = System.getLogger("hstore.recovery");
@@ -51,7 +56,7 @@ public final class Recovery {
         });
         Generation generation = checkpoint.current();
         List<Generation> history = new ArrayList<>(checkpoint.history());
-        int replayed = 0;
+        List<Generation> replayed = new ArrayList<>();
         int discarded = 0;
         for (WalRecord.Commit commit : commits) {
             List<WalRecord> records = pending.remove(commit.txnId());
@@ -59,6 +64,7 @@ public final class Recovery {
                 continue;
             }
             List<WalRecord> body = records == null ? List.of() : records;
+            body.forEach(record -> place(record, pages));
             if (discarded > 0 || !intact(body, pages)) {
                 if (discarded == 0) {
                     LOG.log(System.Logger.Level.WARNING, "durable prefix ends before generation {0}: transaction {1} references pages that never reached storage",
@@ -69,20 +75,29 @@ public final class Recovery {
             }
             generation = redo(generation, commit, body, pages, feed, codec);
             history.add(generation);
-            replayed++;
+            replayed.add(generation);
         }
         pages.sync();
         feed.truncateAfter(generation.id());
         feed.sync();
         CatalogImage recovered = new CatalogImage(generation, history, pages.segments(), wal.end(), feed.size());
         LOG.log(System.Logger.Level.INFO, "recovered generation {0}: replayed {1} commits from lsn {2}, discarded {3} unfinished transactions and {4} non-durable commits",
-                generation.id(), replayed, checkpoint.checkpointLsn(), pending.size(), discarded);
-        return new Outcome(recovered, replayed, pending.size(), discarded);
+                generation.id(), replayed.size(), checkpoint.checkpointLsn(), pending.size(), discarded);
+        return new Outcome(recovered, List.copyOf(replayed), pending.size(), discarded);
+    }
+
+    private static void place(WalRecord record, PageStore pages) {
+        switch (record) {
+            case WalRecord.Page page -> pages.place(page.pageId(), page.address());
+            case WalRecord.PageRef ref -> pages.place(ref.pageId(), ref.address());
+            default -> {
+            }
+        }
     }
 
     private static boolean intact(List<WalRecord> records, PageStore pages) {
         for (WalRecord record : records) {
-            if (record instanceof WalRecord.PageRef(long _, long pageId, int length, int checksum)) {
+            if (record instanceof WalRecord.PageRef(long _, long pageId, long _, int length, int checksum)) {
                 try {
                     MemorySegment page = pages.read(pageId);
                     PageHeader.verify(page, pageId);
@@ -100,9 +115,11 @@ public final class Recovery {
     private static Generation redo(Generation base, WalRecord.Commit commit, List<WalRecord> records,
                                    PageStore pages, ChangeFeed feed, FeedCodec codec) {
         Map<Integer, Branch> branches = new TreeMap<>(base.branches());
-        for (WalRecord record : records) {
+        List<WalRecord> metaFirst = Stream.concat(records.stream().filter(WalRecord.BranchMeta.class::isInstance),
+                records.stream().filter(record -> !(record instanceof WalRecord.BranchMeta))).toList();
+        for (WalRecord record : metaFirst) {
             switch (record) {
-                case WalRecord.Page(long _, long pageId, byte[] image) -> pages.write(pageId, MemorySegment.ofArray(image));
+                case WalRecord.Page(long _, long pageId, long _, byte[] image) -> pages.write(pageId, MemorySegment.ofArray(image));
                 case WalRecord.BranchMeta(long _, int id, String name, int parent, long baseGeneration, long created, Branch.State state) -> {
                     RootVector roots = branches.containsKey(id) ? branches.get(id).roots() : RootVector.EMPTY;
                     branches.put(id, new Branch(id, name, parent, baseGeneration, created, state, roots));

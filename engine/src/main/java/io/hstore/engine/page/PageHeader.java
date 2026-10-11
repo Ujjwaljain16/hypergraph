@@ -6,6 +6,8 @@ package io.hstore.engine.page;
 import io.hstore.engine.HStoreException;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.nio.ByteOrder;
 
 public record PageHeader(
         PageType type,
@@ -22,11 +24,18 @@ public record PageHeader(
         long fingerprint) {
 
     public static final int MAGIC = 0x47505348;
+    public static final int REFERS_TO_PAGES = 1;
     public static final int FORMAT = 1;
     public static final int SIZE = 80;
     private static final int PAGE_ID_OFFSET = 8;
     private static final int PAYLOAD_LENGTH_OFFSET = 24;
     private static final int CHECKSUM_OFFSET = 72;
+    private static final ValueLayout.OfInt INT = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+    private static final ValueLayout.OfLong LONG = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
+
+    public boolean refersToPages() {
+        return (flags & REFERS_TO_PAGES) != 0;
+    }
 
     public void writeTo(ByteCursor page) {
         page.position(0)
@@ -56,6 +65,18 @@ public record PageHeader(
 
     public static int payloadLength(MemorySegment page) {
         return ByteCursor.over(page).position(PAYLOAD_LENGTH_OFFSET).getInt();
+    }
+
+    static int payloadLengthAt(MemorySegment file, long position) {
+        return file.get(INT, position + PAYLOAD_LENGTH_OFFSET);
+    }
+
+    static boolean startsAt(MemorySegment file, long position) {
+        return position + SIZE <= file.byteSize() && file.get(INT, position) == MAGIC;
+    }
+
+    static long pageIdAt(MemorySegment file, long position) {
+        return file.get(LONG, position + PAGE_ID_OFFSET);
     }
 
     public static void seal(MemorySegment page, int payloadLength) {

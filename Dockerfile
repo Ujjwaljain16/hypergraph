@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 FROM ghcr.io/graalvm/native-image-community:25 AS build
+ENV LANG=C.UTF-8
 WORKDIR /src
 COPY .mvn .mvn
 COPY mvnw pom.xml ./

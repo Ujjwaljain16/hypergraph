@@ -90,6 +90,8 @@
                                 <buildArg>-O2</buildArg>
                                 <buildArg>--gc=serial</buildArg>
                                 <buildArg>-H:+ReportExceptionStackTraces</buildArg>
+                                <buildArg>-H:+UnlockExperimentalVMOptions</buildArg>
+                                <buildArg>-H:+SharedArenaSupport</buildArg>
                                 <buildArg>--enable-url-protocols=http,https</buildArg>
                                 <buildArg>-march=compatibility</buildArg>
                             </buildArgs>

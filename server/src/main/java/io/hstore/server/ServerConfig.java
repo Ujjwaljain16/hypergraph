@@ -28,6 +28,7 @@ import javax.net.ssl.SSLContext;
 final class ServerConfig {
 
     static final String FILE = "hstore.conf";
+    private static final long MAX_MEGABYTES = 1L << 24;
 
     enum Source { DEFAULT, FILE, ENVIRONMENT, COMMAND_LINE }
 
@@ -52,6 +53,14 @@ final class ServerConfig {
             }
             properties.forEach((key, value) -> config.set(Setting.of(key.toString()), value.toString().strip(), Source.FILE));
         });
+        Setting.removedVariables().forEach((variable, message) -> {
+            if (environment.containsKey(variable)) {
+                throw new IllegalArgumentException(variable + ": " + message);
+            }
+        });
+        commandLine.keySet().forEach(key -> Setting.removed(key).ifPresent(message -> {
+            throw new IllegalArgumentException(message);
+        }));
         for (Setting setting : Setting.values()) {
             Optional.ofNullable(environment.get(setting.environmentVariable()))
                     .ifPresent(value -> config.set(setting, value, Source.ENVIRONMENT));
@@ -90,6 +99,14 @@ final class ServerConfig {
         return Long.parseLong(values.get(setting));
     }
 
+    long megabytes(Setting setting) {
+        long megabytes = number(setting);
+        if (megabytes < 1 || megabytes > MAX_MEGABYTES) {
+            throw new IllegalArgumentException("%s must be between 1 and %,d, not %d".formatted(setting.key(), MAX_MEGABYTES, megabytes));
+        }
+        return megabytes << 20;
+    }
+
     boolean flag(Setting setting) {
         return switch (values.get(setting).toLowerCase()) {
             case "on", "true", "yes", "1" -> true;
@@ -107,7 +124,7 @@ final class ServerConfig {
                 .withPageSize(integer(Setting.PAGE_SIZE))
                 .withDurability(Durability.valueOf(string(Setting.DURABILITY).toUpperCase()))
                 .withWalMode(string(Setting.WAL_MODE).equalsIgnoreCase("images") ? WalMode.PAGE_IMAGES : WalMode.PAGE_REFERENCES)
-                .withCachedNodes(integer(Setting.CACHE_NODES))
+                .withNodeCacheBytes(megabytes(Setting.NODE_CACHE_MB))
                 .withCheckpointWalBytes(number(Setting.CHECKPOINT_WAL_MB) << 20)
                 .withHistoryLimit(integer(Setting.HISTORY_LIMIT))
                 .withCompactionLiveRatio(Double.parseDouble(string(Setting.COMPACTION_LIVE_RATIO)))

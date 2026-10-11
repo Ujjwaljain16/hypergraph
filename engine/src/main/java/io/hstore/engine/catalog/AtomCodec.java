@@ -80,6 +80,11 @@ final class AtomCodec implements ValueCodec<AtomRecord> {
     }
 
     @Override
+    public boolean refersToPages(AtomRecord record) {
+        return record instanceof EdgeRecord edge && (edge.members() instanceof Ref.Stored || edge.order() instanceof Ref.Stored);
+    }
+
+    @Override
     public AtomRecord mapRefs(AtomRecord record, RefMapper mapper) {
         return switch (record) {
             case NodeRecord node -> node;

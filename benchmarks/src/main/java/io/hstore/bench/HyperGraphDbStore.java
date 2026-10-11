@@ -3,6 +3,7 @@
 
 package io.hstore.bench;
 
+import com.sleepycat.je.CheckpointConfig;
 import com.sleepycat.je.Durability;
 import com.sleepycat.je.Environment;
 import com.sleepycat.je.EnvironmentConfig;
@@ -35,6 +36,7 @@ final class HyperGraphDbStore implements Store {
     private HGPersistentHandle[] edges;
     private HGPersistentHandle large;
     private long writtenBeforeReopen;
+    private long readBeforeReopen;
 
     private final long cacheBytes;
 
@@ -246,6 +248,15 @@ final class HyperGraphDbStore implements Store {
     }
 
     @Override
+    public void compact() {
+        Environment environment = environment();
+        while (environment.cleanLog() > 0) {
+            Thread.onSpinWait();
+        }
+        environment.checkpoint(new CheckpointConfig().setForce(true));
+    }
+
+    @Override
     public long bytesWritten() {
         EnvironmentStats stats = environment().getStats(new StatsConfig());
         return writtenBeforeReopen + stats.getNSequentialWriteBytes() + stats.getNRandomWriteBytes();
@@ -281,8 +292,15 @@ final class HyperGraphDbStore implements Store {
     }
 
     @Override
+    public long bytesRead() {
+        EnvironmentStats stats = environment().getStats(new StatsConfig());
+        return readBeforeReopen + stats.getNSequentialReadBytes() + stats.getNRandomReadBytes();
+    }
+
+    @Override
     public void reopen(Runnable whileClosed) {
         writtenBeforeReopen = bytesWritten();
+        readBeforeReopen = bytesRead();
         graph.close();
         whileClosed.run();
         graph = HGEnvironment.get(directory.toString(), configuration);

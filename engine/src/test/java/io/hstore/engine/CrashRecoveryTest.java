@@ -3,16 +3,20 @@
 
 package io.hstore.engine;
 
+import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Incidence;
 import io.hstore.engine.txn.CrashPoint;
+import io.hstore.engine.txn.Snapshot;
 import io.hstore.engine.txn.Transaction;
+import io.hstore.engine.txn.TxnOptions;
 import io.hstore.engine.txn.WalMode;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.channels.FileChannel;
@@ -20,10 +24,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,7 +42,7 @@ class CrashRecoveryTest {
     Path directory;
 
     static Stream<Arguments> crashMatrix() {
-        return Stream.of(WalMode.values()).flatMap(mode -> Stream.of(CrashPoint.values()).map(point -> Arguments.of(mode, point)));
+        return Stream.of(WalMode.values()).flatMap(mode -> EnumSet.range(CrashPoint.PAGE, CrashPoint.CATALOG_PUBLISH).stream().map(point -> Arguments.of(mode, point)));
     }
 
     @ParameterizedTest
@@ -65,6 +71,7 @@ class CrashRecoveryTest {
         engine.halt();
 
         try (StorageEngine recovered = StorageEngine.open(directory, EngineTest.small().withWalMode(mode))) {
+            recovered.verifyReferences();
             recovered.read(snapshot -> {
                 long size = snapshot.requireEdge(edge).size();
                 boolean committed = point.ordinal() >= CrashPoint.COMMIT_APPEND.ordinal();
@@ -113,6 +120,62 @@ class CrashRecoveryTest {
         }
     }
 
+    @ParameterizedTest
+    @EnumSource(WalMode.class)
+    void aBranchCreatedSinceTheLastCheckpointComesBackFromTheLog(WalMode mode) {
+        EngineOptions options = EngineTest.small().withWalMode(mode).withCheckpointWalBytes(Long.MAX_VALUE);
+        StorageEngine engine = StorageEngine.open(directory, options);
+        long edge = engine.write(txn -> {
+            long e = txn.createEdge(EngineTest.EDGE, EdgeKind.SET);
+            txn.insert(e, 1);
+            return e;
+        });
+        Branch branch = engine.createBranch("draft", Branch.MAIN);
+        engine.write(TxnOptions.defaults().onBranch(branch.id()), txn -> {
+            txn.insert(edge, 2);
+            return null;
+        });
+        engine.halt();
+        try (StorageEngine recovered = StorageEngine.open(directory, options)) {
+            assertEquals(List.of("draft"), recovered.branches().stream().map(Branch::name).filter("draft"::equals).toList());
+            assertEquals(1L, (long) recovered.read(snapshot -> snapshot.requireEdge(edge).size()));
+            try (Snapshot draft = recovered.snapshot(branch.id())) {
+                assertEquals(2L, draft.requireEdge(edge).size());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(WalMode.class)
+    void directoryEntriesLostInACrashAreRebuiltFromTheLog(WalMode mode) throws Exception {
+        EngineOptions options = EngineTest.small().withWalMode(mode).withCheckpointWalBytes(Long.MAX_VALUE);
+        Path addresses = directory.resolve("data").resolve("segments").resolve("pages.dir");
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
+            engine.write(txn -> txn.createNode(EngineTest.NODE, "checkpointed"));
+        }
+        byte[] checkpointed = Files.readAllBytes(addresses);
+        StorageEngine engine = StorageEngine.open(directory, options);
+        for (int i = 0; i < 50; i++) {
+            String name = "logged-" + i;
+            engine.write(txn -> txn.createNode(EngineTest.NODE, name));
+        }
+        engine.halt();
+        Files.write(addresses, checkpointed);
+        try (StorageEngine recovered = StorageEngine.open(directory, options)) {
+            assertEquals(51L, (long) recovered.read(snapshot -> snapshot.countOfType(0, EngineTest.NODE)));
+            recovered.write(txn -> txn.createNode(EngineTest.NODE, "after-crash"));
+        }
+        try (StorageEngine reopened = StorageEngine.open(directory, options)) {
+            reopened.read(snapshot -> {
+                assertEquals(52L, snapshot.countOfType(0, EngineTest.NODE));
+                for (String name : Stream.concat(Stream.of("checkpointed", "after-crash"), IntStream.range(0, 50).mapToObj(i -> "logged-" + i)).toList()) {
+                    assertTrue(snapshot.resolve(0, EngineTest.NODE, name).isPresent(), name);
+                }
+                return null;
+            });
+        }
+    }
+
     @Test
     void concurrentCommitsShareDurabilityBarriers() throws Exception {
         try (StorageEngine engine = StorageEngine.open(directory, EngineTest.small())) {
@@ -129,7 +192,7 @@ class CrashRecoveryTest {
 
     private Path lastSegment() throws Exception {
         try (Stream<Path> files = Files.list(directory.resolve("data").resolve("segments"))) {
-            return files.max(Comparator.naturalOrder()).orElseThrow();
+            return files.filter(file -> file.getFileName().toString().endsWith(".seg")).max(Comparator.naturalOrder()).orElseThrow();
         }
     }
 }

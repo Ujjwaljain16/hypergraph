@@ -19,6 +19,7 @@ import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -111,6 +112,26 @@ class ServerTest {
             }
             acceptor.join();
         }
+    }
+
+    @Test
+    void nodeCacheIsSizedInMegabytesAndOldNamesAreRejected(@TempDir Path data) throws Exception {
+        assertEquals(512L << 20, ServerConfig.load(Optional.empty(), Map.of("HSTORE_NODE_CACHE_MB", "512"), Map.of()).engineOptions().nodeCacheBytes());
+        assertEquals(256L << 20, ServerConfig.load(Optional.empty(), Map.of(), Map.of()).engineOptions().nodeCacheBytes());
+        List<IllegalArgumentException> failures = new ArrayList<>();
+        for (String old : List.of("cache_nodes", "cache_mb")) {
+            Files.writeString(data.resolve(ServerConfig.FILE), old + " = 4096\n");
+            failures.add(assertThrows(IllegalArgumentException.class, () -> ServerConfig.load(Optional.of(data), Map.of(), Map.of())));
+            failures.add(assertThrows(IllegalArgumentException.class,
+                    () -> ServerConfig.load(Optional.empty(), Map.of("HSTORE_" + old.toUpperCase(), "4096"), Map.of())));
+            failures.add(assertThrows(IllegalArgumentException.class,
+                    () -> ServerConfig.load(Optional.empty(), Map.of(), Map.of(old.replace('_', '-'), "4096"))));
+        }
+        for (String outOfRange : List.of("0", "-1", "99999999999999")) {
+            failures.add(assertThrows(IllegalArgumentException.class,
+                    () -> ServerConfig.load(Optional.empty(), Map.of("HSTORE_NODE_CACHE_MB", outOfRange), Map.of()).engineOptions()));
+        }
+        failures.forEach(failure -> assertTrue(failure.getMessage().contains("node_cache_mb"), failure.getMessage()));
     }
 
     @Test

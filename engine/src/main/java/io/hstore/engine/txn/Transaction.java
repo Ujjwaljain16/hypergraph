@@ -23,6 +23,7 @@ import io.hstore.engine.tree.TreeDiff;
 import io.hstore.engine.tree.WriteScope;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -60,7 +61,8 @@ public final class Transaction extends View implements AutoCloseable {
     private final Map<Long, Optional<AtomRecord>> atomReads = new HashMap<>();
     private final Map<KeyRead, Optional<?>> keyReads = new HashMap<>();
     private State state = State.ACTIVE;
-    private long spilledPages;
+    private long[] spilled = new long[0];
+    private int spilledPages;
 
     Transaction(TransactionManager manager, long id, Generation snapshot, TxnOptions options) {
         this.manager = manager;
@@ -68,11 +70,7 @@ public final class Transaction extends View implements AutoCloseable {
         this.snapshot = snapshot;
         this.branch = snapshot.branch(options.branch());
         this.options = options;
-        this.scope = new WriteScope((ref, schema) -> {
-            Ref stored = manager.spill(this.id, ref, schema);
-            spilledPages++;
-            return stored;
-        });
+        this.scope = new WriteScope((ref, schema) -> manager.spill(this.id, ref, schema, this::spilled));
         this.workspace = manager.workspace(scope, branch.roots(), Workspace.EdgeGuard.NONE, false);
     }
 
@@ -262,10 +260,6 @@ public final class Transaction extends View implements AutoCloseable {
         }
     }
 
-    boolean carriesStoredRoots() {
-        return ops.stream().anyMatch(op -> op instanceof Op.EdgeOp(long _, EdgeAction.Load _));
-    }
-
     public boolean readOnly() {
         return ops.isEmpty();
     }
@@ -278,6 +272,9 @@ public final class Transaction extends View implements AutoCloseable {
             return result;
         } catch (RuntimeException | Error failure) {
             state = State.ABORTED;
+            if (failure instanceof HStoreException.Conflict || failure instanceof HStoreException.ResourceLimit) {
+                manager.discard(spilled());
+            }
             throw failure;
         } finally {
             manager.unpin(snapshot.id());
@@ -289,6 +286,7 @@ public final class Transaction extends View implements AutoCloseable {
             state = State.ABORTED;
             if (spilledPages > 0) {
                 manager.logAbort(id);
+                manager.discard(spilled());
             }
             manager.unpin(snapshot.id());
         }
@@ -309,6 +307,17 @@ public final class Transaction extends View implements AutoCloseable {
 
     long spilledPages() {
         return spilledPages;
+    }
+
+    long[] spilled() {
+        return Arrays.copyOf(spilled, spilledPages);
+    }
+
+    private void spilled(long pageId) {
+        if (spilledPages == spilled.length) {
+            spilled = Arrays.copyOf(spilled, Math.max(16, spilled.length * 2));
+        }
+        spilled[spilledPages++] = pageId;
     }
 
     Workspace replay(RootVector latest) {

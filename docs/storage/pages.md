@@ -36,8 +36,8 @@ Sizes are computed exactly before writing (`varLongSize`, `signedVarLongSize`, `
 | 4 | 1 | `format` | Page format version, `1` (`PageHeader.FORMAT`). Distinct from the data-directory format (see [Format versioning](#format-versioning)). |
 | 5 | 1 | `type` | `PageType`: `1` = `INTERNAL` (branch), `2` = `LEAF` |
 | 6 | 1 | `schema` | `TreeSchema.id` (1–255) of the tree the node belongs to |
-| 7 | 1 | `flags` | Currently always `0` |
-| 8 | 8 | `pageId` | The image's own packed address (below). It is written last, after allocation (`PageHeader.assign`). |
+| 7 | 1 | `flags` | Bit 0 (`REFERS_TO_PAGES`): a leaf with at least one value that points at another page, such as a catalog edge with a member tree. `NodeCodec.decode` checks it against the values. The other bits are `0`. |
+| 8 | 8 | `pageId` | The image's own page number (below). It is written last, after allocation (`PageHeader.assign`). |
 | 16 | 8 | `creationEpoch` | Id of the generation whose commit wrote the image. Spilled pages use `head + 1`. |
 | 24 | 4 | `payloadLength` | Payload bytes after the header. Readers use it to size the second read. |
 | 28 | 4 | `slotCount` | Number of entries (leaf) or children (branch) |
@@ -57,7 +57,7 @@ Sizes are computed exactly before writing (`varLongSize`, `signedVarLongSize`, `
 * the magic is wrong;
 * the format is not `1`;
 * the type is unknown;
-* `pageId != expectedPageId` (a misdirected read, or a stale address pointing into reused bytes);
+* `pageId != expectedPageId` (a directory entry that points at the wrong image);
 * `80 + payloadLength` exceeds the bytes read;
 * the CRC does not match.
 
@@ -96,14 +96,14 @@ Leaf value formats in use:
 | posting directories (#5, #7, #9, #12, …) | `index/PostingsCodec` | `u8 0 \| varint n \| delta keys \| values` (inline) or `u8 1 \| Ref` (promoted) |
 | simple rows | `ValueCodec.rows(size, writer, reader)` | values written one after another |
 
-A worked example, produced by running `Materializer` over a two-entry `order-index` leaf (`{17 → 16777216, 18 → 33554432}`) allocated at `1:1234@157`. The image is 139 bytes, so it occupies 3 units (192 bytes):
+A worked example, produced by running `Materializer` over a two-entry `order-index` leaf (`{17 → 16777216, 18 → 33554432}`) written as page `#1234` by generation 157. The image is 139 bytes, so it occupies 3 units (192 bytes):
 
 ```text
-00  48 53 50 47 01 02 04 00 9d 00 d2 04 00 01 00 00   magic HSPG | format 1 | LEAF | schema 4 | flags 0 | pageId (le) = 0x10004d2009d
+00  48 53 50 47 01 02 04 00 00 00 d2 04 00 00 00 00   magic HSPG | format 1 | LEAF | schema 4 | flags 0 | pageId (le) = 0x4d20000
 10  9d 00 00 00 00 00 00 00 3b 00 00 00 02 00 00 00   epoch 157 | payloadLength 59 | slotCount 2
 20  02 00 00 00 00 00 00 00 11 00 00 00 00 00 00 00   count 2 | lower 17
 30  12 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00   upper 18 | height 0 | reserved
-40  0a 2a 2f 32 04 9f 42 eb 15 bc b1 19 00 00 00 00   fingerprint | crc32c | reserved
+40  0a 2a 2f 32 04 9f 42 eb da c5 41 7e 00 00 00 00   fingerprint | crc32c | reserved
 50  00                                                weightSum = zigzag(0)
 51  fe ff ff ff ff ff ff ff ff 01                     weightMin = zigzag(Long.MAX_VALUE)  (EMPTY sentinel)
 5b  ff ff ff ff ff ff ff ff ff 01                     weightMax = zigzag(Long.MIN_VALUE)
@@ -116,34 +116,102 @@ A worked example, produced by running `Materializer` over a two-entry `order-ind
 
 An `EntryMeasure.keyed` measure never feeds weight or validity, so those fields keep the `Summary.EMPTY` sentinels. They round-trip exactly at a fixed cost of 40 bytes per node. Incidence trees, whose measure does feed them, encode real ranges there instead.
 
-## Addressing: packed `PageId`
+## Page numbers and the page directory
 
-A `PageId` (`page/PageId.java`) is a 64-bit value:
+A `PageId` (`page/PageId.java`) is a page's permanent number, not its location:
+
+```text
+ 63                                             16 15            0
+┌───────────────────────────────────────────────┬────────────────┐
+│ index (48 bits)                               │ reuse (16 bits)│
+│ 1 .. 2⁴⁸ − 1                                  │                │
+└───────────────────────────────────────────────┴────────────────┘
+```
+
+* `index` starts at 1 and goes up by one for every image allocated. `0` is reserved, so `PageId.NONE = 0` means
+  "no page".
+* `reuse` is always 0 for now. It exists so a number can be handed out again later, once nothing can reach its old
+  image, and still differ from the id the old image was written with. `PageId.toString()` prints `#index`, or
+  `#index.reuse` when `reuse` isn't 0.
+
+Where an image is stored is a `PageAddress` (`page/PageAddress.java`):
 
 ```text
  63                   40 39                   16 15            0
-┌───────────────────────┬───────────────────────┬───────────────┐
-│ segment (24 bits)     │ offset (24 bits)      │ generation    │
-│ 1 .. 16 777 215       │ 64-byte units         │ (16 bits)     │
-└───────────────────────┴───────────────────────┴───────────────┘
+┌───────────────────────┬───────────────────────┬────────────────┐
+│ segment (24 bits)     │ offset (24 bits)      │ units (16 bits)│
+│ 1 .. 16 777 215       │ 64-byte units         │                │
+└───────────────────────┴───────────────────────┴────────────────┘
 ```
 
-* `segment` is the segment file id; `0` is reserved, so `PageId.NONE = 0` means "no page".
-* `offset` counts **64-byte units** (`PageId.UNIT_BYTES = 64`) from the start of the segment file. The byte position is `offset × 64`. With 24 bits, one segment can address at most 2²⁴ × 64 B = 1 GiB.
-* `generation` is `creationEpoch & 0xFFFF`. It is not needed for addressing. It makes the id of an image written in a different epoch differ from one written at the same location, which the identity check in `verify` exploits, and it makes ids readable in diagnostics (`PageId.toString()` prints `segment:offset@generation`).
+* `segment` is the segment file id.
+* `offset` counts **64-byte units** (`PageId.UNIT_BYTES = 64`) from the start of the file, so the byte position is
+  `offset × 64`. With 24 bits, one segment holds at most 2²⁴ × 64 B = 1 GiB.
+* `units` is the image length rounded up to whole units. 16 bits allow images up to 4 MiB, far above any page size.
 
-Worked encode/decode: segment 1, unit offset 1234, generation 157.
+The **page directory** (`page/PageDirectory.java`) maps numbers to addresses. It is the file
+`<data>/data/segments/pages.dir`: a 64-byte header (`i32 magic 0x52494450`, `i32 format 1`, `i64` next index),
+then one little-endian `i64` address per index, entry `i` at byte `64 + 8 × i`. An entry of 0 means the number has
+no image. The file is memory-mapped in 8 MiB chunks, and a new chunk is mapped when the file grows into it, so a
+lookup is a load from the OS page cache and the directory takes no Java heap. A million pages need 8 MB of it.
+
+Trees, nested references, `NodeCache` and `Ref` use numbers and never see an address. Only `PageStore` resolves
+them, and the WAL logs each new page's address next to its number so that recovery can put the directory entry
+back. That is what lets compaction move an image by copying its bytes and changing one directory entry, without
+rewriting the nodes that point at it ([maintenance.md](maintenance.md#compaction)). Entries are written and read with
+release and acquire ordering, so a reader racing a move sees either the old address or the new one, never a mix.
+
+Page `#1234`, stored as 3 units at unit 1234 of segment 1:
 
 ```text
-pack   = (1 << 40) | (1234 << 16) | 157
-       = 0x0000_0100_04D2_009D = 1 099 592 499 357
-byte offset in 00000001.seg = 1234 × 64 = 78 976
-segmentOf(p)    = p >>> 40                 = 1
-offsetOf(p)     = (p >>> 16) & 0xFFFFFF    = 1234
-generationOf(p) = p & 0xFFFF               = 157
+pageId           = 1234 << 16                     = 0x0000_0000_04D2_0000
+address          = (1 << 40) | (1234 << 16) | 3   = 0x0000_0100_04D2_0003
+directory entry  = byte 64 + 8 × 1234             = byte 9 936 of pages.dir
+image            = byte 1234 × 64                 = byte 78 976 of 00000001.seg
 ```
 
-A generation above 65 535 wraps: generation 70 000 is stored as 4 464.
+Entries are written when a page is allocated and forced to disk only at checkpoints (`PageStore.checkpoint`). The
+commit path never syncs the directory, because every WAL record for a page carries its address too. Recovery
+writes each logged address back into the directory before it checks or replays the page, so an entry that a crash
+lost comes back from the log. The header's next index is updated on every allocation, and recovery raises it past
+every number it restores, so a restored number is never handed out a second time.
+
+### Reference counts
+
+`<data>/data/segments/pages.ref` (`page/ReferenceCounts.java`) has the same layout as the directory: a 64-byte
+header (`i32 magic 0x53464552`, `i32 format 1`, `i64` state), then one little-endian `i64` per index at byte
+`64 + 8 × i`, memory-mapped in 8 MiB chunks. An entry is one of:
+
+| Entry | Meaning |
+|---|---|
+| `0` | No count: the number was never used, was released, or belongs to a page nothing has committed yet. |
+| `n > 0` | The page is in use and `n` places point at it: branch roots, branch nodes, or leaf values holding a nested tree. |
+| `0x8000_0000_0000_0000 \| g` (negative) | The page died in generation `g`. Generations before `g` can still reach it, so it keeps its address until it is released. |
+
+The header's state is `0` when the counts can be trusted and `1` when they have to be rebuilt on the next open.
+How the counts change and when pages are released is in [maintenance.md](maintenance.md#reference-counts).
+
+The file is written only at checkpoints, through `<data>/data/segments/pages.ref.journal`
+(`page/ReferenceJournal.java`):
+
+```text
+i32 magic 0x4C4E524A   i32 format 1   i64 checkpoint lsn   i32 count entries (n)   i32 released entries (m)
+n × (i64 index, i64 entry)       the new value of every count changed since the last checkpoint
+m × i64 index                    directory entries to clear
+i32 crc32c of everything above
+```
+
+The journal is written and forced before the catalog is published and applied afterwards, then truncated to zero
+bytes. On open it is applied again only if its LSN is the published checkpoint's, so a half-applied journal is
+finished and one from a checkpoint that never published is ignored.
+
+Page `#1234` in use by two parents, then dead since generation 31:
+
+```text
+xxd -s $((64 + 1234 * 8)) -l 8 -g 8 -e data/segments/pages.ref
+# 000026d0: 0000000000000002   in use, two references
+# 000026d0: 800000000000001f   the same entry after the page died in generation 31
+```
 
 ## Segment files
 
@@ -164,7 +232,7 @@ A generation above 65 535 wraps: generation 70 000 is stored as 4 464.
 
 The list is persisted in each catalog image ([catalog-and-generations.md](catalog-and-generations.md#catalog-images-checkpoints)) and restored by `PageStore.open`. On open, each `.seg` file found on disk gets `units = max(recorded units, ⌈file size / 64⌉)`. A file with no catalog entry (for example, one created after the last checkpoint and abandoned by a crash) is registered as `SEALED` with `pages = units = ⌈file size / 64⌉`. That is an upper bound on its image count, so its live ratio is underestimated and the segment stays a compaction candidate instead of being stranded. The newest `ACTIVE` segment resumes allocation at its recorded `units`.
 
-### Allocation (`PageStore.allocate(epoch, length)`)
+### Allocation (`PageStore.allocate(length)`)
 
 Allocation happens **after** encoding, because the exact length is only known then:
 
@@ -176,31 +244,62 @@ sequenceDiagram
     participant H as PageHeader
     M->>NC: encode(frozen, PageId.NONE, epoch, pageSize)
     NC-->>M: image (80 + payloadLength bytes, sealed with pageId 0)
-    M->>PS: allocate(epoch, image.byteSize())
+    M->>PS: allocate(image.byteSize())
     PS->>PS: units = ⌈len / 64⌉; roll the segment if nextUnit + units > segmentUnits
-    PS-->>M: pack(activeSegment, nextUnit, epoch); nextUnit += units
+    PS->>PS: index = next index; directory[index] = (activeSegment, nextUnit, units)
+    PS-->>M: pack(index, 0); nextUnit += units
     M->>H: assign(image, pageId): write pageId at offset 8, recompute the crc
     M->>M: sink.accept(pageId, image, frozen): WAL record, queued write, cache admission
 ```
 
 * `allocate` rejects `length > pageSize`.
-* Allocation is serialized by a `ReentrantLock`, and only the counter update runs under it.
+* Allocation is serialized by a `ReentrantLock`, and only the counter and directory updates run under it.
 * Rolling a segment marks the previous one `SEALED`, creates the next id, and resets `nextUnit` to 0.
-* `PageStore.write(pageId, image)` performs a positional `FileChannel.write` at `offset × 64` and marks the file dirty. The write happens later, inside `TransactionManager.append`, after the WAL records have been appended (see [wal-and-recovery.md](../transactions/wal-and-recovery.md)).
-* `PageStore.sync()` calls `FileChannel.force(false)` on every dirty segment. The group committer calls it once per batch in `PAGE_REFERENCES` WAL mode, before the WAL sync.
+* `PageStore.write(pageId, image)` looks the number up in the directory and performs a positional `FileChannel.write` at `offset × 64`, then marks the file dirty. It refuses an image longer than the units allocated for it. The write happens later, inside `TransactionManager.append`, after the WAL records have been appended (see [wal-and-recovery.md](../transactions/wal-and-recovery.md)).
+* `PageStore.sync()` calls `FileChannel.force(false)` on every dirty segment. The group committer calls it once per batch in `PAGE_REFERENCES` WAL mode, before the WAL sync. `PageStore.checkpoint()` does the same and then forces the page directory; only `Checkpointer` calls it.
 
 Compared with fixed page slots, packing removes almost all internal fragmentation for the many small nodes a hypergraph produces. A two-member hyperedge's member tree is one leaf of roughly 100–150 bytes, which now occupies 2–3 units instead of a full 16 KiB page.
 
 ### Reading (`SegmentFile.read(position, maximum)`)
 
-The length of an image is not known before its header is read, so a read takes at most two system calls:
+`PageStore.read(pageId)` looks the number up in the directory, then asks that segment for at most `units × 64` bytes
+at `offset × 64`. A number with no entry fails with `corrupt(pageId, "page has no address")`.
 
-1. Allocate one buffer of `min(pageSize, 4096)` bytes and read it at `offset × 64`. This is the only allocation for most images.
-2. If at least 80 bytes arrived, compute `length = 80 + payloadLength` from header offset 24:
-   * if `length` is already covered by the first read, or exceeds `pageSize` (a corrupt header), return the first buffer; `verify` then decides;
-   * otherwise, and only then, allocate a second buffer of exactly `length` bytes, copy the first read into it, and read the remainder.
+Each segment file has a read-only memory map. If the map covers the image, `read` copies exactly
+`80 + payloadLength` bytes out of it into a new heap array and returns that. There is no system call, and the raw
+bytes stay in the OS page cache rather than on the Java heap, which only holds the decoded nodes in `NodeCache`.
 
-Most nodes fit in 4 KiB, so most reads are a single 4 KiB `pread`. A short read at end of file returns whatever arrived, and the header check then rejects it.
+The copy is deliberate. `ByteCursor` reads one byte at a time through `MemorySegment`, and the JIT only makes that
+fast when every segment it sees is the same kind. Decoding straight from the map, while the WAL, catalog and
+feed decode from heap arrays, made decoding two to five times slower everywhere in a microbenchmark. Copying a
+page costs well under a microsecond and keeps every decoder on heap memory.
+
+If the image ends past the map, the file may need mapping again:
+
+* A sealed segment is remapped at its current size right away. The store seals a segment when it rolls to the
+  next one, and seals every segment except the active one when it opens.
+* The active segment is remapped only after the file has grown 4 MiB past the map. Until then, reads near the end
+  of the file use `pread`. This keeps a segment that is still filling up from being remapped on every new page.
+
+Each map has its own `Arena.ofShared()`. When a segment is remapped, the old map is closed as soon as the new one is
+in place, and deleting or closing a segment closes its map. A deleted segment's disk space therefore comes back
+straight away instead of whenever the garbage collector gets to the map. A read that was copying from a map when it
+was closed gets an `IllegalStateException`, sees that the map is no longer alive, and reads again from the current
+one. Readers only touch a map for the length of one copy, and compaction only deletes segments that no reader can
+reach, so this retry is rare. Closing a shared arena in a Native Image build needs `-H:+SharedArenaSupport`, which
+GraalVM still lists as experimental; the `native` profile in `server/pom.xml` turns it on. Segment files are only
+ever appended to or deleted, never truncated, so a map can't end up pointing past the end of its file.
+
+`pread` doesn't know how long an image is until it has the header, so it takes one or two system calls:
+
+1. Allocate a buffer of `min(units × 64, 4096)` bytes and read it at `offset × 64`.
+2. If at least 80 bytes came back, compute `length = 80 + payloadLength` from header offset 24:
+   * if `length` is larger than `units × 64`, the header is corrupt; return the buffer and let `verify` fail it;
+   * if the first read already has `length` bytes, return those;
+   * otherwise allocate a buffer of exactly `length` bytes, copy in what was read, and read the rest.
+
+A short read at the end of the file returns what it got, and the header check rejects it. Both paths return
+read-only memory, so nothing can write into a stored image through a read.
 
 ## Caching and I/O accounting
 
@@ -215,7 +314,7 @@ Most nodes fit in 4 KiB, so most reads are a single 4 KiB `pread`. A short read 
 The cache stores **decoded, frozen** `Node` objects, not bytes. A hit therefore costs no decoding and no allocation. The cache has 16 shards; a node goes to shard `mix(pageId) >>> 60`. Each shard has:
 
 * a `ConcurrentHashMap<Long, Slot>` from page id to `Slot(pageId, node, volatile referenced)`;
-* a `Slot[] ring` of capacity `max(16, cache_nodes / 16)` with a CLOCK hand;
+* a byte budget of `max(64 KiB, node_cache_mb / 16)` and a circular, doubly linked ring of slots with a CLOCK hand. Each slot weighs `Node.heapBytes()`, an estimate of the decoded node's heap size: 144 bytes for the node and its summary, its key and value or child arrays, then 96 bytes plus the encoded value per leaf entry, or 128 bytes per child reference in a branch. Those constants come from measuring retained heap against cache contents at two dataset sizes;
 * a `ReentrantLock` taken only for admission.
 
 **Reads are lock-free.** `get` is a `ConcurrentHashMap.get`, plus setting `referenced = true` if it was clear. The check avoids a redundant volatile write on hot entries.
@@ -223,8 +322,10 @@ The cache stores **decoded, frozen** `Node` objects, not bytes. A hit therefore 
 **Admission (`put`) uses CLOCK second-chance eviction under the shard lock:**
 
 * An entry already holding the same node is left alone.
-* An entry for the same page with a different node is replaced in its ring slot.
-* Otherwise the hand advances, clearing `referenced` bits, until it finds an empty slot or an unreferenced one. That victim is removed from the map, conditionally on the identity of its `Slot`, the new slot takes its place, and the hand moves on.
+* An entry for the same page with a different node is unlinked first, and its bytes are released.
+* A node larger than the shard's whole budget isn't cached.
+* While the new node doesn't fit in the budget, the hand advances, clearing `referenced` bits, until it reaches an unreferenced slot. That victim is unlinked and removed from the map, conditionally on the identity of its `Slot`.
+* The new slot is linked just behind the hand, so it gets a full sweep before it can be evicted.
 
 This approximates LRU. Readers never contend with each other, and they contend with writers only on the map's internal bins.
 
@@ -243,8 +344,8 @@ When `pagesRead + cacheHits` exceeds the budget, it throws `HStoreException.limi
 
 For each materialized image, the commit appends one WAL record ([wal-and-recovery.md](../transactions/wal-and-recovery.md)):
 
-* `PAGE_REFERENCES` (the default) appends `PageRef(txnId, pageId, length, crc32c(image))`, about 20 bytes. The image itself is written only to its segment, and it must be durable before the WAL record that refers to it (the data-before-log ordering in `TransactionManager.makeDurable`). Recovery accepts a committed transaction only if every referenced image reads back with a valid header and matching CRC (`Recovery.intact`). Replay stops at the first commit that fails this check.
-* `PAGE_IMAGES` appends `Page(txnId, pageId, image bytes)`. Recovery rewrites the image at its address, and the data file needs no sync before the WAL.
+* `PAGE_REFERENCES` (the default) appends `PageRef(txnId, pageId, address, length, crc32c(image))`, 47 or 48 bytes. The image itself is written only to its segment, and it must be durable before the WAL record that refers to it (the data-before-log ordering in `TransactionManager.makeDurable`). Recovery puts the address back into the directory, then accepts a committed transaction only if every referenced image reads back with a valid header and matching CRC (`Recovery.intact`). Replay stops at the first commit that fails this check.
+* `PAGE_IMAGES` appends `Page(txnId, pageId, address, image bytes)`. Recovery puts the address back into the directory and rewrites the image there, and the data file needs no sync before the WAL.
 
 Because images are never overwritten in place, a torn write can only damage an image that no durable commit references yet. Reference mode is safe without full-page images.
 
@@ -252,18 +353,24 @@ Because images are never overwritten in place, a torn write can only damage an i
 
 | Version | Where | Meaning |
 |---|---|---|
-| `format=3` in `<data>/FORMAT` | `StorageEngine.verifyFormat` | Packed 64-byte-unit extents, with image sizes in every stored reference. Directories written by older builds (`format=1` fixed page slots, `format=2` references without sizes) fail to open: `uses storage format 2; this build reads format 3 (sized page references); export and reload it`. |
+| `format=5` in `<data>/FORMAT` | `StorageEngine.verifyFormat` | Reference counts in `pages.ref`, page numbers resolved through `pages.dir`, images packed in 64-byte units, image sizes in every stored reference. Directories written by older builds (`format=1` fixed page slots, `format=2` references without sizes, `format=3` references by address, `format=4` no reference counts) fail to open: `uses storage format 4; this build reads format 5 (reference counts); export and reload it`. |
 | `page-size=N` in `<data>/FORMAT` | same | Fixed at creation. A mismatching `--page_size` is rejected. |
-| header byte 4 = `1` | `PageHeader.FORMAT` | Node image layout; unchanged by packing. |
+| header byte 4 = `1` | `PageHeader.FORMAT` | Node image layout; unchanged by packing and by page numbers. |
+| `pages.dir` header | `PageDirectory` | `i32 magic 0x52494450`, `i32 format 1`. |
+| `pages.ref` header | `ReferenceCounts` | `i32 magic 0x53464552`, `i32 format 1`. |
+| `pages.ref.journal` header | `ReferenceJournal` | `i32 magic 0x4C4E524A`, `i32 format 1`. |
 | `SegmentInfo` in catalog images | `CatalogImage` | Now `(id, u8 state, pages, units, retiredAt)` |
 
 ## Inspecting images by hand
 
-The layout is simple enough to inspect with standard tools. To print the header of the image at `1:1234@157` (byte 1234 × 64 = 78 976 of segment 1):
+The layout is simple enough to inspect with standard tools. To print the header of page `#1234`, read its
+directory entry first, then the image it points at:
 
 ```bash
+xxd -s $((64 + 1234 * 8)) -l 8 -g 8 -e data/segments/pages.dir
+# 000026d0: 0000010004d20003   segment 1, unit 1234, 3 units
 xxd -s $((1234 * 64)) -l 80 data/segments/00000001.seg
-# 00013480: 4853 5047 0102 0400 9d00 d204 0001 0000  HSPG, format 1, LEAF, schema 4, flags 0, pageId…
+# 00013480: 4853 5047 0102 0400 0000 d204 0000 0000  HSPG, format 1, LEAF, schema 4, flags 0, pageId…
 ```
 
 `hstore check <dir>` decodes and verifies every reachable image, including checksums, identity, ordering, balance and summaries. See [maintenance.md](maintenance.md#verification-hstore-check).
