@@ -141,6 +141,69 @@ public final class IncidenceCodec implements ValueCodec<Incidence> {
         }
     }
 
+    @Override
+    public long[] decodeImplied(ByteCursor in, long[] keys) {
+        long start = in.position();
+        if (in.getUnsignedByte() != 0) {
+            in.position(start);
+            return null;
+        }
+        if (!sequenced) {
+            return keys;
+        }
+        long[] members = new long[keys.length];
+        for (int i = 0; i < members.length; i++) {
+            members[i] = in.getSignedVarLong();
+        }
+        return members;
+    }
+
+    @Override
+    public void encodeImplied(ByteCursor out, long[] keys, long[] members) {
+        out.putByte(0);
+        if (sequenced) {
+            for (long member : members) {
+                out.putSignedVarLong(member);
+            }
+        }
+    }
+
+    @Override
+    public long[] impliedWords(long[] keys, List<Incidence> values) {
+        long[] members = sequenced ? new long[values.size()] : keys;
+        for (int i = 0; i < values.size(); i++) {
+            Incidence incidence = values.get(i);
+            if (!plain(incidence)) {
+                return null;
+            }
+            if (sequenced) {
+                members[i] = incidence.member();
+            } else if (incidence.member() != keys[i]) {
+                return null;
+            }
+        }
+        return members;
+    }
+
+    @Override
+    public Incidence implied(long member) {
+        return Incidence.of(member);
+    }
+
+    @Override
+    public int impliedSize(long member) {
+        return sequenced ? ByteCursor.signedVarLongSize(member) : 0;
+    }
+
+    private static boolean plain(Incidence incidence) {
+        for (Column column : COLUMNS) {
+            if (column.present.test(incidence)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static long value(long[][] columns, Column column, int index, long fallback) {
         long[] decoded = columns[column.ordinal()];
         return decoded == null ? fallback : decoded[index];

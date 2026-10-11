@@ -9,7 +9,6 @@ import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageType;
 
 import java.lang.foreign.MemorySegment;
-import java.util.Arrays;
 import java.util.List;
 
 public final class NodeCodec {
@@ -64,10 +63,17 @@ public final class NodeCodec {
         if (count < 1 || count > Ref.INLINE_MAX_ENTRIES) {
             throw new IllegalStateException("inline tree of " + count + " entries in " + schema);
         }
-        long[] keys = decodeKeys(in, count);
-        Object[] values = new Object[count];
+        return decodeLeaf(in, schema, decodeKeys(in, count), null);
+    }
+
+    private static Leaf decodeLeaf(ByteCursor in, TreeSchema<?> schema, long[] keys, Summary summary) {
+        long[] words = schema.codec().decodeImplied(in, keys);
+        if (words != null) {
+            return Leaf.implied(schema, keys, words, summary);
+        }
+        Object[] values = new Object[keys.length];
         schema.codec().decode(in, keys, values);
-        return Leaf.decoded(schema, keys, values, null);
+        return Leaf.decoded(schema, keys, values, summary);
     }
 
     private static long[] decodeKeys(ByteCursor in, int count) {
@@ -80,6 +86,11 @@ public final class NodeCodec {
     }
 
     private static <V> void encodeValues(ByteCursor out, TreeSchema<V> schema, long[] keys, Leaf leaf) {
+        long[] words = leaf.impliedWords();
+        if (words != null) {
+            schema.codec().encodeImplied(out, keys, words);
+            return;
+        }
         @SuppressWarnings("unchecked")
         List<V> values = (List<V>) leaf.valueList();
         schema.codec().encode(out, keys, values);
@@ -126,12 +137,11 @@ public final class NodeCodec {
         long[] keys = decodeKeys(in, count);
         return switch (header.type()) {
             case LEAF -> {
-                Object[] values = new Object[count];
-                schema.codec().decode(in, keys, values);
-                if (header.refersToPages() != (schema.codec().holdsRefs() && refersToPages(schema, Arrays.asList(values)))) {
+                Leaf leaf = decodeLeaf(in, schema, keys, summary);
+                if (header.refersToPages() != refersToPages(leaf)) {
                     throw HStoreException.corrupt(pageId, "page header and contents disagree on whether it refers to other pages");
                 }
-                yield Leaf.decoded(schema, keys, values, summary);
+                yield leaf;
             }
             case INTERNAL -> {
                 Ref[] children = new Ref[count];

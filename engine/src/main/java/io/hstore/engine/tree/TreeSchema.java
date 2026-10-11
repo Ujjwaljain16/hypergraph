@@ -3,6 +3,8 @@
 
 package io.hstore.engine.tree;
 
+import java.util.List;
+
 public record TreeSchema<V>(int id, String name, FingerprintMode fingerprint, ValueCodec<V> codec, EntryMeasure<V> measure) {
 
     public static final int KEY_BYTES = 10;
@@ -20,6 +22,19 @@ public record TreeSchema<V>(int id, String name, FingerprintMode fingerprint, Va
 
     int entryBytes(Object value) {
         return codec.maxSize(cast(value));
+    }
+
+    Object implied(long word) {
+        return codec.implied(word);
+    }
+
+    int impliedBytes(long word) {
+        return codec.impliedSize(word);
+    }
+
+    @SuppressWarnings("unchecked")
+    long[] impliedWords(long[] keys, List<?> values) {
+        return codec.impliedWords(keys, (List<V>) values);
     }
 
     int leafOverhead(int entries) {

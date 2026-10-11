@@ -17,6 +17,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -396,6 +397,63 @@ class TreeTest {
         Leaf root = (Leaf) written.node(written.root());
         Leaf bare = Leaf.decoded(EngineSlots.ATOM_SCHEMA, new long[]{1}, new Object[]{AtomRecord.EdgeRecord.of(2, EdgeKind.SET)}, null);
         assertTrue(root.heapBytes() >= bare.heapBytes() + ((Ref.Inline) inlined.members()).leaf().heapBytes());
+    }
+
+    @Test
+    void plainMemberLeavesKeepNoIncidencePerMember() {
+        long pageId = PageId.pack(3, 0);
+        for (TreeSchema<Incidence> schema : List.of(TopologySchemas.SET_MEMBERS, TopologySchemas.ORDERED_MEMBERS)) {
+            long[] keys = LongStream.range(0, 200).map(i -> 10 + 3 * i).toArray();
+            boolean set = schema == TopologySchemas.SET_MEMBERS;
+            Object[] incidences = Arrays.stream(keys).mapToObj(key -> Incidence.of(set ? key : 7 * key)).toArray();
+            Leaf objects = Leaf.decoded(schema, keys, incidences, null);
+            MemorySegment image = NodeCodec.encode(objects, pageId, 1, 4096);
+            Leaf decoded = (Leaf) NodeCodec.decode(image, pageId, schema);
+            assertArrayEquals(image.toArray(ValueLayout.JAVA_BYTE),
+                    NodeCodec.encode(decoded, pageId, 1, 4096).toArray(ValueLayout.JAVA_BYTE));
+            assertEquals(objects.valueList(), decoded.valueList());
+            assertEquals(objects.summary(), decoded.summary());
+            assertEquals(objects.bytes(), decoded.bytes());
+            assertTrue(decoded.heapBytes() + 64 * keys.length <= objects.heapBytes(), decoded.heapBytes() + " vs " + objects.heapBytes());
+            Leaf frozen = objects.frozenWith(incidences);
+            assertEquals(decoded.heapBytes(), frozen.heapBytes());
+            assertTrue(decoded.sameEntries(objects) && objects.sameEntries(frozen));
+
+            Object[] mixed = incidences.clone();
+            mixed[5] = ((Incidence) mixed[5]).withWeight(2.0);
+            Leaf weighted = Leaf.decoded(schema, keys, mixed, null);
+            Leaf kept = (Leaf) NodeCodec.decode(NodeCodec.encode(weighted, pageId, 1, 4096), pageId, schema);
+            assertEquals(weighted.valueList(), kept.valueList());
+            assertEquals(weighted.heapBytes(), kept.heapBytes());
+            assertFalse(kept.sameEntries(decoded));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {1, 2, 3})
+    void memberTreesMatchAnOracleAcrossPlainAndWeightedLeaves(long seed) {
+        RandomGenerator random = random(seed);
+        MemoryPages pages = new MemoryPages(1024);
+        WriteScope scope = new WriteScope();
+        Tree<Incidence> tree = Tree.empty(TopologySchemas.SET_MEMBERS, pages);
+        TreeMap<Long, Incidence> oracle = new TreeMap<>();
+        for (int round = 0; round < 40; round++) {
+            for (int step = 0; step < 100; step++) {
+                long member = random.nextLong(3000);
+                if (random.nextInt(10) < 6) {
+                    Incidence incidence = member < 400 && random.nextInt(4) == 0 ? Incidence.of(member).withWeight(1.5) : Incidence.of(member);
+                    tree = tree.put(scope, member, incidence);
+                    oracle.put(member, incidence);
+                } else {
+                    tree = tree.remove(scope, member);
+                    oracle.remove(member);
+                }
+            }
+            tree = pages.persist(tree);
+            scope.freeze();
+            assertEquals(List.copyOf(oracle.values()), tree.values().toList());
+            checkInvariants(tree);
+        }
     }
 
     private static Leaf memberLeaf(long... members) {

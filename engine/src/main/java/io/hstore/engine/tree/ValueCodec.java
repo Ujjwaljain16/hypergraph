@@ -5,6 +5,7 @@ package io.hstore.engine.tree;
 
 import io.hstore.engine.page.ByteCursor;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -17,6 +18,26 @@ public interface ValueCodec<V> {
     void encode(ByteCursor out, long[] keys, List<V> values);
 
     void decode(ByteCursor in, long[] keys, Object[] into);
+
+    default long[] decodeImplied(ByteCursor in, long[] keys) {
+        return null;
+    }
+
+    default long[] impliedWords(long[] keys, List<V> values) {
+        return null;
+    }
+
+    default void encodeImplied(ByteCursor out, long[] keys, long[] words) {
+        encode(out, keys, Arrays.stream(words).mapToObj(this::implied).toList());
+    }
+
+    default V implied(long word) {
+        throw new UnsupportedOperationException(getClass().getSimpleName() + " has no values implied by a single word");
+    }
+
+    default int impliedSize(long word) {
+        return maxSize(implied(word));
+    }
 
     default int leafOverhead(int entries) {
         return 0;
