@@ -55,7 +55,11 @@ interface Store extends AutoCloseable {
 
     void flush();
 
+    void compact();
+
     long bytesWritten();
+
+    long bytesRead();
 
     Path directory();
 

@@ -37,6 +37,7 @@ public final class PageStore implements AutoCloseable {
     private final AtomicLong pagesWritten = new AtomicLong();
     private final AtomicLong bytesWritten = new AtomicLong();
     private final AtomicLong pagesRead = new AtomicLong();
+    private final AtomicLong bytesRead = new AtomicLong();
     private PageDirectory addresses;
     private ReferenceCounts references;
     private long[] released = new long[64];
@@ -303,7 +304,9 @@ public final class PageStore implements AutoCloseable {
             throw HStoreException.corrupt(pageId, "segment does not exist");
         }
         pagesRead.incrementAndGet();
-        return file.read((long) PageAddress.offsetOf(address) * PageId.UNIT_BYTES, PageAddress.unitsOf(address) * PageId.UNIT_BYTES);
+        MemorySegment page = file.read((long) PageAddress.offsetOf(address) * PageId.UNIT_BYTES, PageAddress.unitsOf(address) * PageId.UNIT_BYTES);
+        bytesRead.addAndGet(page.byteSize());
+        return page;
     }
 
     public long addressOf(long pageId) {
@@ -472,6 +475,10 @@ public final class PageStore implements AutoCloseable {
 
     public long pagesRead() {
         return pagesRead.get();
+    }
+
+    public long bytesRead() {
+        return bytesRead.get();
     }
 
     @Override

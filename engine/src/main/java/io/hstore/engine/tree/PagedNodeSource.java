@@ -8,6 +8,8 @@ import io.hstore.engine.page.PageType;
 
 import java.lang.foreign.MemorySegment;
 
+import java.lang.foreign.MemorySegment;
+
 public final class PagedNodeSource implements NodeSource {
 
     private final PageStore store;
@@ -31,8 +33,9 @@ public final class PagedNodeSource implements NodeSource {
             return cached;
         }
         IoTrace.recordRead();
-        Node node = NodeCodec.decode(store.read(pageId), pageId, schema);
-        cache.put(pageId, node);
+        MemorySegment page = store.read(pageId);
+        Node node = NodeCodec.decode(page, pageId, schema);
+        cache.put(pageId, node, node.heapBytes());
         return node;
     }
 
@@ -63,7 +66,7 @@ public final class PagedNodeSource implements NodeSource {
     }
 
     public void admit(long pageId, Node frozen) {
-        cache.put(pageId, frozen);
+        cache.put(pageId, frozen, frozen.heapBytes());
     }
 
     @Override

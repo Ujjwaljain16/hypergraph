@@ -80,7 +80,7 @@ public final class StorageEngine implements AutoCloseable {
         FeedCodec codec = new FeedCodec(slots);
         this.feed = ChangeFeed.open(directory.resolve("feed"), codec, options.walSegmentBytes());
         this.recovery = Recovery.recover(checkpoint, wal, pages, feed, codec);
-        this.cache = new NodeCache(options.cachedNodes());
+        this.cache = new NodeCache(options.nodeCacheBytes(), options.pageSize());
         PagedNodeSource source = new PagedNodeSource(pages, cache);
         this.references = ReferenceCounter.recover(pages, source, slots, checkpoint.current(), recovery.replayed(),
                 recovery.image().history(), recovery.image().current());
@@ -308,7 +308,7 @@ public final class StorageEngine implements AutoCloseable {
     public EngineStats stats() {
         TransactionManager.Statistics txn = transactions.statistics();
         return new EngineStats(transactions.current().id(), txn.commits(), txn.rebases(), txn.conflicts(),
-                pages.pagesRead(), pages.pagesWritten(), pages.bytesWritten(), cache.hits(), cache.misses(),
+                pages.pagesRead(), pages.pagesWritten(), pages.bytesWritten(), pages.bytesRead(), cache.hits(), cache.misses(),
                 wal.bytesAppended(), wal.segmentCount(), feed.size(), pages.segments());
     }
 

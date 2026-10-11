@@ -1,6 +1,7 @@
 package io.hstore.bench;
 
 import io.hstore.db.value.Json;
+import io.hstore.engine.EngineOptions;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -21,6 +22,8 @@ import java.util.concurrent.Future;
 import java.util.function.IntToLongFunction;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import java.util.stream.IntStream;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 
 public final class Comparison {
@@ -65,11 +68,16 @@ public final class Comparison {
 
     private static final int BATCH = 1_000;
     private static final int COMMITS = 5_000;
+    private static final int ID_BYTES = 8;
+    private static final int UPDATE_BYTES = ID_BYTES + 24;
     private static final String COMMITTED = "committed ";
     private static final long MIXED_NANOS = 10_000_000_000L;
     private static final int MIXED_BATCH = 10;
     private static final int MIXED_UPDATES_PER_SECOND = 1_000;
     private static final int SAMPLES_PER_THREAD = 200_000;
+    private static final long COMPACTION_WINDOW_NANOS = 10_000_000_000L;
+    private static final long COMPACTION_DELAY_NANOS = 1_000_000_000L;
+    private static final long COMPACTION_INTERVAL_NANOS = 20_000_000L;
     private static final long SEED = 20_260_904L;
 
     private Comparison() {
@@ -83,7 +91,7 @@ public final class Comparison {
             case "report" -> IO.println(Report.markdown(args));
             default -> {
                 IO.println("""
-                        usage: Comparison run --store hstore|hypergraphdb [--scale N] [--durability async|sync] [--threads N] [--history N] [--cache-mb N] --out FILE
+                        usage: Comparison run --store hstore|hypergraphdb [--scale N] [--durability async|sync] [--threads N] [--history N] [--cache-mb N] [--compaction-live-ratio R] [--pages-per-segment N] --out FILE
                                Comparison crash --store hstore|hypergraphdb --dir DIRECTORY (used by run; ingests until killed)
                                Comparison report FILE... (runs of two stores; cells show the median and range)""");
                 System.exit(2);
@@ -116,86 +124,93 @@ public final class Comparison {
         IO.println("%s: %,d nodes, %,d hyperedges, %,d incidences, durability %s, %d threads"
                 .formatted(store.name(), dataset.nodes(), dataset.edges().length, dataset.incidences(), sync ? "sync" : "async", threads));
         try {
-            results.add(writing(store, () -> measure("ingest.nodes", "insert nodes in transactions of 1,000", dataset.nodes(), () -> {
+            long nodeBytes = IntStream.range(0, dataset.nodes()).mapToLong(i -> ID_BYTES + ("node-" + i).length()).sum();
+            results.add(writing(store, nodeBytes, () -> measure("ingest.nodes", "insert nodes in transactions of 1,000", dataset.nodes(), () -> {
                 store.ingestNodes(dataset, BATCH);
                 return dataset.nodes();
             })));
-            results.add(writing(store, () -> measure("ingest.edges", "insert hyperedges (mean cardinality %.1f) in transactions of 1,000"
+            results.add(writing(store, (dataset.incidences() + dataset.edges().length) * ID_BYTES, () -> measure("ingest.edges", "insert hyperedges (mean cardinality %.1f) in transactions of 1,000"
                     .formatted((double) dataset.incidences() / dataset.edges().length), dataset.edges().length, () -> {
                 store.ingestEdges(dataset, BATCH);
                 return dataset.incidences();
             })));
             totals.put("retainedHeap", number(JvmUsage.retainedHeap() - baselineHeap));
             int[] nodes = dataset.probeNodes();
-            results.add(read("read.incidence", "enumerate the incidence set of a node", nodes.length,
+            results.add(read(store, "read.incidence", "enumerate the incidence set of a node", nodes.length,
                     (from, to) -> store.incidence(nodes, from, to), true));
-            results.add(read("read.members", "enumerate the members of a hyperedge", dataset.probeEdges().length,
+            results.add(read(store, "read.members", "enumerate the members of a hyperedge", dataset.probeEdges().length,
                     (from, to) -> store.members(dataset.probeEdges(), from, to), true));
-            results.add(read("read.comembership", "count hyperedges containing both atoms of a pair", dataset.probePairs().length,
+            results.add(read(store, "read.comembership", "count hyperedges containing both atoms of a pair", dataset.probePairs().length,
                     (from, to) -> store.coMembership(dataset.probePairs(), from, to), true));
             int[] twoHop = dataset.probeTwoHop();
-            results.add(read("read.twohop", "count the distinct nodes that share a hyperedge with a node", twoHop.length,
+            results.add(read(store, "read.twohop", "count the distinct nodes that share a hyperedge with a node", twoHop.length,
                     (from, to) -> store.twoHop(twoHop, from, to), true));
             results.add(concurrent(store, dataset, threads));
             results.add(latency("latency.read", "one incidence lookup per read transaction", nodes.length,
                     i -> store.incidence(nodes, i, i + 1), true));
             int[] round = {0};
-            results.add(writing(store, () -> measure("write.update", "replace a node value in transactions of 1,000", dataset.updates().length,
+            results.add(writing(store, (long) dataset.updates().length * UPDATE_BYTES, () -> measure("write.update", "replace a node value in transactions of 1,000", dataset.updates().length,
                     () -> batched(dataset.updates().length, (from, to) -> {
                         store.update(dataset.updates(), from, to, round[0]++);
                         return to - from;
                     }))));
-            results.add(writing(store, () -> latency("latency.commit", "one node update per write transaction", COMMITS, i -> {
+            results.add(writing(store, (long) COMMITS * UPDATE_BYTES, () -> latency("latency.commit", "one node update per write transaction", COMMITS, i -> {
                 store.update(dataset.updates(), i, i + 1, round[0]++);
                 return 1;
             }, false)));
             results.addAll(mixed(store, dataset, threads));
             int largeSize = dataset.nodes();
-            results.add(writing(store, () -> measure("large.ingest", "create one hyperedge with %,d members".formatted(largeSize), largeSize, () -> {
+            results.add(writing(store, (largeSize + 1L) * ID_BYTES, () -> measure("large.ingest", "create one hyperedge with %,d members".formatted(largeSize), largeSize, () -> {
                 store.largeEdge(largeSize);
                 return largeSize;
             })));
             store.scanLargeEdge();
-            results.add(measure("large.scan", "enumerate all members of the large hyperedge (x20)", 20L * largeSize, () -> {
+            results.add(reading(store, () -> measure("large.scan", "enumerate all members of the large hyperedge (x20)", 20L * largeSize, () -> {
                 long total = 0;
                 for (int i = 0; i < 20; i++) {
                     total += store.scanLargeEdge();
                 }
                 return total;
-            }));
-            results.add(read("large.probe", "test whether a node belongs to the large hyperedge", nodes.length,
+            })));
+            results.add(read(store, "large.probe", "test whether a node belongs to the large hyperedge", nodes.length,
                     (from, to) -> store.probeLargeEdge(nodes, from, to), true));
             results.add(measure("reopen", "close and reopen the database, including recovery", 1, () -> {
                 store.reopen();
                 return 1;
             }));
-            results.add(read("read.incidence.cold", "incidence sets immediately after reopening", nodes.length,
+            results.add(read(store, "read.incidence.cold", "incidence sets immediately after reopening", nodes.length,
                     (from, to) -> store.incidence(nodes, from, to), false));
             long[] loaded = new long[1];
             store.reopen(() -> loaded[0] = store.diskBytes());
             results.add(new Result("disk", "bytes on disk after a clean shutdown", loaded[0], 1000.0, loaded[0]));
             int[] deletions = dataset.deletions();
-            results.add(writing(store, () -> measure("churn.delete", "delete %,d hyperedges (%d%%) in transactions of 1,000"
+            long deletedBytes = Arrays.stream(deletions).mapToLong(edge -> (dataset.edges()[edge].length + 1L) * ID_BYTES).sum();
+            results.add(writing(store, deletedBytes, () -> measure("churn.delete", "delete %,d hyperedges (%d%%) in transactions of 1,000"
                     .formatted(deletions.length, Math.round(100.0 * deletions.length / dataset.edges().length)), deletions.length,
                     () -> batched(deletions.length, (from, to) -> {
                         store.deleteEdges(deletions, from, to);
                         return to - from;
                     }))));
             int[][] removals = dataset.removals();
-            results.add(writing(store, () -> measure("churn.remove", "remove one member from each of %,d other hyperedges, 1,000 per transaction"
+            results.add(writing(store, removals.length * 2L * ID_BYTES, () -> measure("churn.remove", "remove one member from each of %,d other hyperedges, 1,000 per transaction"
                     .formatted(removals.length), removals.length, () -> batched(removals.length, (from, to) -> {
                         store.removeMembers(removals, from, to);
                         return to - from;
                     }))));
-            results.add(read("read.incidence.churned", "enumerate incidence sets after the deletes", nodes.length,
+            results.add(read(store, "read.incidence.churned", "enumerate incidence sets after the deletes", nodes.length,
                     (from, to) -> store.incidence(nodes, from, to), true));
+            long[] churned = new long[1];
+            store.reopen(() -> churned[0] = store.diskBytes());
+            results.add(new Result("disk.churned", "bytes on disk after the deletes and a clean shutdown", churned[0], 1000.0, churned[0]));
+            results.add(compaction(store, dataset, false));
+            results.add(compaction(store, dataset, true));
             store.flush();
             totals.put("bytesWritten", number(store.bytesWritten()));
         } finally {
             store.close();
         }
-        long churned = store.diskBytes();
-        results.add(new Result("disk.churned", "bytes on disk after the deletes and a clean shutdown", churned, 1000.0, churned));
+        long compacted = store.diskBytes();
+        results.add(new Result("disk.compacted", "bytes on disk after a full compaction and a clean shutdown", compacted, 1000.0, compacted));
         results.add(recover(options, dataset));
         write(out, store, scale, sync, threads, dataset, totals, results);
         results.forEach(result -> IO.println("  %-22s %,14.0f ops/s  %,10.1f ms  checksum %d"
@@ -206,7 +221,9 @@ public final class Comparison {
         boolean sync = options.getOrDefault("durability", "async").equals("sync");
         long cacheBytes = Long.parseLong(options.getOrDefault("cache-mb", "0")) << 20;
         return switch (options.getOrDefault("store", "hstore")) {
-            case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")), cacheBytes, create);
+            case "hstore" -> new HStoreStore(directory, sync, Integer.parseInt(options.getOrDefault("history", "64")), cacheBytes,
+                    Double.parseDouble(options.getOrDefault("compaction-live-ratio", String.valueOf(EngineOptions.defaults().compactionLiveRatio()))),
+                    Integer.parseInt(options.getOrDefault("pages-per-segment", "0")), create);
             case "hypergraphdb" -> new HyperGraphDbStore(directory, sync, cacheBytes);
             case String other -> throw new IllegalArgumentException("unknown store " + other);
         };
@@ -228,7 +245,7 @@ public final class Comparison {
         command.add(ProcessHandle.current().info().command().orElse("java"));
         command.addAll(ManagementFactory.getRuntimeMXBean().getInputArguments());
         command.addAll(List.of("-cp", System.getProperty("java.class.path"), Comparison.class.getName(), "crash", "--dir", directory.toString()));
-        for (String option : List.of("store", "scale", "durability", "history", "cache-mb")) {
+        for (String option : List.of("store", "scale", "durability", "history", "cache-mb", "compaction-live-ratio", "pages-per-segment")) {
             if (options.containsKey(option)) {
                 command.addAll(List.of("--" + option, options.get(option)));
             }
@@ -283,18 +300,24 @@ public final class Comparison {
         return total;
     }
 
-    private static Result read(String workload, String description, int operations, Slice slice, boolean warm) {
+    private static Result read(Store store, String workload, String description, int operations, Slice slice, boolean warm) {
         if (warm) {
             batched(Math.max(BATCH, operations / 10), slice);
         }
-        return measure(workload, description, operations, () -> batched(operations, slice));
+        return reading(store, () -> measure(workload, description, operations, () -> batched(operations, slice)));
     }
 
-    private static Result writing(Store store, Supplier<Result> workload) {
+    private static Result writing(Store store, long logicalBytes, Supplier<Result> workload) {
         long before = store.bytesWritten();
         Result result = workload.get();
         store.flush();
-        return result.with("bytesWritten", new Json.Number(BigDecimal.valueOf(store.bytesWritten() - before)));
+        return result.with("bytesWritten", number(store.bytesWritten() - before)).with("logicalWritten", number(logicalBytes));
+    }
+
+    private static Result reading(Store store, Supplier<Result> workload) {
+        long before = store.bytesRead();
+        Result result = workload.get();
+        return result.with("bytesRead", number(store.bytesRead() - before)).with("logicalRead", number(result.checksum() * ID_BYTES));
     }
 
     private static Result latency(String workload, String description, int operations, IntToLongFunction operation, boolean warm) {
@@ -371,8 +394,70 @@ public final class Comparison {
                 .using(used).with("latency", Reservoir.merge(reads).json()).with("checked", new Json.Bool(false));
         Result write = new Result("mixed.write", "updates committed by the writer alongside the readers", committed, millis, 0)
                 .with("latency", Reservoir.merge(commits).json()).with("checked", new Json.Bool(false))
-                .with("bytesWritten", number(store.bytesWritten() - before));
+                .with("bytesWritten", number(store.bytesWritten() - before)).with("logicalWritten", number(committed * UPDATE_BYTES));
         return List.of(read, write);
+    }
+
+    private static Result compaction(Store store, Dataset dataset, boolean compact) throws Exception {
+        int[] updates = dataset.updates();
+        Reservoir commits = new Reservoir(SAMPLES_PER_THREAD, SEED);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        long[] compactNanos = new long[1];
+        long[] diskBefore = new long[1];
+        if (compact) {
+            store.reopen(() -> diskBefore[0] = store.diskBytes());
+        }
+        long before = store.bytesWritten();
+        JvmUsage usage = JvmUsage.now();
+        long started = System.nanoTime();
+        long deadline = started + COMPACTION_WINDOW_NANOS;
+        Thread compactor = Thread.ofPlatform().name("bench-compaction").start(() -> {
+            if (!compact) {
+                return;
+            }
+            for (long wait = started + COMPACTION_DELAY_NANOS - System.nanoTime(); wait > 0; wait = started + COMPACTION_DELAY_NANOS - System.nanoTime()) {
+                LockSupport.parkNanos(wait);
+            }
+            long begin = System.nanoTime();
+            try {
+                store.compact();
+            } catch (Throwable e) {
+                failure.set(e);
+            }
+            compactNanos[0] = System.nanoTime() - begin;
+        });
+        int committed = 0;
+        for (int k = 0; ; k++) {
+            long intended = started + k * COMPACTION_INTERVAL_NANOS;
+            if (intended >= deadline && !compactor.isAlive()) {
+                break;
+            }
+            for (long wait = intended - System.nanoTime(); wait > 0; wait = intended - System.nanoTime()) {
+                LockSupport.parkNanos(wait);
+            }
+            int index = k % updates.length;
+            store.update(updates, index, index + 1, (compact ? 4_000_000 : 3_000_000) + k);
+            commits.add(System.nanoTime() - intended);
+            committed++;
+        }
+        compactor.join();
+        if (failure.get() != null) {
+            throw new IllegalStateException("compaction failed", failure.get());
+        }
+        double millis = (System.nanoTime() - started) / 1e6;
+        JvmUsage used = JvmUsage.now().since(usage);
+        store.flush();
+        String schedule = "single-update commits at %d/s".formatted(1_000_000_000L / COMPACTION_INTERVAL_NANOS);
+        Result result = new Result(compact ? "compaction" : "compaction.baseline",
+                compact ? schedule + " while a full compaction runs" : schedule + " with no compaction, for comparison",
+                committed, millis, 0).using(used).with("latency", Reservoir.merge(commits).json()).with("checked", new Json.Bool(false))
+                .with("bytesWritten", number(store.bytesWritten() - before)).with("logicalWritten", number((long) committed * UPDATE_BYTES));
+        if (!compact) {
+            return result;
+        }
+        long[] diskAfter = new long[1];
+        store.reopen(() -> diskAfter[0] = store.diskBytes());
+        return result.with("compactionMillis", number(compactNanos[0] / 1_000_000)).with("reclaimed", number(diskBefore[0] - diskAfter[0]));
     }
 
     private static Result concurrent(Store store, Dataset dataset, int threads) throws Exception {

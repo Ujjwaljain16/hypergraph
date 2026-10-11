@@ -102,7 +102,7 @@ This is every message the server emits. Placeholders are in `{braces}`.
 | ERROR | references | `reference counting stopped; the counts will be rebuilt when the database next opens` (with DETAIL). No more pages are released until a restart, so space stops being reclaimed but nothing is lost. |
 | LOG | txn | `created branch {name} (#{id}) from generation {g}` |
 | LOG | txn | `branch #{id} is now {MERGED or DROPPED}` |
-| ERROR | commit | `commit pipeline failed; the engine must be restarted` (with DETAIL). The flusher thread could not make a batch durable. All waiting and future committers fail. |
+| ERROR | commit | `commit pipeline failed; the engine must be restarted` (with DETAIL). The committer leading a batch could not make it durable or publish it. All waiting and future committers fail. |
 | LOG | feed | `change feed released {bytes} bytes; generations after {g} are retained`: retention after a checkpoint deleted whole feed segments (`feed_retention_generations`, lowered by holds). |
 | WARNING | feed | `change feed subscriber stopped at generation {g}` (with DETAIL) |
 | DEBUG | feed, wal | `directory sync is not supported for {dir}`: the file system rejected an `fsync` of a directory after a segment was created or deleted. |

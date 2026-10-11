@@ -154,7 +154,7 @@ sequenceDiagram
 
 Notes:
 
-* Nodes are decoded once and then shared by every reader through `NodeCache`. It has 16 shards, each a `ConcurrentHashMap` plus a CLOCK (second-chance) ring, with total capacity `cache_nodes`. Lookups are lock-free; only admission takes a per-shard lock. Decoded nodes are immutable (`owner == null`), so sharing them needs no copying. See [pages.md](../storage/pages.md#caching-and-io-accounting).
+* Nodes are decoded once and then shared by every reader through `NodeCache`. It has 16 shards, each a `ConcurrentHashMap` plus a CLOCK (second-chance) ring, with a total byte budget of `node_cache_mb`, each node counted at an estimate of its heap size (`Node.heapBytes`). Lookups are lock-free; only admission takes a per-shard lock. Decoded nodes are immutable (`owner == null`), so sharing them needs no copying. See [pages.md](../storage/pages.md#caching-and-io-accounting).
 * `IoTrace` is bound with `ScopedValue.where(...)` around a query. `recordRead` throws `HStoreException.limit` once page reads plus cache hits exceed the query's page budget (`query_page_budget`).
 * Historical reads use `TransactionManager.snapshotAt(generation, branch)`. It looks the generation up in the retained `history` map; see [catalog-and-generations.md](../storage/catalog-and-generations.md#history-retention-and-time-travel).
 
@@ -172,7 +172,7 @@ sequenceDiagram
     participant M as Materializer
     participant WAL as WriteAheadLog
     participant PS as PageStore
-    participant GC as GroupCommitter (hstore-group-commit)
+    participant GC as GroupCommitter (leading committer)
     participant F as ChangeFeed
     W->>TX: createNode / insert / put ...
     TX->>WS: Op.apply: path-copy trees (TreeWriter), emit MemberChange / SlotChange
@@ -201,14 +201,14 @@ sequenceDiagram
     GC-->>TX: await() returns published generation
 ```
 
-The ordering above is what makes recovery safe. Under `PAGE_REFERENCES` the WAL carries only `(pageId, address, length, crc32c)` for each new page. The flusher therefore makes data pages durable *before* the log records that reference them. Recovery replays committed transactions in order and stops at the first commit whose referenced pages fail verification (the *durable-prefix* rule in `Recovery.intact`). The full protocol and the crash-point matrix are in [wal-and-recovery.md](../transactions/wal-and-recovery.md).
+The ordering above is what makes recovery safe. Under `PAGE_REFERENCES` the WAL carries only `(pageId, address, length, crc32c)` for each new page. The commit leader therefore makes data pages durable *before* the log records that reference them. Recovery replays committed transactions in order and stops at the first commit whose referenced pages fail verification (the *durable-prefix* rule in `Recovery.intact`). The full protocol and the crash-point matrix are in [wal-and-recovery.md](../transactions/wal-and-recovery.md).
 
 ## Threading model
 
 | Thread | Kind | Created in | Role |
 |---|---|---|---|
 | Caller threads | any (the server uses virtual threads) | — | Run reads without locks. Run a transaction's operations without locks, then take `commitLock` only for append (encoding, WAL append, page writes). They then block in `GroupCommitter.await` outside the lock. |
-| `hstore-group-commit` | platform, daemon | `GroupCommitter` constructor | Takes every queued `Pending` as one batch and calls `makeDurable(batchSize)` once: data sync in `PAGE_REFERENCES` mode, then WAL sync, both only under `Durability.SYNC`. It then runs each publication in generation order and wakes the waiters. One fsync pair covers the whole batch (`averageGroupCommit` in the statistics). A failure poisons the pipeline, and every later commit fails until restart. |
+| (none; commit leader) | the committing thread | `GroupCommitter.await` | There is no group-commit thread. The first committer waiting on an unpublished commit leads: it takes every queued `Pending` as one batch and calls `makeDurable(batchSize)` once (data sync in `PAGE_REFERENCES` mode, then WAL sync, both only under `Durability.SYNC`). It then runs each publication in generation order and wakes the waiters. One fsync pair covers the whole batch (`averageGroupCommit` in the statistics). A failure poisons the pipeline, and every later commit fails until restart. |
 | `hstore-maintenance` | virtual | `StorageEngine` constructor | Every 500 ms, under the `maintenance` lock (`tryLock`): checkpoint once the WAL or the pages written since the last checkpoint exceed `checkpoint_wal_mb`, compact one segment if any has fallen below `compaction_live_ratio`, then reclaim retired segments that no pinned reader can still see. |
 | `hstore-references` | platform, daemon | `StorageEngine` constructor | Takes the generations that publications queue, in order, and updates the reference counts of the pages each commit added or dropped. The queue holds up to 4 096 commits; past that, publication waits for it. |
 | `feed-subscriber` | virtual, one per subscription | `ChangeFeed.subscribe` | Tails the feed segments, waiting on a condition signalled by `append` (with a 250 ms timeout). Subscribers are `SemanticPlane`, `MaterializedViews` and `Statistics`. |
