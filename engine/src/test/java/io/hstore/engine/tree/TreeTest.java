@@ -16,6 +16,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.foreign.MemorySegment;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -27,6 +28,7 @@ import java.util.random.RandomGenerator;
 import java.util.random.RandomGeneratorFactory;
 import java.util.stream.LongStream;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -66,6 +68,48 @@ class TreeTest {
         }
         assertMatches(oracle, tree);
         assertMatches(oracle, pages.persist(tree));
+    }
+
+    @Test
+    void keysAndCursorsWalkADeepTreeInOrder() {
+        RandomGenerator random = random(9);
+        MemoryPages pages = new MemoryPages(1024);
+        WriteScope scope = new WriteScope();
+        Tree<Long> tree = Tree.empty(LONGS, pages);
+        TreeMap<Long, Long> oracle = new TreeMap<>();
+        for (int step = 0; step < 400_000; step++) {
+            long key = random.nextLong(100_000_000);
+            tree = tree.put(scope, key, key % 97);
+            oracle.put(key, key % 97);
+            if (step % 49_999 == 0) {
+                tree = pages.persist(tree);
+                scope.freeze();
+            }
+        }
+        tree = pages.persist(tree);
+        assertTrue(tree.height() > 5, "height " + tree.height());
+        long[] expected = oracle.keySet().stream().mapToLong(Long::longValue).toArray();
+        assertArrayEquals(expected, tree.keys().toArray());
+        LongStream.Builder visited = LongStream.builder();
+        tree.forEachKey(visited::add);
+        assertArrayEquals(expected, visited.build().toArray());
+        assertArrayEquals(Arrays.copyOf(expected, 25), tree.keys().limit(25).toArray());
+        List<Long> values = new ArrayList<>();
+        tree.forEachValue(values::add);
+        assertEquals(List.copyOf(oracle.values()), values);
+        long[] reversed = LongStream.range(0, expected.length).map(i -> expected[expected.length - 1 - (int) i]).toArray();
+        assertArrayEquals(reversed, tree.descending().mapToLong(Entry::key).toArray());
+        for (int probe = 0; probe < 2_000; probe++) {
+            long key = random.nextLong(100_000_100) - 50;
+            assertEquals(Optional.ofNullable(oracle.ceilingKey(key)), tree.ceiling(key).map(Entry::key), "ceiling " + key);
+            assertEquals(Optional.ofNullable(oracle.floorKey(key)), tree.floor(key).map(Entry::key), "floor " + key);
+            TreeCursor<Long> cursor = tree.cursor();
+            if (probe < 20 && cursor.seek(key)) {
+                LongStream.Builder rest = LongStream.builder();
+                cursor.forEachRemainingKey(rest::add);
+                assertArrayEquals(oracle.tailMap(key, true).keySet().stream().mapToLong(Long::longValue).toArray(), rest.build().toArray());
+            }
+        }
     }
 
     @Test

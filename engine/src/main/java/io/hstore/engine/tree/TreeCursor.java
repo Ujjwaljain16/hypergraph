@@ -6,6 +6,7 @@ package io.hstore.engine.tree;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
+import java.util.function.LongConsumer;
 import java.util.function.Predicate;
 
 public final class TreeCursor<V> implements Iterator<Entry<V>> {
@@ -104,6 +105,22 @@ public final class TreeCursor<V> implements Iterator<Entry<V>> {
         Entry<V> entry = new Entry<>(key(), value());
         advance();
         return entry;
+    }
+
+    public void forEachRemainingKey(LongConsumer action) {
+        while (leaf != null) {
+            Leaf current = leaf;
+            if (descending) {
+                for (int i = position; i >= 0; i--) {
+                    action.accept(current.key(i));
+                }
+            } else {
+                for (int i = position, size = current.size(); i < size; i++) {
+                    action.accept(current.key(i));
+                }
+            }
+            advanceLeaf();
+        }
     }
 
     public void advance() {
