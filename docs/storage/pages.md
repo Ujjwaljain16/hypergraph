@@ -155,8 +155,9 @@ then one little-endian `i64` address per index, entry `i` at byte `64 + 8 × i`.
 no image. The file is memory-mapped in 8 MiB chunks, and a new chunk is mapped when the file grows into it, so a
 lookup is a load from the OS page cache and the directory takes no Java heap. A million pages need 8 MB of it.
 
-Nothing outside `PageStore` sees an address. Trees, nested references, `NodeCache`, `Ref` and the WAL all use
-numbers. That is what lets compaction move an image by copying its bytes and changing one directory entry, without
+Trees, nested references, `NodeCache` and `Ref` use numbers and never see an address. Only `PageStore` resolves
+them, and the WAL logs each new page's address next to its number so that recovery can put the directory entry
+back. That is what lets compaction move an image by copying its bytes and changing one directory entry, without
 rewriting the nodes that point at it ([maintenance.md](maintenance.md#compaction)). Entries are written and read with
 release and acquire ordering, so a reader racing a move sees either the old address or the new one, never a mix.
 

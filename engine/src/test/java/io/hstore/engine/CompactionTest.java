@@ -25,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -172,6 +173,36 @@ class CompactionTest {
         }
         try (StorageEngine engine = StorageEngine.open(directory, options)) {
             assertEquals(members, engine.read(snapshot -> snapshot.requireEdge(target).stream().toList()));
+            engine.verifyReferences();
+        }
+    }
+
+    @Test
+    void aBulkLoadThatCommitsWhilePagesMoveKeepsItsPages() {
+        AtomicReference<Transaction> pending = new AtomicReference<>();
+        EngineOptions options = options().withCompactionLiveRatio(0.99).withFaults(point -> {
+            Transaction early = point == CrashPoint.COMPACTION_MOVE ? pending.getAndSet(null) : null;
+            if (early != null) {
+                early.commit();
+            }
+        });
+        List<Incidence> members = Stream.iterate(2_000_000L, i -> i + 7_919).limit(20_000).map(Incidence::of).toList();
+        long target;
+        long edge;
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
+            edge = churn(engine);
+            target = engine.write(txn -> txn.createEdge(EngineTest.EDGE, EdgeKind.SET));
+            Transaction early = engine.begin();
+            early.load(target, members);
+            churn(engine);
+            pending.set(early);
+            assertFalse(engine.compact().compacted().isEmpty());
+            assertTrue(pending.get() == null, "the load never committed");
+            assertEquals(members, engine.read(snapshot -> snapshot.requireEdge(target).stream().toList()));
+        }
+        try (StorageEngine engine = StorageEngine.open(directory, options())) {
+            assertEquals(members, engine.read(snapshot -> snapshot.requireEdge(target).stream().toList()));
+            assertEquals(expected(), members(engine, edge));
             engine.verifyReferences();
         }
     }
