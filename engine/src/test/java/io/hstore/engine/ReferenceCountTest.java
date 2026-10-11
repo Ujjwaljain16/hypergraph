@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.LongStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -257,8 +258,9 @@ class ReferenceCountTest {
     @ValueSource(booleans = {false, true})
     void countsSurviveACrash(boolean duringCheckpoint) {
         AtomicBoolean armed = new AtomicBoolean();
+        Thread test = Thread.currentThread();
         EngineOptions options = options().withFaults(point -> {
-            if (point == CrashPoint.CHECKPOINT_JOURNAL && armed.compareAndSet(true, false)) {
+            if (point == CrashPoint.CHECKPOINT_JOURNAL && Thread.currentThread() == test && armed.compareAndSet(true, false)) {
                 throw new CrashPoint.SimulatedCrash(point);
             }
         });
@@ -328,6 +330,39 @@ class ReferenceCountTest {
             }
         });
         assertThrows(CrashPoint.SimulatedCrash.class, () -> StorageEngine.open(directory, crashing));
+        try (StorageEngine recovered = StorageEngine.open(directory, options())) {
+            recovered.verifyReferences();
+            assertModel(recovered, model);
+        }
+    }
+
+    @Test
+    void aCheckpointThatFailsAfterPublishingIsFinishedByTheNextOne() {
+        AtomicReference<CrashPoint> failAt = new AtomicReference<>();
+        Thread test = Thread.currentThread();
+        EngineOptions options = options().withFaults(point -> {
+            if (Thread.currentThread() == test && failAt.compareAndSet(point, null)) {
+                if (point == CrashPoint.CHECKPOINT_JOURNAL) {
+                    throw new IllegalStateException("journal could not be applied");
+                }
+                throw new CrashPoint.SimulatedCrash(point);
+            }
+        });
+        Random random = new Random(17);
+        Map<Long, TreeSet<Long>> model = new HashMap<>();
+        StorageEngine engine = StorageEngine.open(directory, options);
+        for (int round = 0; round < 40; round++) {
+            step(engine, random, model);
+        }
+        engine.checkpoint();
+        for (int round = 0; round < 40; round++) {
+            step(engine, random, model);
+        }
+        failAt.set(CrashPoint.CHECKPOINT_JOURNAL);
+        assertThrows(IllegalStateException.class, engine::checkpoint);
+        failAt.set(CrashPoint.CHECKPOINT_CATALOG);
+        assertThrows(CrashPoint.SimulatedCrash.class, engine::checkpoint);
+        engine.halt();
         try (StorageEngine recovered = StorageEngine.open(directory, options())) {
             recovered.verifyReferences();
             assertModel(recovered, model);

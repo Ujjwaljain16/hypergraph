@@ -27,6 +27,7 @@ public final class Checkpointer {
     private final int historyLimit;
     private volatile long lastLsn;
     private volatile long completed;
+    private long unapplied = -1;
 
     public Checkpointer(TransactionManager transactions, PageStore pages, WriteAheadLog wal, ChangeFeed feed,
                         CatalogStore catalog, ReferenceCounter references, CrashPoint.Injector faults, int historyLimit,
@@ -64,6 +65,7 @@ public final class Checkpointer {
         try {
             faults.reach(CrashPoint.CHECKPOINT_JOURNAL);
             pages.applyJournal();
+            unapplied = -1;
             lastLsn = result.lsn();
             completed++;
             return result;
@@ -73,6 +75,10 @@ public final class Checkpointer {
     }
 
     private Result publish() {
+        if (unapplied >= 0) {
+            pages.settleJournal(unapplied);
+            unapplied = -1;
+        }
         long lsn = wal.end();
         references.release(transactions.oldestReadable());
         pages.checkpoint();
@@ -85,7 +91,13 @@ public final class Checkpointer {
                 .limit(historyLimit)
                 .toList();
         faults.reach(CrashPoint.CHECKPOINT_CATALOG);
-        catalog.publish(new CatalogImage(current, history, pages.segments(), lsn, feed.size()));
+        try {
+            catalog.publish(new CatalogImage(current, history, pages.segments(), lsn, feed.size()));
+        } catch (RuntimeException | Error failure) {
+            pages.references().distrust();
+            throw failure;
+        }
+        unapplied = lsn;
         wal.append(new WalRecord.Checkpoint(0, current.id(), lsn));
         wal.sync();
         wal.truncateBefore(lsn);

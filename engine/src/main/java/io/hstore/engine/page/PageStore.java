@@ -412,6 +412,13 @@ public final class PageStore implements AutoCloseable {
         references.checkpointed();
     }
 
+    public void settleJournal(long lsn) {
+        Path journal = directory.resolve(ReferenceJournal.FILE);
+        ReferenceJournal.read(journal, lsn).ifPresent(this::replay);
+        ReferenceJournal.clear(journal);
+        references.checkpointed();
+    }
+
     public List<SegmentInfo> segments() {
         return List.copyOf(segments.values());
     }
