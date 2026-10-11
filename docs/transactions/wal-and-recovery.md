@@ -71,7 +71,7 @@ The checksum covers the LSN, type, transaction id and payload. Embedding the LSN
 
 **Sync.** `sync()` calls `FileChannel.force(false)` on the active segment if anything was written since the last sync (`dirty`). Rolled segments were forced when they were closed, so one call makes the entire log durable.
 
-**Open.** `restore()` lists `*.wal`, scans only the **last** segment frame by frame, truncates it to the end of the last valid frame and forces it. Recovery therefore always appends after a clean frame boundary.
+**Open.** `restore()` lists `*.wal`, scans only the **last** segment frame by frame, truncates it to the end of the last valid frame and forces it. Recovery therefore always appends after a clean frame boundary. The scan checks each frame's header and CRC-32C but doesn't decode the records, and a reader reuses one header and one body buffer, growing the body only for a larger frame, so opening doesn't allocate per frame.
 
 **Read.** `read(from)` iterates frames starting at LSN `from` across segments. When fewer than 25 header bytes remain in a segment, the reader treats it as the clean end of that segment and continues with the next one. A *damaged* frame is one whose length is out of range, whose embedded LSN differs from the expected one, whose body is short, or whose CRC does not match. What happens next depends on where it is:
 
@@ -144,7 +144,7 @@ flowchart TD
     DW --> C[wal.append Commit t g]
     C --> CA((COMMIT_APPEND))
     CA --> H[head = g, committer.submit]
-    H --> F[flusher: makeDurable]
+    H --> F[commit leader: makeDurable]
     F --> DS[[PAGE_REFERENCES and SYNC: pages.sync]]
     DS --> DSP((DATA_SYNC))
     DSP --> WS[[SYNC: wal.sync]]
@@ -287,7 +287,7 @@ After each completed checkpoint, `StorageEngine.timedCheckpoint` logs `checkpoin
 
 1. Commits an ordered edge with 200 members (each a fresh node).
 2. Arms a fault injector that throws `CrashPoint.SimulatedCrash` (an `Error`) the first time the chosen point is reached.
-3. Begins a transaction that creates 300 more nodes and inserts each at position 0, then commits: the commit must throw `SimulatedCrash`. Crash points up to `COMMIT_APPEND` throw on the committing thread inside `append`; `DATA_SYNC`, `WAL_SYNC` and `CATALOG_PUBLISH` throw on the flusher thread, break the pipeline, and are rethrown to the waiting committer by `GroupCommitter.failIfFailed`.
+3. Begins a transaction that creates 300 more nodes and inserts each at position 0, then commits: the commit must throw `SimulatedCrash`. Crash points up to `COMMIT_APPEND` throw on the committing thread inside `append`; `DATA_SYNC`, `WAL_SYNC` and `CATALOG_PUBLISH` throw on the committer leading the batch (here the committing thread itself), break the pipeline, and are rethrown to every waiting committer by `GroupCommitter.failIfFailed`.
 4. `halt()`s the engine (no checkpoint, files closed as after a process crash; the OS page cache is preserved).
 5. Reopens and asserts the edge has 200 or 500 members, never anything else; exactly `500` iff `point >= COMMIT_APPEND`; the node count equals the member count; every member has degree 1 (the reverse index agrees with the forward index). It then writes again, reopens, and checks that the post-crash write survived (recovery left the log appendable).
 
@@ -297,9 +297,9 @@ After each completed checkpoint, `StorageEngine.timedCheckpoint` logs `checkpoin
 | `WAL_APPEND` | committer | `Begin`, page records, `Root`s, `Feed`; no `Commit` | 200, counted as unfinished | 200, counted as unfinished |
 | `DATA_WRITE` | committer | as above plus data pages (orphaned) | 200 | 200 |
 | `COMMIT_APPEND` | committer | `Commit` frame written, not synced | 500 (new) | 500, `PageRef`s verify |
-| `DATA_SYNC` | flusher | data synced (refs mode only), WAL not synced | 500 | 500 |
-| `WAL_SYNC` | flusher | WAL synced, not published | 500 | 500 |
-| `CATALOG_PUBLISH` | flusher | feed appended (not forced), published to `current` | 500, feed frame kept or re-appended from the `Feed` record | 500, same |
+| `DATA_SYNC` | commit leader | data synced (refs mode only), WAL not synced | 500 | 500 |
+| `WAL_SYNC` | commit leader | WAL synced, not published | 500 | 500 |
+| `CATALOG_PUBLISH` | commit leader | feed appended (not forced), published to `current` | 500, feed frame kept or re-appended from the `Feed` record | 500, same |
 
 `COMMIT_APPEND` is the instructive row: the client received an error, yet the commit is recovered. This is the standard "commit outcome unknown" case of every database; clients that must know use `TxnOptions.withRequestId(...)` and retry, and the retry returns `DUPLICATE` with the original generation.
 

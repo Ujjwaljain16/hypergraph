@@ -21,7 +21,7 @@ flowchart LR
 |---|---|---|
 | Version | 0.1.0 (this repository) | 1.4 at commit `99485a1`, storage `bdb-je` on Berkeley DB JE 5.0.73 |
 | Data model used | node type `Entity` (indexed by key, property `name`); `SET_EDGE` type `Relation` | `String` atoms; `HGPlainLink` links |
-| Cache | node cache of 1,048,576 decoded nodes, or `CACHE_MB` / page size | JE cache at 30% of the heap (HyperGraphDB default), or `CACHE_MB`, plus the HyperGraphDB atom cache |
+| Cache | node cache of half the heap, or `CACHE_MB` | JE cache at 30% of the heap (HyperGraphDB default), or `CACHE_MB`, plus the HyperGraphDB atom cache |
 | `async` durability | `durability = async` | HyperGraphDB default: JE `WRITE_NO_SYNC` |
 | `sync` durability | `durability = sync`, `wal_mode = references`, group commit | JE `COMMIT_SYNC` |
 | History | `history_limit = 64` generations retained for time travel (default) | none |
@@ -62,6 +62,9 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `churn.remove` | remove one member from each of 20,000 other hyperedges, 1,000 per transaction | `Writer.remove` | `graph.replace` with a new `HGPlainLink` (links are immutable) |
 | `read.incidence.churned` | `read.incidence` after the deletes | | |
 | `disk.churned` | bytes on disk after the deletes and a clean shutdown | | |
+| `compaction.baseline` | single-update commits at 50/s for 10 s, no compaction | `Writer.set` | `graph.replace` |
+| `compaction` | the same commits while a full compaction runs, starting 1 s in | `StorageEngine.compact` | `Environment.cleanLog` until it finds nothing, then a forced checkpoint |
+| `disk.compacted` | bytes on disk after the compaction and a clean shutdown | | |
 | `recover` | open the store after the process ingesting into it was killed with SIGKILL | `HypergraphDatabase.open` | `HGEnvironment.get` |
 
 Read workloads run a warm-up pass over 10% of the probes before timing, except `read.incidence.cold`.
@@ -93,6 +96,18 @@ the loaded store after a clean shutdown. The checksum of `read.incidence.churned
 both engines applied the same deletes. `disk.churned` shows whether the space came back: through compaction for
 HStore, and the log cleaner for JE.
 
+**Compaction.** After the churn, `disk.churned` is recorded at a reopen, and then two 10 s windows run. In both, one
+writer commits a single update every 20 ms on a fixed schedule, and each commit's latency is measured from when it
+was scheduled. In `compaction`, the store also runs a full compaction starting 1 s in, and the window lasts until
+the compaction has finished. HStore calls `StorageEngine.compact()`. JE calls `cleanLog()` until it cleans nothing,
+then forces a checkpoint so the cleaned files are deleted. The latency table compares the two windows, and the
+*Resources* table adds the compaction time and the space reclaimed. Disk is measured at a reopen just before the
+window and again at a reopen just after it, so segments that HStore only deletes once older readers are gone are
+counted too. That figure can be negative when compaction frees less than the writer adds. The two windows run at a
+fixed rate, so they are left out of the main table, where their ratio would always be about 1. HStore's default segments are 256 MiB, so
+at scale 1 most data shares one or two segments. `--pages-per-segment` (`PAGES_PER_SEGMENT`) and
+`--compaction-live-ratio` (`COMPACTION_LIVE_RATIO`) change HStore's settings for a run.
+
 **Crash recovery.** `reopen` closes the store cleanly first. `recover` doesn't:
 1. The run starts a second JVM (`Comparison crash`) with the same flags and classpath. It ingests nodes into a
    fresh directory and prints the count after every acknowledged commit.
@@ -116,6 +131,18 @@ Each write workload ends with a flush (an HStore checkpoint, `Environment.sync()
 so bytes still sitting in buffers are counted against the workload that produced them. The counters restart
 when a store reopens, so the adapters carry the total across `reopen`. Bytes written during the final close
 aren't counted.
+
+**Amplification.** The *Resources* table also divides physical bytes by an estimate of the logical bytes involved:
+
+| Ratio | Physical bytes | Logical bytes |
+|---|---|---|
+| write amplification | bytes written (above) | 8 bytes per id plus the value: `node-<i>` for a new node, 24 bytes for an updated value, `(cardinality + 1) × 8` for a new or deleted hyperedge, 16 bytes for a removed member |
+| read amplification | bytes read from storage | 8 bytes per id the workload returned (its checksum counts them) |
+
+HStore counts the bytes it reads from segment files (`EngineStats.dataBytesRead`): a first read of up to 4 KiB,
+then the rest of the page image if it's bigger. JE reports sequential plus random read bytes. Reads served from a cache read nothing from storage, so read amplification mostly shows up for
+cold reads and with a small `CACHE_MB`. The logical sizes are rough estimates; compare the two stores against each
+other rather than reading the ratios as absolute numbers.
 
 **Memory.** Every workload also records, from the JVM's own MXBeans, the bytes the whole process allocated
 (`getTotalThreadAllocatedBytes`) and the GC pause time (`GarbageCollectorMXBean.getCollectionTime`, which is
@@ -224,7 +251,7 @@ not what drives HStore's footprint:
   defers the work to its cleaner. In `sync` mode group commit amortises the fsync and HStore leads (1.35×).
 * **Parallel incidence reads at scale 4 (0.46×).** Every probe batch opens a snapshot, which pins a
   generation in a shared skip-list map. At 10 threads this coordination, plus node-cache admission under
-  churn (the hot set exceeds one million decoded nodes), costs more than JE's latch-free cache hits. At scale 1
+  churn (the hot set exceeded the 1,048,576-node cache these runs used), costs more than JE's latch-free cache hits. At scale 1
   the results are mixed: 0.66× async and 1.34× sync.
 * **Disk at scale 4 (0.54×).** Live data is comparable: about 1 GB of live node images in HStore against
   1.27 GB in JE. The difference is garbage that has not been reclaimed yet. Both engines are log-structured
@@ -252,16 +279,16 @@ run in brackets, and "Results agree" requires every run of both stores to return
 and `HEAP` override the thread count and heap size. Close other
 workloads first: the numbers are only meaningful on an otherwise idle machine.
 
-**Equal cache budgets.** By default the two caches are not the same size. HStore caches about a million decoded
-nodes, which at 16 KiB pages is enough to hold the whole dataset. HyperGraphDB gets JE's default of 30% of the
+**Equal cache budgets.** By default the two caches are not the same size. HStore's node cache gets half the heap
+(2 GiB with the default `HEAP=4g`). HyperGraphDB gets JE's default of 30% of the
 heap. `CACHE_MB` gives both the same budget:
 
 | HStore | HyperGraphDB |
 |---|---|
-| node cache of `CACHE_MB` / page size nodes | JE cache of exactly `CACHE_MB` |
+| node cache of `CACHE_MB`, each node counted at an estimate of its heap size | JE cache of exactly `CACHE_MB` |
 
-Decoded nodes can take more or less heap than their page, and HyperGraphDB's own atom and incidence caches can't
-be capped in bytes (they shrink under memory pressure). So check the retained-heap line in the report to see what
+HStore's estimate runs 10 to 40% below the heap a node really takes, and HyperGraphDB's own atom and incidence
+caches can't be capped in bytes (they shrink under memory pressure). So check the retained-heap line in the report to see what
 each store actually kept. Results go to a directory ending in `-cache-<mb>`.
 
 ```

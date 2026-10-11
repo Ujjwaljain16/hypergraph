@@ -30,22 +30,22 @@ final class HStoreStore implements Store {
     private long[] edges;
     private long large;
     private long writtenBeforeReopen;
+    private long readBeforeReopen;
 
-    static final int CACHED_NODES = 1 << 20;
+    static final long DEFAULT_CACHE_BYTES = Runtime.getRuntime().maxMemory() / 2;
 
     private final int history;
 
-    private final int cachedNodes;
     private final long cacheBytes;
 
-    HStoreStore(Path directory, boolean sync, int history, long cacheBytes, boolean create) {
+    HStoreStore(Path directory, boolean sync, int history, long cacheBytes, double liveRatio, int pagesPerSegment, boolean create) {
         this.directory = directory;
         this.history = history;
-        this.cacheBytes = cacheBytes;
+        this.cacheBytes = cacheBytes > 0 ? cacheBytes : DEFAULT_CACHE_BYTES;
         EngineOptions engine = EngineOptions.defaults();
-        this.cachedNodes = cacheBytes > 0 ? Math.toIntExact(cacheBytes / engine.pageSize()) : CACHED_NODES;
         this.options = DatabaseOptions.defaults().withEngine(engine
-                .withDurability(sync ? Durability.SYNC : Durability.ASYNC).withCachedNodes(cachedNodes).withHistoryLimit(history));
+                .withDurability(sync ? Durability.SYNC : Durability.ASYNC).withNodeCacheBytes(this.cacheBytes).withHistoryLimit(history)
+                .withCompactionLiveRatio(liveRatio).withPagesPerSegment(pagesPerSegment > 0 ? pagesPerSegment : engine.pagesPerSegment()));
         this.database = HypergraphDatabase.open(directory, options);
         if (create) {
             database.write(writer -> {
@@ -68,8 +68,7 @@ final class HStoreStore implements Store {
 
     @Override
     public String cache() {
-        String budget = cacheBytes > 0 ? " (%,d MiB divided by the page size)".formatted(cacheBytes >> 20) : "";
-        return "node cache of %,d decoded nodes%s and retains %d generations of history".formatted(cachedNodes, budget, history);
+        return "node cache of %,d MiB and retains %d generations of history".formatted(cacheBytes >> 20, history);
     }
 
     @Override
@@ -216,6 +215,11 @@ final class HStoreStore implements Store {
     }
 
     @Override
+    public void compact() {
+        database.engine().compact();
+    }
+
+    @Override
     public long bytesWritten() {
         EngineStats stats = database.engine().stats();
         return writtenBeforeReopen + stats.walBytes() + stats.dataBytesWritten();
@@ -242,8 +246,14 @@ final class HStoreStore implements Store {
     }
 
     @Override
+    public long bytesRead() {
+        return readBeforeReopen + database.engine().stats().dataBytesRead();
+    }
+
+    @Override
     public void reopen(Runnable whileClosed) {
         writtenBeforeReopen = bytesWritten();
+        readBeforeReopen = bytesRead();
         database.close();
         whileClosed.run();
         database = HypergraphDatabase.open(directory, options);
