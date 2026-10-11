@@ -254,6 +254,18 @@ public final class PageStore implements AutoCloseable {
     }
 
     public void write(long pageId, MemorySegment image) {
+        writeUnsettled(pageId, image);
+        settle(pageId);
+    }
+
+    public void settle(long pageId) {
+        AtomicInteger pending = unwritten.get(PageAddress.segmentOf(locate(pageId)));
+        if (pending != null) {
+            pending.updateAndGet(value -> Math.max(0, value - 1));
+        }
+    }
+
+    public void writeUnsettled(long pageId, MemorySegment image) {
         if (image.byteSize() > pageSize) {
             throw new IllegalArgumentException("page image exceeds page size: " + image.byteSize());
         }
@@ -268,10 +280,6 @@ public final class PageStore implements AutoCloseable {
             return SegmentFile.open(id, SegmentFile.pathFor(directory, id));
         });
         file.write((long) offset * PageId.UNIT_BYTES, image);
-        AtomicInteger pending = unwritten.get(segment);
-        if (pending != null) {
-            pending.updateAndGet(value -> Math.max(0, value - 1));
-        }
         long end = offset + (long) PageId.unitsFor(image.byteSize());
         segments.computeIfPresent(segment, (_, info) -> info.units() >= end ? info : info.withAllocation(info.pages() + 1, end));
         pagesWritten.incrementAndGet();

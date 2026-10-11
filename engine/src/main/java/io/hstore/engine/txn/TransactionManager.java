@@ -348,11 +348,15 @@ public final class TransactionManager {
         List<PageWrite> writes = new ArrayList<>();
         Materializer materializer = materializer(head.get().id() + 1, txnId, records, writes);
         Ref stored = materializer.materialize(ref, schema);
-        writes.forEach(write -> {
-            storage.pages().write(write.pageId(), write.image());
-            written.accept(write.pageId());
-        });
-        storage.wal().append(records);
+        try {
+            writes.forEach(write -> {
+                storage.pages().writeUnsettled(write.pageId(), write.image());
+                written.accept(write.pageId());
+            });
+            storage.wal().append(records);
+        } finally {
+            writes.forEach(write -> storage.pages().settle(write.pageId()));
+        }
         pagesWritten.add(materializer.pagesWritten());
         return stored;
     }
