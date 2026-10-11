@@ -33,6 +33,7 @@ import java.util.stream.LongStream;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -364,6 +365,37 @@ class TreeTest {
         assertFalse(Ref.fitsInline(memberLeaf(LongStream.rangeClosed(1, 20).map(i -> i << 40).toArray())));
         Leaf catalog = Leaf.owned(EngineSlots.ATOM_SCHEMA, null, new long[]{1}, new Object[]{AtomRecord.NodeRecord.of(1, "n")}, 1);
         assertFalse(Ref.fitsInline(catalog));
+    }
+
+    @Test
+    void materializingAnEdgeRecordInlinesSmallTreesWithTheSameSummary() {
+        MemoryPages pages = new MemoryPages(4096);
+        WriteScope scope = new WriteScope();
+        Tree<Incidence> small = Tree.empty(TopologySchemas.SET_MEMBERS, pages);
+        Tree<Incidence> large = Tree.empty(TopologySchemas.SET_MEMBERS, pages);
+        for (long member = 1; member <= 40; member++) {
+            Incidence incidence = Incidence.of(member).withWeight(member * 0.5);
+            large = large.put(scope, member, incidence);
+            if (member <= 5) {
+                small = small.put(scope, member, incidence);
+            }
+        }
+        Summary stored = pages.persist(small).summary();
+        AtomRecord.EdgeRecord edge = new AtomRecord.EdgeRecord(2, EdgeKind.SET, small.root(), Ref.EMPTY, 0, 0, 0, 0);
+        AtomRecord.EdgeRecord big = new AtomRecord.EdgeRecord(2, EdgeKind.SET, large.root(), Ref.EMPTY, 0, 0, 0, 0);
+        Tree<AtomRecord> catalog = Tree.empty(EngineSlots.ATOM_SCHEMA, pages).put(scope, 1, edge).put(scope, 2, big);
+        assertEquals(2, Materializer.pendingNodes(catalog.root(), EngineSlots.ATOM_SCHEMA));
+        Tree<AtomRecord> written = pages.persist(catalog);
+        AtomRecord.EdgeRecord inlined = (AtomRecord.EdgeRecord) written.get(1).orElseThrow();
+        AtomRecord.EdgeRecord paged = (AtomRecord.EdgeRecord) written.get(2).orElseThrow();
+        assertInstanceOf(Ref.Inline.class, inlined.members());
+        assertInstanceOf(Ref.Stored.class, paged.members());
+        assertEquals(stored, inlined.members().summary());
+        assertEquals(edge.contentHash(), inlined.contentHash());
+        assertEquals(small.stream().toList(), new Tree<>(TopologySchemas.SET_MEMBERS, pages, inlined.members()).stream().toList());
+        Leaf root = (Leaf) written.node(written.root());
+        Leaf bare = Leaf.decoded(EngineSlots.ATOM_SCHEMA, new long[]{1}, new Object[]{AtomRecord.EdgeRecord.of(2, EdgeKind.SET)}, null);
+        assertTrue(root.heapBytes() >= bare.heapBytes() + ((Ref.Inline) inlined.members()).leaf().heapBytes());
     }
 
     private static Leaf memberLeaf(long... members) {

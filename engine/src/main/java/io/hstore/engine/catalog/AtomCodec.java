@@ -80,6 +80,11 @@ final class AtomCodec implements ValueCodec<AtomRecord> {
     }
 
     @Override
+    public boolean inlinesSmallTrees() {
+        return true;
+    }
+
+    @Override
     public void forEachRef(AtomRecord record, RefVisitor visitor) {
         if (record instanceof EdgeRecord edge) {
             visitor.visit(edge.members(), TopologySchemas.members(edge.kind()));

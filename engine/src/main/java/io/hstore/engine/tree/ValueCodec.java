@@ -30,6 +30,10 @@ public interface ValueCodec<V> {
         return value;
     }
 
+    default boolean inlinesSmallTrees() {
+        return false;
+    }
+
     default void forEachRef(V value, RefVisitor visitor) {
         mapRefs(value, (ref, schema) -> {
             visitor.visit(ref, schema);

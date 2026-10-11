@@ -55,7 +55,8 @@ public final class Materializer {
         switch (node) {
             case Leaf leaf -> {
                 if (leaf.schema.codec().holdsRefs()) {
-                    leaf.valueList().forEach(value -> countNested(leaf.schema, value, count));
+                    boolean inlines = leaf.schema.codec().inlinesSmallTrees();
+                    leaf.valueList().forEach(value -> countNested(leaf.schema, value, inlines, count));
                 }
             }
             case Branch branch -> {
@@ -67,25 +68,35 @@ public final class Materializer {
         return count[0];
     }
 
-    private static <V> void countNested(TreeSchema<V> schema, Object value, long[] count) {
-        schema.codec().mapRefs(schema.cast(value), (nested, nestedSchema) -> {
-            count[0] += pendingNodes(nested, nestedSchema);
-            return nested;
+    private static <V> void countNested(TreeSchema<V> schema, Object value, boolean inlines, long[] count) {
+        schema.codec().forEachRef(schema.cast(value), (nested, nestedSchema) -> {
+            if (!(inlines && staysInline(nested))) {
+                count[0] += pendingNodes(nested, nestedSchema);
+            }
         });
+    }
+
+    private static boolean staysInline(Ref ref) {
+        return ref instanceof Ref.Pending(Leaf leaf) && Ref.fitsInline(leaf);
     }
 
     private Leaf freeze(Leaf leaf) {
         Object[] values = leaf.valueList().toArray();
         if (leaf.schema.codec().holdsRefs()) {
+            ValueCodec.RefMapper nested = leaf.schema.codec().inlinesSmallTrees() ? this::inlineOrMaterialize : this::materialize;
             for (int i = 0; i < values.length; i++) {
-                values[i] = mapRefs(leaf.schema, values[i]);
+                values[i] = mapRefs(leaf.schema, values[i], nested);
             }
         }
         return leaf.frozenWith(values);
     }
 
-    private <V> Object mapRefs(TreeSchema<V> schema, Object value) {
-        return schema.codec().mapRefs(schema.cast(value), this::materialize);
+    private Ref inlineOrMaterialize(Ref ref, TreeSchema<?> schema) {
+        return ref instanceof Ref.Pending(Leaf leaf) && Ref.fitsInline(leaf) ? new Ref.Inline(freeze(leaf)) : materialize(ref, schema);
+    }
+
+    private static <V> Object mapRefs(TreeSchema<V> schema, Object value, ValueCodec.RefMapper mapper) {
+        return schema.codec().mapRefs(schema.cast(value), mapper);
     }
 
     private Branch freeze(Branch branch) {
