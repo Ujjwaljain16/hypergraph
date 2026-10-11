@@ -53,7 +53,7 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `mixed.read` | single incidence lookups from `threads − 1` threads for 10 s while `mixed.write` runs | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
 | `mixed.write` | one thread committing 10 updates at a time on a fixed schedule of 1,000 updates/s | `Writer.set` | `graph.replace` |
 | `large.ingest` | one hyperedge containing every node | `Writer.load` | one `HGPlainLink` |
-| `large.scan` | enumerate the large hyperedge 400 times, after 40 warm-up passes | `Reader.forEachMemberId` | `getTargetAt` loop |
+| `large.scan` | enumerate the large hyperedge 400 times, after the warm-up described below | `Reader.forEachMemberId` | `getTargetAt` loop |
 | `large.probe` | test whether a node belongs to the large hyperedge | `View.incidence(edge, node)` (membership-tree lookup) | `getIncidenceSet(node).contains(edge)` |
 | `reopen` | close and reopen, including recovery | `HypergraphDatabase.open` | `HGEnvironment.get` |
 | `read.incidence.cold` | `read.incidence` immediately after reopening | | |
@@ -67,7 +67,12 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `disk.compacted` | bytes on disk after the compaction and a clean shutdown | | |
 | `recover` | open the store after the process ingesting into it was killed with SIGKILL | `HypergraphDatabase.open` | `HGEnvironment.get` |
 
-Read workloads run a warm-up pass over 10% of the probes before timing, except `read.incidence.cold`.
+Read workloads, `large.scan` and `latency.read` first repeat the whole workload for at least 2 seconds without
+timing it. The exception is `read.incidence.cold`. Both engines get the same warm-up. The numbers describe a server that has been running for
+a while, not one that has just started. With a warm-up over 10% of the probes, as earlier versions of this
+benchmark did, most of the timed pass still ran before the JIT had compiled the read path. The timings mostly
+showed how quickly each engine's code got compiled, and `read.members` came out about three times lower for
+HStore than its steady rate.
 
 The two `latency.*` workloads time every operation separately with `System.nanoTime()`. Each operation is a whole
 transaction, as it would be for a request to a server. The report adds a second table with p50, p99, p99.9 and the
