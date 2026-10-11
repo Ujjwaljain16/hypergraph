@@ -6,6 +6,7 @@ package io.hstore.engine.feed;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.page.ByteCursor;
 import io.hstore.engine.page.Checksums;
+import io.hstore.engine.page.FileHandle;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -62,13 +63,13 @@ public final class ChangeFeed implements AutoCloseable {
     private static final class Segment {
         final long start;
         final Path path;
-        final FileChannel channel;
+        final FileHandle file;
         volatile long firstGeneration = EMPTY;
 
-        Segment(long start, Path path, FileChannel channel) {
+        Segment(long start, Path path, FileHandle file) {
             this.start = start;
             this.path = path;
-            this.channel = channel;
+            this.file = file;
         }
     }
 
@@ -111,7 +112,7 @@ public final class ChangeFeed implements AutoCloseable {
         try (Stream<Path> listing = Files.list(directory)) {
             for (Path path : listing.filter(file -> file.getFileName().toString().endsWith(".feed")).toList()) {
                 long start = Long.parseUnsignedLong(path.getFileName().toString().replace(".feed", ""), 16);
-                segments.put(start, new Segment(start, path, FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE)));
+                segments.put(start, new Segment(start, path, FileHandle.open(path)));
             }
         }
         if (segments.isEmpty()) {
@@ -119,7 +120,7 @@ public final class ChangeFeed implements AutoCloseable {
         }
         Segment last = segments.lastEntry().getValue();
         long position = segments.firstKey();
-        for (Iterator<Frame> frames = new FrameReader(position, last.start + last.channel.size()); frames.hasNext(); ) {
+        for (Iterator<Frame> frames = new FrameReader(position, last.start + last.file.size()); frames.hasNext(); ) {
             Frame frame = frames.next();
             remember(frame.generation(), position);
             position = frame.next();
@@ -146,7 +147,8 @@ public final class ChangeFeed implements AutoCloseable {
             segments.remove(later.start);
             discard(later);
         }
-        holding.channel.truncate(position - holding.start);
+        long length = position - holding.start;
+        holding.file.run(channel -> channel.truncate(length));
         if (position == holding.start) {
             holding.firstGeneration = EMPTY;
         }
@@ -185,12 +187,14 @@ public final class ChangeFeed implements AutoCloseable {
         try {
             Segment active = segments.isEmpty() || end - segments.lastKey() >= segmentBytes ? roll() : segments.lastEntry().getValue();
             ByteBuffer buffer = frame.segment().asByteBuffer();
-            long position = end;
-            while (buffer.hasRemaining()) {
-                position += active.channel.write(buffer, position - active.start);
-            }
+            long local = end - active.start;
+            active.file.run(channel -> {
+                while (buffer.hasRemaining()) {
+                    channel.write(buffer, local + buffer.position());
+                }
+            });
             remember(event.generation(), end);
-            end = position;
+            end += buffer.limit();
             appended.signalAll();
         } catch (IOException e) {
             throw HStoreException.io("change feed append failed", e);
@@ -201,10 +205,10 @@ public final class ChangeFeed implements AutoCloseable {
 
     private Segment roll() throws IOException {
         if (!segments.isEmpty()) {
-            segments.lastEntry().getValue().channel.force(false);
+            segments.lastEntry().getValue().file.run(channel -> channel.force(false));
         }
         Path path = directory.resolve("%016x.feed".formatted(end));
-        Segment segment = new Segment(end, path, FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE));
+        Segment segment = new Segment(end, path, FileHandle.open(path));
         segments.put(end, segment);
         try (FileChannel listing = FileChannel.open(directory, StandardOpenOption.READ)) {
             listing.force(true);
@@ -219,7 +223,7 @@ public final class ChangeFeed implements AutoCloseable {
             return;
         }
         try {
-            segments.lastEntry().getValue().channel.force(false);
+            segments.lastEntry().getValue().file.run(channel -> channel.force(false));
         } catch (IOException e) {
             throw HStoreException.io("change feed sync failed", e);
         }
@@ -262,7 +266,7 @@ public final class ChangeFeed implements AutoCloseable {
     private void discard(Segment segment) {
         files.writeLock().lock();
         try {
-            segment.channel.close();
+            segment.file.close();
             Files.deleteIfExists(segment.path);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -321,8 +325,8 @@ public final class ChangeFeed implements AutoCloseable {
         try {
             appended.signalAll();
             for (Segment segment : segments.values()) {
-                segment.channel.force(true);
-                segment.channel.close();
+                segment.file.run(channel -> channel.force(true));
+                segment.file.close();
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
@@ -374,14 +378,14 @@ public final class ChangeFeed implements AutoCloseable {
 
         private Frame readLocked() {
             Map.Entry<Long, Segment> entry = segments.floorEntry(position);
-            if (entry == null || !entry.getValue().channel.isOpen()) {
+            if (entry == null || !entry.getValue().file.isOpen()) {
                 return null;
             }
-            FileChannel channel = entry.getValue().channel;
+            FileHandle file = entry.getValue().file;
             long local = position - entry.getKey();
             try {
                 ByteBuffer header = ByteBuffer.allocate(FRAME_HEADER);
-                if (!readFully(channel, header, local)) {
+                if (!readFully(file, header, local)) {
                     return null;
                 }
                 ByteCursor in = ByteCursor.over(MemorySegment.ofBuffer(header.flip()));
@@ -392,7 +396,7 @@ public final class ChangeFeed implements AutoCloseable {
                     return null;
                 }
                 ByteBuffer body = ByteBuffer.allocate(length);
-                if (!readFully(channel, body, local + FRAME_HEADER)) {
+                if (!readFully(file, body, local + FRAME_HEADER)) {
                     return null;
                 }
                 byte[] payload = body.array();
@@ -404,13 +408,15 @@ public final class ChangeFeed implements AutoCloseable {
             }
         }
 
-        private boolean readFully(FileChannel channel, ByteBuffer buffer, long at) throws IOException {
-            while (buffer.hasRemaining()) {
-                if (channel.read(buffer, at + buffer.position()) < 0) {
-                    return false;
+        private boolean readFully(FileHandle file, ByteBuffer buffer, long at) throws IOException {
+            return file.call(channel -> {
+                while (buffer.hasRemaining()) {
+                    if (channel.read(buffer, at + buffer.position()) < 0) {
+                        return false;
+                    }
                 }
-            }
-            return true;
+                return true;
+            });
         }
     }
 
