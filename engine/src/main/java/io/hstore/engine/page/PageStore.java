@@ -200,6 +200,11 @@ public final class PageStore implements AutoCloseable {
             unit += pageUnits;
         }
         repoint(moved, count);
+        AtomicLong left = live.get(segment);
+        if (left != null && left.get() > 0) {
+            throw HStoreException.corrupt(PageId.NONE, "segment " + segment + " still holds " + left.get()
+                    + " bytes of pages that could not be read and moved; it is kept");
+        }
         return total;
     }
 
