@@ -88,6 +88,11 @@ final class PostingsCodec<P> implements ValueCodec<Postings<P>> {
     }
 
     @Override
+    public boolean refersToPages(Postings<P> value) {
+        return value instanceof Postings.Promoted<P>(Ref root) && root instanceof Ref.Stored;
+    }
+
+    @Override
     public Postings<P> mapRefs(Postings<P> value, RefMapper mapper) {
         return value instanceof Postings.Promoted<P>(Ref root) ? new Postings.Promoted<>(mapper.map(root, postings)) : value;
     }

@@ -9,6 +9,7 @@ import io.hstore.engine.feed.FeedCodec;
 import io.hstore.engine.maintenance.Checkpointer;
 import io.hstore.engine.maintenance.Compactor;
 import io.hstore.engine.maintenance.Recovery;
+import io.hstore.engine.maintenance.ReferenceCounter;
 import io.hstore.engine.page.PageStore;
 import io.hstore.engine.tree.NodeCache;
 import io.hstore.engine.tree.NodeSource;
@@ -38,7 +39,8 @@ import java.util.function.Function;
 public final class StorageEngine implements AutoCloseable {
 
     private static final System.Logger LOG = System.getLogger("hstore.engine");
-    private static final String FORMAT_VERSION = "4";
+    private static final String FORMAT_VERSION = "5";
+    private static final int CHANGED_COUNTS_LIMIT = 1 << 20;
 
     private static final int MAX_ATTEMPTS = 8;
     private static final Duration MAINTENANCE_INTERVAL = Duration.ofMillis(500);
@@ -55,6 +57,7 @@ public final class StorageEngine implements AutoCloseable {
     private final TransactionManager transactions;
     private final Checkpointer checkpointer;
     private final Compactor compactor;
+    private final ReferenceCounter references;
     private final Dictionary dictionary;
     private final Recovery.Outcome recovery;
     private final ReentrantLock maintenance = new ReentrantLock();
@@ -70,7 +73,8 @@ public final class StorageEngine implements AutoCloseable {
         this.lock = lock;
         CatalogStore catalog = CatalogStore.open(directory.resolve("catalog"));
         CatalogImage checkpoint = Recovery.discover(catalog);
-        this.pages = PageStore.open(directory.resolve("data").resolve("segments"), options.pageSize(), options.pagesPerSegment(), checkpoint.segments());
+        this.pages = PageStore.open(directory.resolve("data").resolve("segments"), options.pageSize(), options.pagesPerSegment(),
+                checkpoint.segments(), checkpoint.checkpointLsn());
         this.wal = WriteAheadLog.open(directory.resolve("wal").resolve("segments"), options.walSegmentBytes());
         this.slots = new SlotRegistry(options.slots());
         FeedCodec codec = new FeedCodec(slots);
@@ -78,14 +82,18 @@ public final class StorageEngine implements AutoCloseable {
         this.recovery = Recovery.recover(checkpoint, wal, pages, feed, codec);
         this.cache = new NodeCache(options.cachedNodes());
         PagedNodeSource source = new PagedNodeSource(pages, cache);
+        this.references = ReferenceCounter.recover(pages, source, slots, checkpoint.current(), recovery.replayed(),
+                recovery.image().history(), recovery.image().current());
         TransactionManager.Storage storage = new TransactionManager.Storage(pages, source, wal, feed, codec, slots,
-                options.derivations(), options.durability(), options.walMode(), options.faults(), options.historyLimit());
+                options.derivations(), options.durability(), options.walMode(), options.faults(), options.historyLimit(), references);
         this.transactions = new TransactionManager(storage, recovery.image().current(), recovery.image().history());
-        this.checkpointer = new Checkpointer(transactions, pages, wal, feed, catalog, options.historyLimit(), checkpoint.checkpointLsn());
+        this.checkpointer = new Checkpointer(transactions, pages, wal, feed, catalog, references, options.faults(), options.historyLimit(),
+                checkpoint.checkpointLsn());
         this.compactor = new Compactor(transactions, pages, slots, checkpointer, options.faults());
         this.dictionary = new Dictionary(transactions);
         checkpointer.checkpoint();
         compactor.reclaim();
+        references.start();
         LOG.log(System.Logger.Level.INFO, "database at {0} is ready: generation {1}, {2} data segments, page size {3}, {4} durability, {5} wal",
                 directory, transactions.current().id(), pages.segments().size(), options.pageSize(), options.durability(), options.walMode());
         this.maintainer = Thread.ofVirtual().name("hstore-maintenance").start(this::maintain);
@@ -116,7 +124,7 @@ public final class StorageEngine implements AutoCloseable {
             }
             if (!format.getProperty("format", "1").equals(FORMAT_VERSION)) {
                 throw HStoreException.invalid("database " + directory + " uses storage format " + format.getProperty("format", "1")
-                        + "; this build reads format " + FORMAT_VERSION + " (page directory); export and reload it");
+                        + "; this build reads format " + FORMAT_VERSION + " (reference counts); export and reload it");
             }
             int stored = Integer.parseInt(format.getProperty("page-size"));
             if (stored != options.pageSize()) {
@@ -282,7 +290,12 @@ public final class StorageEngine implements AutoCloseable {
     }
 
     public Map<Integer, Long> liveness() {
-        return compactor.liveness();
+        return pages.liveBytes();
+    }
+
+    public ReferenceCounter.Verification verifyReferences() {
+        requireOpen();
+        return transactions.exclusive(() -> references.verify(transactions.current(), transactions.history()));
     }
 
     public EngineStats stats() {
@@ -300,7 +313,7 @@ public final class StorageEngine implements AutoCloseable {
                     continue;
                 }
                 try {
-                    if (checkpointer.walSinceCheckpoint() > options.checkpointWalBytes()) {
+                    if (checkpointer.walSinceCheckpoint() > options.checkpointWalBytes() || references.pending() > CHANGED_COUNTS_LIMIT) {
                         timedCheckpoint();
                     }
                     if (pages.bytesWritten() - writtenAtCompaction > options.checkpointWalBytes()) {
@@ -358,6 +371,7 @@ public final class StorageEngine implements AutoCloseable {
     private void shutdown() {
         closed = true;
         transactions.shutdown();
+        references.close();
         maintainer.interrupt();
         try {
             maintainer.join(MAINTENANCE_INTERVAL.multipliedBy(4));

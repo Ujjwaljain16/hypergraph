@@ -7,9 +7,11 @@ import java.io.UncheckedIOException;
 import java.lang.foreign.MemorySegment;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -18,16 +20,23 @@ import java.util.stream.Stream;
 
 public final class PageStore implements AutoCloseable {
 
+    public record Scan(long[] dead, long orphans, long unplaced) {
+    }
+
     private final Path directory;
     private final int pageSize;
     private final int segmentUnits;
     private final Map<Integer, SegmentFile> files = new ConcurrentHashMap<>();
     private final ConcurrentSkipListMap<Integer, SegmentInfo> segments = new ConcurrentSkipListMap<>();
+    private final Map<Integer, AtomicLong> live = new ConcurrentHashMap<>();
     private final ReentrantLock allocation = new ReentrantLock();
     private final AtomicLong pagesWritten = new AtomicLong();
     private final AtomicLong bytesWritten = new AtomicLong();
     private final AtomicLong pagesRead = new AtomicLong();
     private PageDirectory addresses;
+    private ReferenceCounts references;
+    private long[] released = new long[64];
+    private int releasedCount;
     private int activeSegment;
     private int nextUnit;
 
@@ -38,15 +47,23 @@ public final class PageStore implements AutoCloseable {
     }
 
     public static PageStore open(Path directory, int pageSize, int pagesPerSegment, Collection<SegmentInfo> known) {
+        return open(directory, pageSize, pagesPerSegment, known, -1);
+    }
+
+    public static PageStore open(Path directory, int pageSize, int pagesPerSegment, Collection<SegmentInfo> known, long checkpointLsn) {
         PageStore store = new PageStore(directory, pageSize, pagesPerSegment);
-        store.restore(known);
+        store.restore(known, checkpointLsn);
         return store;
     }
 
-    private void restore(Collection<SegmentInfo> known) {
+    private void restore(Collection<SegmentInfo> known, long checkpointLsn) {
         try {
             Files.createDirectories(directory);
             addresses = PageDirectory.open(directory.resolve(PageDirectory.FILE));
+            references = ReferenceCounts.open(directory.resolve(ReferenceCounts.FILE));
+            Path journal = directory.resolve(ReferenceJournal.FILE);
+            ReferenceJournal.read(journal, checkpointLsn).ifPresent(this::replay);
+            ReferenceJournal.clear(journal);
             Map<Integer, SegmentInfo> byId = new ConcurrentHashMap<>();
             known.forEach(info -> byId.put(info.id(), info));
             try (Stream<Path> listing = Files.list(directory)) {
@@ -79,8 +96,33 @@ public final class PageStore implements AutoCloseable {
         });
     }
 
+    private void replay(ReferenceJournal.Contents journal) {
+        long[] counts = journal.counts();
+        for (int i = 0; i < counts.length; i += 2) {
+            references.store(counts[i], counts[i + 1]);
+        }
+        for (long index : journal.cleared()) {
+            addresses.put(index, PageAddress.NONE);
+        }
+        references.force();
+        addresses.force();
+    }
+
     public int pageSize() {
         return pageSize;
+    }
+
+    public ReferenceCounts references() {
+        return references;
+    }
+
+    public long pageNumbers() {
+        allocation.lock();
+        try {
+            return addresses.next();
+        } finally {
+            allocation.unlock();
+        }
     }
 
     public long allocate(int length) {
@@ -91,7 +133,9 @@ public final class PageStore implements AutoCloseable {
         allocation.lock();
         try {
             long index = addresses.allocate();
-            addresses.put(index, claim(units));
+            long address = claim(units);
+            addresses.put(index, address);
+            adjustLive(address, 1);
             return PageId.pack(index, 0);
         } finally {
             allocation.unlock();
@@ -140,6 +184,11 @@ public final class PageStore implements AutoCloseable {
         nextUnit = 0;
     }
 
+    private void adjustLive(long address, int sign) {
+        live.computeIfAbsent(PageAddress.segmentOf(address), _ -> new AtomicLong())
+                .addAndGet(sign * (long) PageAddress.unitsOf(address) * PageId.UNIT_BYTES);
+    }
+
     public void write(long pageId, MemorySegment image) {
         if (image.byteSize() > pageSize) {
             throw new IllegalArgumentException("page image exceeds page size: " + image.byteSize());
@@ -180,6 +229,10 @@ public final class PageStore implements AutoCloseable {
         return locate(pageId);
     }
 
+    public long addressOrNone(long pageId) {
+        return addresses.get(PageId.indexOf(pageId));
+    }
+
     public int segmentOf(long pageId) {
         return PageAddress.segmentOf(locate(pageId));
     }
@@ -188,7 +241,12 @@ public final class PageStore implements AutoCloseable {
         allocation.lock();
         try {
             long index = PageId.indexOf(pageId);
+            long previous = addresses.get(index);
+            if (previous != PageAddress.NONE) {
+                adjustLive(previous, -1);
+            }
             addresses.put(index, address);
+            adjustLive(address, 1);
             addresses.reserve(index);
             if (PageAddress.segmentOf(address) == activeSegment) {
                 nextUnit = Math.max(nextUnit, PageAddress.offsetOf(address) + PageAddress.unitsOf(address));
@@ -196,6 +254,53 @@ public final class PageStore implements AutoCloseable {
         } finally {
             allocation.unlock();
         }
+    }
+
+    public void release(long pageId) {
+        long index = PageId.indexOf(pageId);
+        long address = addresses.get(index);
+        if (address == PageAddress.NONE) {
+            return;
+        }
+        adjustLive(address, -1);
+        if (releasedCount == released.length) {
+            released = Arrays.copyOf(released, released.length * 2);
+        }
+        released[releasedCount++] = index;
+    }
+
+    public Scan scan(boolean clearOrphans) {
+        long[] dead = new long[64];
+        int deadCount = 0;
+        long orphans = 0;
+        long unplaced = 0;
+        allocation.lock();
+        try {
+            live.clear();
+            long end = addresses.next();
+            for (long index = 1; index < end; index++) {
+                long address = addresses.get(index);
+                long entry = references.entry(index);
+                if (address == PageAddress.NONE) {
+                    unplaced += entry > 0 ? 1 : 0;
+                } else if (entry == 0 && clearOrphans) {
+                    addresses.put(index, PageAddress.NONE);
+                    orphans++;
+                } else {
+                    adjustLive(address, 1);
+                }
+                if (ReferenceCounts.dead(entry)) {
+                    if (deadCount + 2 > dead.length) {
+                        dead = Arrays.copyOf(dead, dead.length * 2);
+                    }
+                    dead[deadCount++] = ReferenceCounts.deadAt(entry);
+                    dead[deadCount++] = index;
+                }
+            }
+        } finally {
+            allocation.unlock();
+        }
+        return new Scan(Arrays.copyOf(dead, deadCount), orphans, unplaced);
     }
 
     private long locate(long pageId) {
@@ -206,6 +311,16 @@ public final class PageStore implements AutoCloseable {
         return address;
     }
 
+    public Map<Integer, Long> liveBytes() {
+        Map<Integer, Long> bytes = new TreeMap<>();
+        live.forEach((segment, total) -> {
+            if (total.get() > 0) {
+                bytes.put(segment, total.get());
+            }
+        });
+        return bytes;
+    }
+
     public void sync() {
         files.values().forEach(SegmentFile::force);
     }
@@ -213,6 +328,22 @@ public final class PageStore implements AutoCloseable {
     public void checkpoint() {
         sync();
         addresses.force();
+    }
+
+    public void journal(long lsn) {
+        ReferenceJournal.write(directory.resolve(ReferenceJournal.FILE), lsn, references, released, releasedCount);
+    }
+
+    public void applyJournal() {
+        references.forEachChange(references::store);
+        for (int i = 0; i < releasedCount; i++) {
+            addresses.put(released[i], PageAddress.NONE);
+        }
+        references.force();
+        addresses.force();
+        ReferenceJournal.clear(directory.resolve(ReferenceJournal.FILE));
+        references.discardChanges();
+        releasedCount = 0;
     }
 
     public List<SegmentInfo> segments() {
@@ -238,6 +369,7 @@ public final class PageStore implements AutoCloseable {
             file.delete();
         }
         segments.remove(segment);
+        live.remove(segment);
     }
 
     public long pagesWritten() {
@@ -257,5 +389,6 @@ public final class PageStore implements AutoCloseable {
         files.values().forEach(SegmentFile::close);
         files.clear();
         addresses.close();
+        references.close();
     }
 }

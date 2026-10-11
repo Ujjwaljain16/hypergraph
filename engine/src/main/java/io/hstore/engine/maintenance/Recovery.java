@@ -23,7 +23,11 @@ import java.util.stream.Stream;
 
 public final class Recovery {
 
-    public record Outcome(CatalogImage image, int replayedCommits, int discardedTransactions, int discardedCommits) {
+    public record Outcome(CatalogImage image, List<Generation> replayed, int discardedTransactions, int discardedCommits) {
+
+        public int replayedCommits() {
+            return replayed.size();
+        }
     }
 
     private static final System.Logger LOG = System.getLogger("hstore.recovery");
@@ -49,7 +53,7 @@ public final class Recovery {
         });
         Generation generation = checkpoint.current();
         List<Generation> history = new ArrayList<>(checkpoint.history());
-        int replayed = 0;
+        List<Generation> replayed = new ArrayList<>();
         int discarded = 0;
         for (WalRecord.Commit commit : commits) {
             List<WalRecord> records = pending.remove(commit.txnId());
@@ -68,15 +72,15 @@ public final class Recovery {
             }
             generation = redo(generation, commit, body, pages, feed, codec);
             history.add(generation);
-            replayed++;
+            replayed.add(generation);
         }
         pages.sync();
         feed.truncateAfter(generation.id());
         feed.sync();
         CatalogImage recovered = new CatalogImage(generation, history, pages.segments(), wal.end(), feed.size());
         LOG.log(System.Logger.Level.INFO, "recovered generation {0}: replayed {1} commits from lsn {2}, discarded {3} unfinished transactions and {4} non-durable commits",
-                generation.id(), replayed, checkpoint.checkpointLsn(), pending.size(), discarded);
-        return new Outcome(recovered, replayed, pending.size(), discarded);
+                generation.id(), replayed.size(), checkpoint.checkpointLsn(), pending.size(), discarded);
+        return new Outcome(recovered, List.copyOf(replayed), pending.size(), discarded);
     }
 
     private static void place(WalRecord record, PageStore pages) {

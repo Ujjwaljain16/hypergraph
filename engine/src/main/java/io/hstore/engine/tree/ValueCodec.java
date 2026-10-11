@@ -27,6 +27,15 @@ public interface ValueCodec<V> {
         return value;
     }
 
+    default boolean refersToPages(V value) {
+        boolean[] found = new boolean[1];
+        mapRefs(value, (ref, _) -> {
+            found[0] |= ref instanceof Ref.Stored;
+            return ref;
+        });
+        return found[0];
+    }
+
     static <V> ValueCodec<V> rows(ToIntFunction<V> size, BiConsumer<ByteCursor, V> writer, Function<ByteCursor, V> reader) {
         return new ValueCodec<>() {
             @Override

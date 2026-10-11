@@ -41,6 +41,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
+import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
@@ -50,7 +51,7 @@ public final class TransactionManager {
 
     public record Storage(PageStore pages, PagedNodeSource source, WriteAheadLog wal, ChangeFeed feed, FeedCodec feedCodec,
                           SlotRegistry slots, List<Derivation> derivations, Durability durability, WalMode walMode,
-                          CrashPoint.Injector faults, int historyLimit) {
+                          CrashPoint.Injector faults, int historyLimit, ReferenceTracker references) {
     }
 
     public record Statistics(long commits, long rebases, long conflicts, long readOnly, long pagesWritten, long walBytes,
@@ -62,6 +63,8 @@ public final class TransactionManager {
 
     private record PageWrite(long pageId, MemorySegment image) {
     }
+
+    private static final long[] NO_PAGES = new long[0];
 
     private final Storage storage;
     private final List<Derivation> derivations;
@@ -157,9 +160,14 @@ public final class TransactionManager {
     }
 
     private Generation pinCurrent() {
-        Generation generation = current.get();
-        pin(generation.id());
-        return generation;
+        while (true) {
+            Generation generation = current.get();
+            pin(generation.id());
+            if (history.containsKey(generation.id())) {
+                return generation;
+            }
+            unpin(generation.id());
+        }
     }
 
     void pin(long generation) {
@@ -173,6 +181,12 @@ public final class TransactionManager {
     public OptionalLong oldestPinned() {
         Map.Entry<Long, Integer> first = pins.firstEntry();
         return first == null ? OptionalLong.empty() : OptionalLong.of(first.getKey());
+    }
+
+    public long oldestReadable() {
+        long oldest = history.firstKey();
+        OptionalLong pinned = oldestPinned();
+        return pinned.isPresent() ? Math.min(oldest, pinned.getAsLong()) : oldest;
     }
 
     CommitResult commit(Transaction txn) {
@@ -190,6 +204,7 @@ public final class TransactionManager {
             Optional<String> request = txn.options().requestId();
             Optional<RequestRecord> prior = request.flatMap(id -> priorRequest(branch, id));
             if (prior.isPresent()) {
+                discard(txn.spilled());
                 return new CommitResult(prior.get().txnId(), prior.get().generation(), CommitResult.Outcome.DUPLICATE, 0, 0, 0, 0);
             }
             boolean requestsStable = request.isEmpty()
@@ -214,8 +229,8 @@ public final class TransactionManager {
             request.ifPresent(id -> workspace.write(EngineSlots.REQUESTS, Hashing.of(id),
                     _ -> Optional.of(new RequestRecord(id, txn.id(), latest.id() + 1))));
             RootVector merged = fast ? workspace.rebasedOnto(branch.roots()) : workspace.roots();
-            appended = append(latest, branch.withRoots(merged), txn.id(),
-                    workspace.memberChanges(), workspace.slotChanges(), List.of(), txn.options().maxPages() - txn.spilledPages());
+            appended = append(latest, branch.withRoots(merged), txn.id(), workspace.memberChanges(), workspace.slotChanges(),
+                    List.of(), txn.options().maxPages() - txn.spilledPages(), txn.spilled());
         } finally {
             commitLock.unlock();
         }
@@ -250,7 +265,7 @@ public final class TransactionManager {
             RootVector roots = workspace.roots();
             if (!roots.sameAs(branch.roots())) {
                 appended = Optional.of(append(latest, branch.withRoots(roots), txns.getAndIncrement(), workspace.memberChanges(),
-                        workspace.slotChanges(), List.of(), Long.MAX_VALUE));
+                        workspace.slotChanges(), List.of(), Long.MAX_VALUE, NO_PAGES));
             }
         } finally {
             commitLock.unlock();
@@ -273,7 +288,7 @@ public final class TransactionManager {
             int id = new TreeSet<>(latest.branches().keySet()).last() + 1;
             long txn = txns.getAndIncrement();
             created = new Branch(id, name, parentId, latest.id(), System.currentTimeMillis(), Branch.State.ACTIVE, parent.roots());
-            appended = append(latest, created, txn, List.of(), List.of(), List.of(meta(txn, created)), Long.MAX_VALUE);
+            appended = append(latest, created, txn, List.of(), List.of(), List.of(meta(txn, created)), Long.MAX_VALUE, NO_PAGES);
         } finally {
             commitLock.unlock();
         }
@@ -292,7 +307,7 @@ public final class TransactionManager {
             Generation latest = head.get();
             long txn = txns.getAndIncrement();
             Branch closed = latest.branch(id).withState(state).withRoots(RootVector.EMPTY);
-            appended = append(latest, closed, txn, List.of(), List.of(), List.of(meta(txn, closed)), Long.MAX_VALUE);
+            appended = append(latest, closed, txn, List.of(), List.of(), List.of(meta(txn, closed)), Long.MAX_VALUE, NO_PAGES);
         } finally {
             commitLock.unlock();
         }
@@ -335,12 +350,21 @@ public final class TransactionManager {
         storage.wal().append(List.of(new WalRecord.Abort(txnId)));
     }
 
-    Ref spill(long txnId, Ref ref, TreeSchema<?> schema) {
+    void discard(long[] spilled) {
+        if (spilled.length > 0) {
+            storage.references().discarded(spilled);
+        }
+    }
+
+    Ref spill(long txnId, Ref ref, TreeSchema<?> schema, LongConsumer written) {
         List<WalRecord> records = new ArrayList<>();
         List<PageWrite> writes = new ArrayList<>();
         Materializer materializer = materializer(head.get().id() + 1, txnId, records, writes);
         Ref stored = materializer.materialize(ref, schema);
-        writes.forEach(write -> storage.pages().write(write.pageId(), write.image()));
+        writes.forEach(write -> {
+            storage.pages().write(write.pageId(), write.image());
+            written.accept(write.pageId());
+        });
         storage.wal().append(records);
         pagesWritten.add(materializer.pagesWritten());
         return stored;
@@ -365,7 +389,7 @@ public final class TransactionManager {
     }
 
     private Appended append(Generation latest, Branch changed, long txnId, List<MemberChange> members,
-                            List<SlotChange<?>> slotChanges, List<WalRecord> meta, long pageBudget) {
+                            List<SlotChange<?>> slotChanges, List<WalRecord> meta, long pageBudget, long[] spilled) {
         long pendingPages = changed.roots().roots().entrySet().stream()
                 .mapToLong(entry -> Materializer.pendingNodes(entry.getValue(), storage.slots().slot(entry.getKey()).schema()))
                 .sum();
@@ -405,8 +429,9 @@ public final class TransactionManager {
         pagesWritten.add(materializer.pagesWritten());
         walBytes.add(written);
         GroupCommitter.Pending pending = new GroupCommitter.Pending(next, () -> {
-            current.set(next);
             history.put(next.id(), next);
+            current.set(next);
+            storage.references().committed(latest, next, spilled);
             if (!event.isEmpty()) {
                 storage.feed().append(event);
             }
@@ -434,8 +459,13 @@ public final class TransactionManager {
         long latest = current.get().id();
         for (Iterator<Long> generations = history.keySet().iterator(); excess > 0 && generations.hasNext(); ) {
             long generation = generations.next();
-            if (generation != latest && !pins.containsKey(generation)) {
-                generations.remove();
+            if (generation == latest || pins.containsKey(generation)) {
+                continue;
+            }
+            Generation trimmed = history.remove(generation);
+            if (pins.containsKey(generation)) {
+                history.put(generation, trimmed);
+            } else {
                 excess--;
             }
         }

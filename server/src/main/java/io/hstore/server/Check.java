@@ -4,6 +4,7 @@ import io.hstore.engine.StorageEngine;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.catalog.Generation;
 import io.hstore.engine.catalog.Slot;
+import io.hstore.engine.maintenance.ReferenceCounter;
 import io.hstore.engine.tree.TreeVerifier;
 
 import java.util.Map;
@@ -33,7 +34,10 @@ final class Check {
                         slot.name(), verified.entries(), verified.pages(), verified.nestedTrees(), verified.height()));
             }
         }
-        report.append("verified ").append(pages).append(" pages: checksums, ordering, balance and summaries are consistent");
+        report.append("verified ").append(pages).append(" pages: checksums, ordering, balance and summaries are consistent\n");
+        ReferenceCounter.Verification references = engine.verifyReferences();
+        report.append("reference counts match the trees: ").append(references.livePages()).append(" pages in use, ")
+                .append(references.waitingPages()).append(" waiting for older readers");
         return report.toString();
     }
 }
