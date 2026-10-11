@@ -313,11 +313,11 @@ read-only memory, so nothing can write into a stored image through a read.
 
 The cache stores **decoded, frozen** `Node` objects, not bytes. A hit therefore costs no decoding and no allocation. The cache has 16 shards; a node goes to shard `mix(pageId) >>> 60`. Each shard has:
 
-* a `ConcurrentHashMap<Long, Slot>` from page id to `Slot(pageId, node, volatile referenced)`;
+* an open-addressing table of `Slot(pageId, node, volatile referenced)`, probed linearly from `mix(pageId)`, so a lookup needs no boxed key. It is kept at most half full, counting removed slots, and is rebuilt into a new array when it would pass that;
 * a byte budget of `max(64 KiB, node_cache_mb / 16)` and a circular, doubly linked ring of slots with a CLOCK hand. Each slot weighs `Node.heapBytes()`, an estimate of the decoded node's heap size: 144 bytes for the node and its summary, its key and value or child arrays, then 96 bytes plus the encoded value per leaf entry, or 128 bytes per child reference in a branch. Those constants come from measuring retained heap against cache contents at two dataset sizes;
 * a `ReentrantLock` taken only for admission.
 
-**Reads are lock-free.** `get` is a `ConcurrentHashMap.get`, plus setting `referenced = true` if it was clear. The check avoids a redundant volatile write on hot entries.
+**Reads are lock-free.** `get` probes the table, reading each slot with acquire ordering, plus setting `referenced = true` if it was clear. Writers change the table only under the shard lock, publishing each slot with release ordering, and a rebuild publishes the new array through a volatile field. A reader still probing the old array can find a node that was just evicted; that is harmless, because a page number's contents never change. The check avoids a redundant volatile write on hot entries.
 
 **Admission (`put`) uses CLOCK second-chance eviction under the shard lock:**
 
