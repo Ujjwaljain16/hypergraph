@@ -69,14 +69,22 @@ final class AtomCodec implements ValueCodec<AtomRecord> {
             return new NodeRecord(type, key, in.getVarLong(), in.getVarLong(), in.getVarInt(), in.getVarInt(), in.getVarInt());
         }
         EdgeKind kind = EdgeKind.values()[in.getUnsignedByte()];
-        Ref members = Ref.read(in);
-        Ref order = Ref.read(in);
+        Ref members = Ref.read(in, TopologySchemas.members(kind));
+        Ref order = Ref.read(in, TopologySchemas.ORDER_INDEX);
         return new EdgeRecord(type, kind, members, order, in.getVarLong(), in.getVarLong(), in.getVarInt(), in.getVarInt());
     }
 
     @Override
     public boolean holdsRefs() {
         return true;
+    }
+
+    @Override
+    public void forEachRef(AtomRecord record, RefVisitor visitor) {
+        if (record instanceof EdgeRecord edge) {
+            visitor.visit(edge.members(), TopologySchemas.members(edge.kind()));
+            visitor.visit(edge.order(), TopologySchemas.ORDER_INDEX);
+        }
     }
 
     @Override

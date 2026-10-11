@@ -29,14 +29,13 @@ public final class TreeWalker {
         switch (node) {
             case Leaf leaf -> {
                 if (schema.codec().holdsRefs()) {
-                    ValueCodec.RefMapper mapper = (nested, nestedSchema) -> {
+                    ValueCodec.RefVisitor visitor = (nested, nestedSchema) -> {
                         if (nested instanceof Ref.Stored(long child, int _, Summary _)) {
                             into.accept(child, nestedSchema, UNKNOWN_HEIGHT);
                         }
-                        return nested;
                     };
                     for (int i = 0; i < leaf.size(); i++) {
-                        nested(schema, leaf.value(i), mapper);
+                        nested(schema, leaf.value(i), visitor);
                     }
                 }
             }
@@ -50,7 +49,7 @@ public final class TreeWalker {
         }
     }
 
-    private static <V> void nested(TreeSchema<V> schema, Object value, ValueCodec.RefMapper mapper) {
-        schema.codec().mapRefs(schema.cast(value), mapper);
+    private static <V> void nested(TreeSchema<V> schema, Object value, ValueCodec.RefVisitor visitor) {
+        schema.codec().forEachRef(schema.cast(value), visitor);
     }
 }

@@ -30,12 +30,16 @@ public interface ValueCodec<V> {
         return value;
     }
 
-    default boolean refersToPages(V value) {
-        boolean[] found = new boolean[1];
-        mapRefs(value, (ref, _) -> {
-            found[0] |= ref instanceof Ref.Stored;
+    default void forEachRef(V value, RefVisitor visitor) {
+        mapRefs(value, (ref, schema) -> {
+            visitor.visit(ref, schema);
             return ref;
         });
+    }
+
+    default boolean refersToPages(V value) {
+        boolean[] found = new boolean[1];
+        forEachRef(value, (ref, _) -> found[0] |= ref instanceof Ref.Stored);
         return found[0];
     }
 
@@ -63,5 +67,10 @@ public interface ValueCodec<V> {
     @FunctionalInterface
     interface RefMapper {
         Ref map(Ref ref, TreeSchema<?> schema);
+    }
+
+    @FunctionalInterface
+    interface RefVisitor {
+        void visit(Ref ref, TreeSchema<?> schema);
     }
 }

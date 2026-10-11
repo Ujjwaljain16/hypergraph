@@ -8,6 +8,7 @@ import io.hstore.engine.page.ByteCursor;
 import java.util.AbstractList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 public final class Leaf extends Node {
 
@@ -60,8 +61,37 @@ public final class Leaf extends Node {
 
     @Override
     int heapBytes() {
-        return NODE_HEAP_BYTES + 2 * ARRAY_HEAP_BYTES + Long.BYTES * keys.length + Integer.BYTES * values.length
+        int bytes = NODE_HEAP_BYTES + 2 * ARRAY_HEAP_BYTES + Long.BYTES * keys.length + Integer.BYTES * values.length
                 + ENTRY_HEAP_BYTES * size + valueBytes;
+        return schema.codec().holdsRefs() ? bytes + inlineHeapBytes(schema) : bytes;
+    }
+
+    private <V> int inlineHeapBytes(TreeSchema<V> typed) {
+        int[] total = new int[1];
+        ValueCodec.RefVisitor visitor = (ref, _) -> {
+            if (ref instanceof Ref.Inline(Leaf inline)) {
+                total[0] += inline.heapBytes();
+            }
+        };
+        for (int i = 0; i < size; i++) {
+            typed.codec().forEachRef(typed.cast(values[i]), visitor);
+        }
+        return total[0];
+    }
+
+    boolean sameEntries(Leaf other) {
+        if (this == other) {
+            return true;
+        }
+        if (schema.id() != other.schema.id() || size != other.size || !Arrays.equals(keys, 0, size, other.keys, 0, size)) {
+            return false;
+        }
+        for (int i = 0; i < size; i++) {
+            if (!Objects.equals(value(i), other.value(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     int search(long key) {

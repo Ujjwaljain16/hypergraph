@@ -54,6 +54,31 @@ public final class NodeCodec {
         encodeValues(out, leaf.schema, keys, leaf);
     }
 
+    static void encodeInline(ByteCursor out, Leaf leaf) {
+        out.putVarLong(leaf.size());
+        encodeLeaf(out, leaf);
+    }
+
+    static Leaf decodeInline(ByteCursor in, TreeSchema<?> schema) {
+        int count = Math.toIntExact(in.getVarLong());
+        if (count < 1 || count > Ref.INLINE_MAX_ENTRIES) {
+            throw new IllegalStateException("inline tree of " + count + " entries in " + schema);
+        }
+        long[] keys = decodeKeys(in, count);
+        Object[] values = new Object[count];
+        schema.codec().decode(in, keys, values);
+        return Leaf.decoded(schema, keys, values, null);
+    }
+
+    private static long[] decodeKeys(ByteCursor in, int count) {
+        long[] keys = new long[count];
+        keys[0] = in.getSignedVarLong();
+        for (int i = 1; i < count; i++) {
+            keys[i] = keys[i - 1] + in.getVarLong();
+        }
+        return keys;
+    }
+
     private static <V> void encodeValues(ByteCursor out, TreeSchema<V> schema, long[] keys, Leaf leaf) {
         @SuppressWarnings("unchecked")
         List<V> values = (List<V>) leaf.valueList();
@@ -98,11 +123,7 @@ public final class NodeCodec {
                 in.getSignedVarLong(), in.getSignedVarLong(), in.getSignedVarLong(),
                 in.getSignedVarLong(), in.getSignedVarLong(), in.getLong(), header.fingerprint());
         int count = header.slotCount();
-        long[] keys = new long[count];
-        keys[0] = in.getSignedVarLong();
-        for (int i = 1; i < count; i++) {
-            keys[i] = keys[i - 1] + in.getVarLong();
-        }
+        long[] keys = decodeKeys(in, count);
         return switch (header.type()) {
             case LEAF -> {
                 Object[] values = new Object[count];

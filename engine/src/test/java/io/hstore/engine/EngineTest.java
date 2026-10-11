@@ -31,6 +31,8 @@ import io.hstore.engine.txn.TxnOptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -602,5 +604,13 @@ class EngineTest {
             assertEquals(Set.of("buyer", "approver"), new HashSet<>(engine.dictionary().roles(roleSet)));
             assertEquals(List.of(roleSet), engine.dictionary().roleSetsContaining("buyer"));
         }
+    }
+
+    @Test
+    void directoriesFromTheReferenceCountFormatAreRefused() throws IOException {
+        Files.writeString(directory.resolve("FORMAT"), "format=5\npage-size=1024\n");
+        HStoreException refused = assertThrows(HStoreException.class, () -> StorageEngine.open(directory, small()).close());
+        assertTrue(refused.getMessage().endsWith("uses storage format 5; this build reads format 6 (inline member trees); export and reload it"),
+                refused.getMessage());
     }
 }

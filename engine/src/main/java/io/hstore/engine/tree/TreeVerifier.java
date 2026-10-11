@@ -93,10 +93,7 @@ public final class TreeVerifier {
             return NOTHING;
         }
         List<Nested> nested = new ArrayList<>();
-        schema.codec().mapRefs(schema.cast(value), (root, nestedSchema) -> {
-            nested.add(new Nested(root, nestedSchema));
-            return root;
-        });
+        schema.codec().forEachRef(schema.cast(value), (root, nestedSchema) -> nested.add(new Nested(root, nestedSchema)));
         Report total = NOTHING;
         for (Nested tree : nested) {
             total = total.plus(verify(tree.root(), tree.schema())).plus(new Report(0, 0, tree.root() instanceof Ref.Empty ? 0 : 1, 0));
