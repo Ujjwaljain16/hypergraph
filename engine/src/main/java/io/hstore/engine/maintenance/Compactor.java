@@ -59,6 +59,7 @@ public final class Compactor {
 
     private Cut cut() {
         return transactions.exclusive(() -> {
+            transactions.compacted();
             int active = pages.activeSegment();
             Set<Integer> sealed = pages.segments().stream()
                     .filter(segment -> segment.state() == SegmentState.SEALED && segment.id() != active)
@@ -118,7 +119,6 @@ public final class Compactor {
         move(live, Set.copyOf(victims));
         faults.reach(CrashPoint.COMPACTION_MOVE);
         long retiredAt = transactions.current().id();
-        transactions.compacted();
         long checkpoints = checkpointer.completed();
         victims.forEach(id -> {
             pages.transition(id, SegmentState.RETIRED, retiredAt);
