@@ -2,7 +2,14 @@ package io.hstore.engine.txn;
 
 import io.hstore.engine.HStoreException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -104,5 +111,35 @@ class GroupCommitterTest {
         }));
         assertEquals(List.of(0), appender.published);
         committer.close();
+    }
+
+    @Test
+    void anInterruptedCommitterLeadsABatchWithoutClosingTheLog(@TempDir Path dir) throws IOException {
+        try (FileChannel log = FileChannel.open(dir.resolve("log"), StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            Runnable write = () -> {
+                try {
+                    log.write(ByteBuffer.allocate(8));
+                    log.force(false);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            };
+            GroupCommitter committer = new GroupCommitter(_ -> write.run());
+            Appender appender = new Appender(committer);
+            appender.append(() -> Thread.currentThread().interrupt());
+            GroupCommitter.Pending second = appender.append(write);
+            Thread.currentThread().interrupt();
+            try {
+                committer.await(second);
+                assertTrue(Thread.currentThread().isInterrupted());
+            } finally {
+                Thread.interrupted();
+            }
+            committer.await(appender.append(() -> {
+            }));
+            assertTrue(log.isOpen());
+            assertEquals(List.of(0, 1, 2), appender.published);
+            committer.close();
+        }
     }
 }

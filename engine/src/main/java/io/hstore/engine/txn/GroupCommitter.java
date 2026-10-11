@@ -96,17 +96,24 @@ final class GroupCommitter implements AutoCloseable {
             progressed.awaitUninterruptibly();
             return;
         }
-        leading = true;
         List<Pending> batch = new ArrayList<>(queue);
+        leading = true;
         Throwable broken = null;
+        boolean interrupted = Thread.interrupted();
         lock.unlock();
         try {
             barrier.makeDurable(batch.size());
-            batch.forEach(pending -> pending.publication.run());
+            for (Pending pending : batch) {
+                pending.publication.run();
+                interrupted |= Thread.interrupted();
+            }
         } catch (Throwable thrown) {
             broken = thrown;
         } finally {
             lock.lock();
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
         leading = false;
         if (broken != null) {
