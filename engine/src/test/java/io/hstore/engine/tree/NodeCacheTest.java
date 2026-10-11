@@ -13,6 +13,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NodeCacheTest {
 
+    private static final int PAGE = 16 * 1024;
+
     private static Node node(long key) {
         return Leaf.owned(TreeTest.LONGS, null, new long[]{key}, new Object[]{key}, 1);
     }
@@ -20,7 +22,7 @@ class NodeCacheTest {
     @Test
     void residentBytesStayWithinTheBudget() {
         long budget = 1 << 20;
-        NodeCache cache = new NodeCache(budget);
+        NodeCache cache = new NodeCache(budget, PAGE);
         RandomGenerator random = RandomGeneratorFactory.of("L64X128MixRandom").create(3);
         for (long page = 0; page < 20_000; page++) {
             cache.put(page, node(page), 100 + random.nextInt(16 * 1024));
@@ -34,7 +36,7 @@ class NodeCacheTest {
 
     @Test
     void pagesThatKeepBeingReadSurviveColdInserts() {
-        NodeCache cache = new NodeCache(1 << 20);
+        NodeCache cache = new NodeCache(1 << 20, PAGE);
         long[] hot = LongStream.range(0, 32).toArray();
         for (long page : hot) {
             cache.put(page, node(page), 4096);
@@ -52,15 +54,15 @@ class NodeCacheTest {
 
     @Test
     void aNodeLargerThanItsShardIsNotCached() {
-        NodeCache cache = new NodeCache(1 << 20);
-        cache.put(7, node(7), 128 * 1024);
+        NodeCache cache = new NodeCache(1 << 20, PAGE);
+        cache.put(7, node(7), (1 << 20) + 1);
         assertNull(cache.get(7));
         assertEquals(0, cache.residentBytes());
     }
 
     @Test
     void puttingAPageAgainReplacesItAndItsSize() {
-        NodeCache cache = new NodeCache(1 << 20);
+        NodeCache cache = new NodeCache(1 << 20, PAGE);
         Node first = node(1);
         Node second = node(2);
         cache.put(9, first, 1_000);
@@ -70,5 +72,20 @@ class NodeCacheTest {
         cache.clear();
         assertEquals(0, cache.residentBytes());
         assertNull(cache.get(9));
+    }
+
+    @Test
+    void aNodeAsLargeAsAPageIsCachedEvenWhenTheBudgetIsSmall() {
+        NodeCache cache = new NodeCache(2 << 20, 1 << 20);
+        Node node = node(1);
+        cache.put(1, node, 3 << 19);
+        assertSame(node, cache.get(1));
+    }
+
+    @Test
+    void largeBudgetsAreSplitIntoShards() {
+        assertEquals(16, NodeCache.shardsFor(256L << 20, PAGE));
+        assertEquals(1, NodeCache.shardsFor(1 << 20, PAGE));
+        assertEquals(1, NodeCache.shardsFor(1, PAGE));
     }
 }
