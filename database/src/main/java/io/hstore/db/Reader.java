@@ -32,6 +32,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.function.LongConsumer;
 import java.util.function.Predicate;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
@@ -203,6 +204,10 @@ public sealed class Reader permits Writer {
         return edge(edge).memberIds();
     }
 
+    public void forEachMemberId(long edge, LongConsumer action) {
+        edge(edge).forEachMemberId(action);
+    }
+
     public Stream<Member> members(long edge, long validAt) {
         return edge(edge).validAt(validAt).map(incidence -> member(incidence, -1));
     }
@@ -230,6 +235,12 @@ public sealed class Reader permits Writer {
             return Stream.empty();
         }
         return view.incident(atom).map(incident -> new Incident(incident.edge(), roles(incident.roleSet()), incident.locator()));
+    }
+
+    public void forEachIncidentEdge(long atom, LongConsumer action) {
+        if (onlyDefaultTenant() || visible(atom)) {
+            view.forEachIncidentEdge(atom, action);
+        }
     }
 
     public long position(Incident incident) {

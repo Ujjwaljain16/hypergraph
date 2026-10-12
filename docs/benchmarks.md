@@ -42,18 +42,18 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 |---|---|---|---|
 | `ingest.nodes` | insert nodes, 1,000 per transaction | `Writer.node` | `graph.add(String)` in `transact` |
 | `ingest.edges` | insert hyperedges, 1,000 per transaction | `Writer.edge` + `Writer.load` | `graph.add(new HGPlainLink(…))` |
-| `read.incidence` | enumerate a node's incidence set, 1,000 probes per read transaction | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
-| `read.members` | enumerate a hyperedge's members | `Reader.members` | `HGLink.getTargetAt` over `graph.get(h)` |
+| `read.incidence` | enumerate a node's incidence set, 1,000 probes per read transaction | `Reader.forEachIncidentEdge` | `getIncidenceSet(h).getSearchResult()` |
+| `read.members` | enumerate a hyperedge's members | `Reader.forEachMemberId` | `HGLink.getTargetAt` over `graph.get(h)` |
 | `read.comembership` | count hyperedges containing both nodes of a pair | `TreeAlgebra.intersectKeys` (leapfrog) | `hg.count(hg.and(hg.incident(a), hg.incident(b)))` |
-| `read.twohop` | count the distinct nodes that share a hyperedge with a node, 10,000 probes | `Reader.incident` + `Reader.memberIds` | `getIncidenceSet` + the link's targets |
+| `read.twohop` | count the distinct nodes that share a hyperedge with a node, 10,000 probes | `Reader.forEachIncidentEdge` + `Reader.forEachMemberId` | `getIncidenceSet` + the link's targets |
 | `read.incidence.parallel` | `read.incidence` from one thread per core | same | same |
-| `latency.read` | one incidence lookup per read transaction, each timed on its own | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
+| `latency.read` | one incidence lookup per read transaction, each timed on its own | `Reader.forEachIncidentEdge` | `getIncidenceSet(h).getSearchResult()` |
 | `write.update` | replace a node's value, 1,000 per transaction | `Writer.set` | `graph.replace` |
 | `latency.commit` | 5,000 write transactions of one update each, each timed on its own | `Writer.set` | `graph.replace` |
-| `mixed.read` | single incidence lookups from `threads − 1` threads for 10 s while `mixed.write` runs | `Reader.incident` | `getIncidenceSet(h).getSearchResult()` |
+| `mixed.read` | single incidence lookups from `threads − 1` threads for 10 s while `mixed.write` runs | `Reader.forEachIncidentEdge` | `getIncidenceSet(h).getSearchResult()` |
 | `mixed.write` | one thread committing 10 updates at a time on a fixed schedule of 1,000 updates/s | `Writer.set` | `graph.replace` |
 | `large.ingest` | one hyperedge containing every node | `Writer.load` | one `HGPlainLink` |
-| `large.scan` | enumerate the large hyperedge twenty times | `Reader.members` | `getTargetAt` loop |
+| `large.scan` | enumerate the large hyperedge 400 times, after the warm-up described below | `Reader.forEachMemberId` | `getTargetAt` loop |
 | `large.probe` | test whether a node belongs to the large hyperedge | `View.incidence(edge, node)` (membership-tree lookup) | `getIncidenceSet(node).contains(edge)` |
 | `reopen` | close and reopen, including recovery | `HypergraphDatabase.open` | `HGEnvironment.get` |
 | `read.incidence.cold` | `read.incidence` immediately after reopening | | |
@@ -67,7 +67,12 @@ taken from a common hyperedge (so co-membership counts are non-zero), and 20,000
 | `disk.compacted` | bytes on disk after the compaction and a clean shutdown | | |
 | `recover` | open the store after the process ingesting into it was killed with SIGKILL | `HypergraphDatabase.open` | `HGEnvironment.get` |
 
-Read workloads run a warm-up pass over 10% of the probes before timing, except `read.incidence.cold`.
+Read workloads, `large.scan` and `latency.read` first repeat the whole workload for at least 2 seconds without
+timing it. The exception is `read.incidence.cold`. Both engines get the same warm-up. The numbers describe a server that has been running for
+a while, not one that has just started. With a warm-up over 10% of the probes, as earlier versions of this
+benchmark did, most of the timed pass still ran before the JIT had compiled the read path. The timings mostly
+showed how quickly each engine's code got compiled, and `read.members` came out about three times lower for
+HStore than its steady rate.
 
 The two `latency.*` workloads time every operation separately with `System.nanoTime()`. Each operation is a whole
 transaction, as it would be for a request to a server. The report adds a second table with p50, p99, p99.9 and the
@@ -144,8 +149,9 @@ then the rest of the page image if it's bigger. JE reports sequential plus rando
 cold reads and with a small `CACHE_MB`. The logical sizes are rough estimates; compare the two stores against each
 other rather than reading the ratios as absolute numbers.
 
-**Memory.** Every workload also records, from the JVM's own MXBeans, the bytes the whole process allocated
-(`getTotalThreadAllocatedBytes`) and the GC pause time (`GarbageCollectorMXBean.getCollectionTime`, which is
+**Memory.** Every workload also records, from the JVM's own MXBeans, the bytes allocated
+(`getTotalThreadAllocatedBytes` for the whole process; for the single-threaded read workloads, only the reading
+thread's `getCurrentThreadAllocatedBytes`, so background maintenance doesn't count against a read) and the GC pause time (`GarbageCollectorMXBean.getCollectionTime`, which is
 stop-the-world time with ParallelGC). Rows where both stores paused for 0 ms are left out. After ingest, the run
 forces a full GC and records how much heap the loaded store keeps. A baseline taken before the store opens is
 subtracted, so the shared dataset arrays don't count. This number mostly reflects how each engine's cache is
@@ -244,11 +250,15 @@ not what drives HStore's footprint:
   atom cache, which holds a Java array of target handles, so a scan is an array loop. HStore walks a B+tree
   cursor, decodes incidence columns, resolves role sets and builds a `Member` record for each member. That
   record carries roles, weight, validity, position and qualifier. The cost buys per-member metadata and
-  snapshot-consistent reads, which a plain link cannot express. This is the clearest optimisation target
-  (a raw `LongStream` member path that skips record materialisation).
+  snapshot-consistent reads, which a plain link cannot express. The benchmark now reads ids through
+  `Reader.forEachMemberId`, which builds neither `Member` records nor tree entries; the numbers below predate that.
+  Small hyperedges now keep their members inline in their catalog record, so the extra page per edge is gone
+  too (see *Inline member trees* below); the tables above predate that as well.
 * **Edge ingest at small batch sizes (about 0.6–0.8× in async mode).** Each commit rewrites the incident-tree
   paths of every touched member, which is copy-on-write write amplification. JE appends log records and
   defers the work to its cleaner. In `sync` mode group commit amortises the fsync and HStore leads (1.35×).
+  Since storage format 7 a commit no longer writes those paths: it logs the keys it changed, and a checkpoint
+  writes each changed node once for all the commits since the previous one. These numbers predate that.
 * **Parallel incidence reads at scale 4 (0.46×).** Every probe batch opens a snapshot, which pins a
   generation in a shared skip-list map. At 10 threads this coordination, plus node-cache admission under
   churn (the hot set exceeded the 1,048,576-node cache these runs used), costs more than JE's latch-free cache hits. At scale 1
@@ -260,6 +270,41 @@ not what drives HStore's footprint:
   images are live, and the background pass runs after every `checkpoint_wal_mb` of writes
   ([maintenance.md](storage/maintenance.md)). Raising `compaction_live_ratio` trades write amplification for
   space.
+* **Crash recovery since storage format 7 (`recover`, not in the tables above).** Recovery now replays each
+  commit's changed keys onto the trees of the last checkpoint, which takes more CPU than pointing the roots at
+  pages that were already written. On a busy laptop at scale 1, the median went from 90 ms on format 6 to
+  171 ms, against 123 ms for HyperGraphDB. That hasn't been rerun on an idle machine yet.
+
+### Inline member trees
+
+Storage format 6 started keeping a hyperedge's member tree inside its catalog record when it is a single leaf
+of at most 32 members that fits in about 100 bytes ([persistent-tree.md](storage/persistent-tree.md#inline-trees)), and member
+leaves without per-member columns no longer hold an `Incidence` object per member. The table compares HStore
+before and after those two changes, alone, at scale 1 with `async` durability and `CACHE_MB=64`: three runs of
+each build, alternated, median shown. The machine was busy with other work during these runs, so the
+throughput column moves around by a lot from run to run. Allocation, bytes read and disk are steady and are the
+numbers to trust.
+
+| Workload | Before | After | Allocated per op | Read from storage per op |
+|---|---:|---:|---:|---:|
+| `read.members` | 615,661 ops/s | 726,507 ops/s | 979 B → 493 B | 73 B → 0 B |
+| `read.twohop` | 63,817 ops/s | 90,044 ops/s | 8,760 B → 5,947 B | 337 B → 0 B |
+| `large.scan` | 799 M ops/s | 687 M ops/s | 0 B → 0 B | 0 B → 0 B |
+| `large.probe` | 2.00 M ops/s | 1.72 M ops/s | 168 B → 232 B | 0 B → 2 B |
+| `ingest.edges` | 16,115 ops/s | 15,941 ops/s | 58.1 KB → 34.9 KB | |
+| `churn.remove` | 8,589 ops/s | 12,425 ops/s | 61.0 KB → 47.4 KB | |
+
+| Size | Before | After |
+|---|---:|---:|
+| `disk` after load | 197.2 MiB | 145.4 MiB |
+| `disk.churned` | 430.3 MiB | 296.5 MiB |
+| `disk.compacted` | 201.6 MiB | 66.1 MiB |
+| bytes written by `ingest.edges` | 152.5 MiB | 127.8 MiB |
+| heap retained after ingest | 53.7 MiB | 39.1 MiB |
+
+Member reads no longer touch a page of their own, which removes the reads that missed the 64 MiB cache. The one
+cost is in `large.probe`, which looks up a single member of the 50,000 member edge: its `Incidence` is now built
+when it is read instead of being kept in the cached leaf, about 64 bytes per lookup.
 
 ## Reproducing
 

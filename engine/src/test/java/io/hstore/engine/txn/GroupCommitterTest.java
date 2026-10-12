@@ -57,7 +57,7 @@ class GroupCommitterTest {
 
     @Test
     void aLoneCommitIsPublishedOnItsOwnThread() {
-        GroupCommitter committer = new GroupCommitter(_ -> {
+        GroupCommitter committer = new GroupCommitter((_, _) -> {
         });
         Appender appender = new Appender(committer);
         List<Thread> publishers = new ArrayList<>();
@@ -70,7 +70,7 @@ class GroupCommitterTest {
     @Test
     void concurrentCommitsArePublishedInOrderAndShareBarriers() throws Exception {
         AtomicInteger barriers = new AtomicInteger();
-        GroupCommitter committer = new GroupCommitter(_ -> {
+        GroupCommitter committer = new GroupCommitter((_, _) -> {
             barriers.incrementAndGet();
             try {
                 Thread.sleep(1);
@@ -99,7 +99,7 @@ class GroupCommitterTest {
     @Test
     void aFailedBarrierFailsEveryCommitAfterIt() {
         AtomicInteger calls = new AtomicInteger();
-        GroupCommitter committer = new GroupCommitter(_ -> {
+        GroupCommitter committer = new GroupCommitter((_, _) -> {
             if (calls.incrementAndGet() == 2) {
                 throw new IllegalStateException("disk full");
             }
@@ -127,7 +127,7 @@ class GroupCommitterTest {
                     throw new UncheckedIOException(e);
                 }
             };
-            GroupCommitter committer = new GroupCommitter(_ -> write.run());
+            GroupCommitter committer = new GroupCommitter((_, _) -> write.run());
             Appender appender = new Appender(committer);
             appender.append(() -> Thread.currentThread().interrupt());
             GroupCommitter.Pending second = appender.append(write);

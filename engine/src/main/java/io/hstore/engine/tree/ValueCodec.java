@@ -5,6 +5,7 @@ package io.hstore.engine.tree;
 
 import io.hstore.engine.page.ByteCursor;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
@@ -18,6 +19,26 @@ public interface ValueCodec<V> {
 
     void decode(ByteCursor in, long[] keys, Object[] into);
 
+    default long[] decodeImplied(ByteCursor in, long[] keys) {
+        return null;
+    }
+
+    default long[] impliedWords(long[] keys, List<V> values) {
+        return null;
+    }
+
+    default void encodeImplied(ByteCursor out, long[] keys, long[] words) {
+        encode(out, keys, Arrays.stream(words).mapToObj(this::implied).toList());
+    }
+
+    default V implied(long word) {
+        throw new UnsupportedOperationException(getClass().getSimpleName() + " has no values implied by a single word");
+    }
+
+    default int impliedSize(long word) {
+        return maxSize(implied(word));
+    }
+
     default int leafOverhead(int entries) {
         return 0;
     }
@@ -30,12 +51,20 @@ public interface ValueCodec<V> {
         return value;
     }
 
-    default boolean refersToPages(V value) {
-        boolean[] found = new boolean[1];
-        mapRefs(value, (ref, _) -> {
-            found[0] |= ref instanceof Ref.Stored;
+    default boolean inlinesSmallTrees() {
+        return false;
+    }
+
+    default void forEachRef(V value, RefVisitor visitor) {
+        mapRefs(value, (ref, schema) -> {
+            visitor.visit(ref, schema);
             return ref;
         });
+    }
+
+    default boolean refersToPages(V value) {
+        boolean[] found = new boolean[1];
+        forEachRef(value, (ref, _) -> found[0] |= ref instanceof Ref.Stored);
         return found[0];
     }
 
@@ -63,5 +92,10 @@ public interface ValueCodec<V> {
     @FunctionalInterface
     interface RefMapper {
         Ref map(Ref ref, TreeSchema<?> schema);
+    }
+
+    @FunctionalInterface
+    interface RefVisitor {
+        void visit(Ref ref, TreeSchema<?> schema);
     }
 }

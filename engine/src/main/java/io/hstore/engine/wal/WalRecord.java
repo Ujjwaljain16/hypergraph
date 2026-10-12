@@ -39,6 +39,9 @@ public sealed interface WalRecord {
     record Checkpoint(long txnId, long generation, long lsn) implements WalRecord {
     }
 
+    record Changes(long txnId, int branch, byte[] payload) implements WalRecord {
+    }
+
     static int typeOf(WalRecord record) {
         return switch (record) {
             case Begin _ -> 1;
@@ -50,6 +53,7 @@ public sealed interface WalRecord {
             case Abort _ -> 7;
             case Checkpoint _ -> 8;
             case PageRef _ -> 9;
+            case Changes _ -> 10;
         };
     }
 
@@ -70,6 +74,7 @@ public sealed interface WalRecord {
             }
             case Checkpoint(long _, long generation, long lsn) -> out.putVarLong(generation).putVarLong(lsn);
             case PageRef(long _, long pageId, long address, int length, int checksum) -> out.putLong(pageId).putLong(address).putVarInt(length).putInt(checksum);
+            case Changes(long _, int branch, byte[] payload) -> out.putVarInt(branch).putBlob(payload);
         }
     }
 
@@ -85,6 +90,7 @@ public sealed interface WalRecord {
             case 7 -> new Abort(txnId);
             case 8 -> new Checkpoint(txnId, in.getVarLong(), in.getVarLong());
             case 9 -> new PageRef(txnId, in.getLong(), in.getLong(), in.getVarInt(), in.getInt());
+            case 10 -> new Changes(txnId, in.getVarInt(), in.getBlob());
             default -> throw new IllegalStateException("unknown WAL record type " + type);
         };
     }

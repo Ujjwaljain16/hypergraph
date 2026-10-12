@@ -24,7 +24,7 @@ import java.util.stream.Stream;
 
 public final class PageStore implements AutoCloseable {
 
-    public record Scan(long[] dead, long orphans, long unplaced) {
+    public record Scan(long[] dead, long[] unreferenced, long unplaced) {
     }
 
     private static final long PASS_BYTES = 4L << 20;
@@ -356,10 +356,11 @@ public final class PageStore implements AutoCloseable {
         released[releasedCount++] = index;
     }
 
-    public Scan scan(boolean clearOrphans) {
+    public Scan scan() {
         long[] dead = new long[64];
         int deadCount = 0;
-        long orphans = 0;
+        long[] unreferenced = new long[64];
+        int unreferencedCount = 0;
         long unplaced = 0;
         allocation.lock();
         try {
@@ -370,11 +371,14 @@ public final class PageStore implements AutoCloseable {
                 long entry = references.entry(index);
                 if (address == PageAddress.NONE) {
                     unplaced += entry > 0 ? 1 : 0;
-                } else if (entry == 0 && clearOrphans) {
-                    addresses.put(index, PageAddress.NONE);
-                    orphans++;
                 } else {
                     adjustLive(address, 1);
+                    if (entry == 0) {
+                        if (unreferencedCount == unreferenced.length) {
+                            unreferenced = Arrays.copyOf(unreferenced, unreferenced.length * 2);
+                        }
+                        unreferenced[unreferencedCount++] = PageId.pack(index, 0);
+                    }
                 }
                 if (ReferenceCounts.dead(entry)) {
                     if (deadCount + 2 > dead.length) {
@@ -387,7 +391,7 @@ public final class PageStore implements AutoCloseable {
         } finally {
             allocation.unlock();
         }
-        return new Scan(Arrays.copyOf(dead, deadCount), orphans, unplaced);
+        return new Scan(Arrays.copyOf(dead, deadCount), Arrays.copyOf(unreferenced, unreferencedCount), unplaced);
     }
 
     private long locate(long pageId) {
@@ -443,6 +447,26 @@ public final class PageStore implements AutoCloseable {
 
     public List<SegmentInfo> segments() {
         return List.copyOf(segments.values());
+    }
+
+    public long segmentBytes() {
+        return (long) segmentUnits * PageId.UNIT_BYTES;
+    }
+
+    public void sealActive(int segment) {
+        allocation.lock();
+        try {
+            if (activeSegment == segment && segment != 0) {
+                segments.computeIfPresent(activeSegment, (_, info) -> info.withState(SegmentState.SEALED, 0));
+                SegmentFile file = files.get(activeSegment);
+                if (file != null) {
+                    file.seal();
+                }
+                activeSegment = 0;
+            }
+        } finally {
+            allocation.unlock();
+        }
     }
 
     public int activeSegment() {

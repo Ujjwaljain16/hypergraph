@@ -183,12 +183,13 @@ checks page checksums, key ordering, node balance, monoid summaries and nested t
 
 ```
 $ hstore check /srv/hstore
-generation 158, recovered 0 commits from the log
+generation 157, recovered 0 commits from the log
 branch main
-  property-index          162 entries        9 pages      8 nested trees  height 1
+  catalog                 458 entries        1 pages     85 nested trees  height 1
   …
-  catalog                 458 entries       88 pages     85 nested trees  height 2
-verified 110 pages: checksums, ordering, balance and summaries are consistent
+  property-index          162 entries        9 pages      8 nested trees  height 1
+verified 20 pages: checksums, ordering, balance and summaries are consistent
+reference counts match the trees: 20 pages in use, 423 waiting for older readers
 ```
 
 A violated invariant aborts the check with the offending page and a reason such as

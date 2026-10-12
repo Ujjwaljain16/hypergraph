@@ -9,7 +9,8 @@ Source of truth:
 | Transaction handle, op log, footprints, read sets | `engine/src/main/java/io/hstore/engine/txn/Transaction.java` |
 | Mutable per-transaction tree overlay | `engine/src/main/java/io/hstore/engine/txn/Workspace.java` |
 | Logged operations | `engine/src/main/java/io/hstore/engine/txn/Op.java`, `EdgeAction.java` |
-| Commit lock, append, publication, pinning | `engine/src/main/java/io/hstore/engine/txn/TransactionManager.java` |
+| Commit lock, append, publication, pinning, write buffer | `engine/src/main/java/io/hstore/engine/txn/TransactionManager.java` |
+| Key changes a commit logs | `engine/src/main/java/io/hstore/engine/txn/ChangeLog.java` |
 | Durability batching | `engine/src/main/java/io/hstore/engine/txn/GroupCommitter.java` |
 | Options and results | `TxnOptions.java`, `Isolation.java`, `CommitResult.java` |
 | Read-only views | `Snapshot.java`, `View.java` |
@@ -78,7 +79,7 @@ During replay (`Workspace.replaying() == true`) a failed precondition, a duplica
 
 ### Spilling large workspaces
 
-`Transaction` constructs its `WriteScope` with a `PageSink` that calls `TransactionManager.spill`. Only `BulkBuilder` spills (every `SPILL_BATCH = 32` leaves during `Hyperedge.build`, used by `Transaction.load`), so very large bulk loads do not have to hold every new leaf in memory. `spill` materializes the subtree, **writes the page images to their data segments first**, then appends the matching `Page`/`PageRef` WAL records under the transaction id (before the transaction commits), and returns a `Ref.Stored`. Writing data before logging means that by the time a checkpoint can observe an LSN past the spill records, the pages are already in the page cache, so the checkpoint's `pages.sync()` makes them durable before the records are truncated. Until the records are appended, the pages still count as unwritten for their segment, so compaction can't move them before the log says where they were written. The spilled pages count against the transaction's page budget (`spilledPages`).
+`Transaction` constructs its `WriteScope` with a `PageSink` that calls `TransactionManager.spill`. Only `BulkBuilder` spills (every `SPILL_BATCH = 32` leaves during `Hyperedge.build`, used by `Transaction.load`), so very large bulk loads do not have to hold every new leaf in memory. `spill` materializes the subtree, **writes the page images to their data segments first**, then appends the matching `Page`/`PageRef` WAL records under the transaction id (before the transaction commits), and returns a `Ref.Stored`. Writing data before logging means that by the time a checkpoint can observe an LSN past the spill records, the pages are already in the page cache, so the checkpoint's `pages.checkpoint()` makes them durable before the records are truncated. Until the records are appended, the pages still count as unwritten for their segment, so compaction can't move them before the log says where they were written. The spilled pages count against the transaction's page budget (`spilledPages`).
 
 If a transaction that spilled is aborted (explicitly, or by `close()` without commit), `abort()` appends `WalRecord.Abort(txnId)`; recovery then drops its buffered records instead of reporting them as an unfinished transaction. A transaction that spilled and then crashed before `Commit` or `Abort` still appears in `Outcome.discardedTransactions`. In both cases the spilled pages are unreachable garbage reclaimed by compaction (see [maintenance](../storage/maintenance.md)). A commit that throws marks the transaction `ABORTED` directly and does not log `Abort`.
 
@@ -103,7 +104,7 @@ flowchart LR
 * `oldestPinned()` exposes the oldest pinned generation to maintenance so that compaction never deletes a segment a pinned snapshot may still read. `oldestReadable()`, the smaller of that and the oldest retained generation, tells a checkpoint which dead pages it may release ([maintenance](../storage/maintenance.md#releasing-pages)).
 * `generationAsOf(wallTime)` returns the newest retained generation with `wallTime <= t` (used by `AS OF` time travel).
 
-A `Snapshot` is a `View` whose trees are rooted at the pinned branch's root vector; `Snapshot.close()` unpins once (`AtomicBoolean` guard). Retention defaults: `EngineOptions.historyLimit = 64`.
+A `Snapshot` is a `View` whose trees are rooted at the pinned branch's root vector; `Snapshot.close()` unpins once (`AtomicBoolean` guard). Retention defaults: `EngineOptions.historyLimit = 64`. History is kept in memory only; after a restart it starts again from the generations recovery rebuilt ([catalog and generations](../storage/catalog-and-generations.md#history-retention-and-time-travel)).
 
 ## 5. Commit
 
@@ -112,6 +113,7 @@ A `Snapshot` is a `View` whose trees are rooted at the pinned branch's root vect
 ```text
 commit(txn):
   if txn.ops is empty                  -> READ_ONLY (no lock, no I/O)
+  awaitRoom()                                                    -- wait while the write buffer is full
   lock(commitLock)
     latest  = head
     branch  = latest.branch(txn.branch)
@@ -123,7 +125,7 @@ commit(txn):
     else:    txn.validateReads(branch.roots); workspace = txn.replay(branch.roots)
     if requestId: workspace.write(REQUESTS, hash(id), RequestRecord(id, txn.id, latest.id + 1))
     merged = fast ? workspace.rebasedOnto(branch.roots) : workspace.roots()
-    appended = append(latest, branch.withRoots(merged), ...)      -- WAL + data writes, head = next
+    appended = append(latest, branch.withRoots(merged), ...)      -- WAL records, head = next
   unlock(commitLock)
   committer.await(appended.pending)                              -- durability + publication
   -> COMMITTED (fast) or REBASED (slow)
@@ -134,6 +136,8 @@ commit(txn):
 `Workspace.untouchedSince(latest, includingReads)` is true when every slot the transaction **changed** still has the same root in `latest` as in its base (`Ref.same`). A slot counts as changed when its tree root differs from the base root. Slots that were only read are ignored for `SNAPSHOT` transactions. For `SERIALIZABLE` transactions they are included, because the fast path skips `validateReads`. When the check passes, the commit takes the latest root vector and overlays only the changed slots (`rebasedOnto`). A concurrent commit to a slot this transaction merely read is therefore kept, and commits that write disjoint slots never replay, however many other commits landed in between.
 
 `requestsStable` handles idempotency keys: if the transaction carries a request id, the `REQUESTS` slot is written inside the commit lock, so the fast path additionally requires that `REQUESTS` itself has not moved since the base.
+
+A checkpoint can finish while a transaction is open. It swaps the in-memory nodes of the head generation for the pages it wrote them to, so the latest roots may be stored references where the transaction's base still holds the pending nodes. `Ref.same` treats a pending node as the same tree as the stored or inline reference it was written as once that checkpoint's epoch is published, and treats two small leaves that would be stored inline as the same when their entries are equal. A finished checkpoint therefore doesn't push a transaction off the fast path or make it see a conflict.
 
 ### 5.2 Slow path: validation and replay
 
@@ -147,7 +151,7 @@ If any touched slot moved, the commit re-executes the op log against the latest 
 | Latest state of the edge | Result |
 |---|---|
 | Deleted, and it existed at the base | Conflict: `hyperedge e was deleted concurrently` |
-| Member root `Ref.same` as base | OK, nothing happened to the edge |
+| Member root `Ref.same` as base | OK, nothing happened to the edge. For a small edge whose members are inline this compares the members themselves, so an edge that was changed and then changed back counts as untouched |
 | Changed, and footprint not commutative or edge is not a `SET` edge | Conflict: `hyperedge e root changed since the transaction began` |
 | Changed, `SET` edge, commutative footprint | Diff base vs latest member trees with `TreeDiff.diff`; conflict only if any changed member key is one this transaction touched |
 
@@ -159,11 +163,13 @@ A footprint is *commutative* iff the edge was a `SET` edge at the base and every
 
 Compaction moves pages without changing any root, so it doesn't affect commits. That holds for bulk loads too. The pages a load spills before commit already have page numbers and directory entries, and compaction finds pages by reading through the victim segment and checking each one against the directory, so a spilled page is moved like any other and the transaction commits normally ([maintenance](../storage/maintenance.md#interaction-with-running-transactions)).
 
-The transaction keeps the numbers of the pages it spilled. If it aborts, its commit fails with a conflict or a page budget error, or its request id turns out to have committed already, it hands them to the reference counter, which marks them dead so the next checkpoint releases them. If it commits, any spilled page the committed trees don't reach is marked dead once the commit is counted.
+The transaction keeps the numbers of the pages it spilled. If it aborts, its commit fails with a conflict or a page budget error, or its request id turns out to have committed already, it hands them to the reference counter, which marks them dead so the next checkpoint releases them. If it commits, its spilled pages are provisional until the checkpoint that covers its generation counts them; any the committed trees don't reach are marked dead then.
 
 ### 5.4 Page budget
 
-`append` counts the pending tree nodes, nested trees included, with `Materializer.pendingNodes` and rejects the commit with `HStoreException.limit` (`ABORTED_RESOURCE_LIMIT`, not retryable) if that count exceeds `txn.options().maxPages() - txn.spilledPages()`. The check runs before anything is materialized, so a rejected commit allocates no segment space, admits nothing to the node cache and does no WAL or data I/O.
+`append` counts the nodes the transaction created that will have to be written: pending nodes owned by its `WriteScope` and reachable from the new roots, nested trees included but not the small ones that will be kept inline in their edge record (`Materializer.unwritten`). It rejects the commit with `HStoreException.limit` (`ABORTED_RESOURCE_LIMIT`, not retryable) if that count exceeds `txn.options().maxPages() - txn.spilledPages()`. Nodes the transaction reached but did not create, such as unwritten nodes of earlier commits, are not counted. The check runs before anything is encoded, so a rejected commit allocates no segment space and does no WAL or data I/O.
+
+The same walk adds up the heap those nodes take, which the commit adds to the write buffer once it is appended ([maintenance](../storage/maintenance.md#the-write-buffer)).
 
 ### 5.5 Outcomes
 
@@ -185,7 +191,7 @@ The transaction keeps the numbers of the pages it spilled. If it aborts, its com
 **SERIALIZABLE.** `View` calls `observeAtom` / `observeKey` on every read; under `SERIALIZABLE` the transaction records the value as of the **base** snapshot for each atom (`atomReads`) and each `(slot, key)` (`keyReads`) on first observation. On the slow path, `validateReads(latest)` re-reads each recorded key in the latest roots and raises a conflict if:
 
 * a key read: `now.equals(seen)` is false;
-* an atom read: presence differs, or the record differs **unless** both are `EdgeRecord`s with the same member root (`Ref.same(was.members(), is.members())`). Membership changes made by replay are still validated through `verifyEdge`.
+* an atom read: presence differs, or the record differs **unless** both are `EdgeRecord`s with the same member root (`Ref.same(was.members(), is.members())`). Records compare inline member trees by content, so they count as equal when the members are. Membership changes made by replay are still validated through `verifyEdge`.
 
 The fast path never needs read validation: it is only taken when every touched slot, including every read slot, is byte-for-byte the same root as at the base. Validation is therefore at key granularity when slots moved and free when they did not.
 
@@ -224,13 +230,14 @@ Under `SNAPSHOT` both commits succeed (R replays `Insert(p)` into B, which L nev
 | Inside the commit lock | Outside the commit lock |
 |---|---|
 | Read `head`, duplicate-request check | Executing the transaction's operations (concurrent, lock-free) |
+| Page budget check | Waiting for room in the write buffer |
 | Fast/slow decision, read validation, replay | Spilling bulk-loaded subtrees |
-| Materialization of new nodes into page images (`Materializer`) | `fsync` of data segments and WAL (`GroupCommitter` leader) |
-| WAL append of `Begin`, `Page`/`PageRef`, `Root`, `BranchMeta`, `Feed` records | Publication: feed append, `current.set`, `history.put` |
-| Data page writes into the OS page cache | Waking the committing thread |
-| WAL append of `Commit`, `head.set(next)`, `committer.submit(pending)` | |
+| Encoding the key changes (`ChangeLog.encode`), and writing pages for a tree past 4,096 changes | `fsync` of data segments and WAL (`GroupCommitter` leader) |
+| WAL append of `Begin`, `Page`/`PageRef`, `Changes`, `BranchMeta`, `Feed` records | Publication: `history.put`, `current.set`, feed append |
+| Data page writes into the OS page cache, for those pages only | Waking the committing thread |
+| WAL append of `Commit`, `head.set(next)`, `committer.submit(pending)` | Checkpoints writing pages, counting references and publishing the catalog |
 
-The same lock guards `system(...)` (internal writes such as the dictionary), `createBranch`, `closeBranch` and `rewrite` (compaction). `exclusive(action)` takes the lock **and** drains the committer, which is how `Checkpointer.checkpoint()` obtains a quiescent point where `current == head` and every appended commit is durable and published.
+The same lock guards `system(...)` (internal writes such as the dictionary), `createBranch` and `closeBranch`. `exclusive(action)` takes the lock **and** drains the committer, so `current == head` and every appended commit is durable and published while the action runs. A checkpoint uses it for one short step, swapping the pages it wrote into the head generation; it writes pages, syncs, counts and publishes the catalog image without the lock ([WAL and recovery](wal-and-recovery.md#9-checkpoints)). `verifyReferences` and `verifyChangeLog` use it as well.
 
 Because the lock is released before waiting for durability, the next committer can append while the previous batch is being synced. This pipelining is what lets group commit amortise `fsync`.
 
@@ -239,20 +246,20 @@ Because the lock is released before waiting for durability, the next committer c
 `GroupCommitter` has no thread of its own. It keeps a FIFO `Deque<Pending>`, and the committers waiting on it take turns leading.
 
 ```text
-Pending(generation, publication: Runnable, published: boolean)
-Barrier.makeDurable(batchSize)    -- TransactionManager.makeDurable
+Pending(generation, publication: Runnable, wrotePages: boolean, published: boolean)
+Barrier.makeDurable(batchSize, wrotePages)    -- TransactionManager.makeDurable
 ```
 
 Protocol:
 
 1. `submit(pending)` (called inside the commit lock, so queue order equals WAL commit order) appends to the queue.
-2. `await(pending)` loops until its own `published` flag is set. If another committer is leading, it waits (uninterruptibly) on `progressed`. Otherwise it becomes the **leader**: it copies **the whole queue** as the batch, releases the lock, and calls `barrier.makeDurable(batch.size())` once.
-3. The leader then runs each batch member's `publication` in order: `current.set(next)`, `history.put`, then `feed.append(event)` for non-empty events, `trimHistory()`, and `CrashPoint.CATALOG_PUBLISH`. Making the generation current **before** appending to the feed means a subscriber can always read the commit it is told about (see [change feed](../storage/change-feed.md#2-when-events-are-written)).
+2. `await(pending)` loops until its own `published` flag is set. If another committer is leading, it waits (uninterruptibly) on `progressed`. Otherwise it becomes the **leader**: it copies **the whole queue** as the batch, releases the lock, and calls `barrier.makeDurable(batch.size(), wrotePages)` once, where `wrotePages` is true if any commit in the batch wrote pages.
+3. The leader then runs each batch member's `publication` in order: `history.put`, `current.set(next)`, the commit's written pages to the reference counter as provisional, then `feed.append(event)` for non-empty events, `trimHistory()`, and `CrashPoint.CATALOG_PUBLISH`. Making the generation current **before** appending to the feed means a subscriber can always read the commit it is told about (see [change feed](../storage/change-feed.md#2-when-events-are-written)).
 4. It retakes the lock, marks the batch `published`, pops it from the queue, updates `batches`/`flushedCommits`, stops leading, and `signalAll`s `progressed`. A waiter whose commit wasn't in that batch becomes the next leader.
 
 A lone committer therefore finishes on its own thread, with no hand-off to another thread. Committers that arrive while a leader is syncing queue up and are published together by the next leader, sharing one `fsync`. Only one leader runs at a time, so publication stays in generation order. The durability step runs on the committing thread, which in the server is usually a virtual thread; the JDK compensates for virtual threads blocked in file I/O by adding a carrier thread temporarily.
 
-`makeDurable` for `Durability.SYNC`: if `walMode == PAGE_REFERENCES`, `pages.sync()` (force every dirty data segment); reach `DATA_SYNC`; `wal.sync()`; reach `WAL_SYNC`. For `Durability.ASYNC` it returns immediately: the leader still publishes in order, but nothing is forced. A single `wal.sync()` covers every commit record appended so far, including records appended after the batch was copied; those commits are simply published in the next batch.
+`makeDurable` for `Durability.SYNC`: if `walMode == PAGE_REFERENCES` and a commit in the batch wrote pages (it spilled, or logged a tree by reference), `pages.sync()` (force every dirty data segment); reach `DATA_SYNC`; `wal.sync()`; reach `WAL_SYNC`. For `Durability.ASYNC` it returns immediately: the leader still publishes in order, but nothing is forced. Most commits write no pages, so most batches force only the WAL. A single `wal.sync()` covers every commit record appended so far, including records appended after the batch was copied; those commits are simply published in the next batch.
 
 Failure handling: any `Throwable` from the barrier or a publication is stored in `failure`, logged at `ERROR`, and `progressed` is signalled. The leader rethrows it, and every waiting and later committer gets it too. Two checks consult it:
 
@@ -278,18 +285,18 @@ sequenceDiagram
     participant F as ChangeFeed
     C->>TM: commit(txn)
     activate TM
-    TM->>TM: fast? rebase? materialize
-    TM->>W: append [Begin, PageRef*, Root*, Feed]
-    TM->>D: write page images
+    TM->>TM: fast? rebase? encode key changes
+    TM->>W: append [Begin, Changes, Feed]
     TM->>W: append Commit(txn, g)
     TM->>TM: head = g
     TM->>G: submit(Pending g)
     deactivate TM
     C->>G: await(g)
-    G->>D: sync() (PAGE_REFERENCES only)
+    G->>D: sync() (PAGE_REFERENCES, only if the batch wrote pages)
     G->>W: sync()
+    G->>TM: publication: history.put(g), current = g
     G->>F: append(CommitEvent g)
-    G->>TM: publication: current = g, history.put(g), trimHistory
+    G->>TM: trimHistory
     G-->>C: published
 ```
 
@@ -351,5 +358,7 @@ Had T2 also touched `m1`, or had `E` been an `ORDERED` edge, the overlap check w
 
 * `createBranch` appends a `BranchMeta` record and a branch whose roots are the parent's current roots (copy-on-write makes this O(number of slots)). Names must be unique among active branches; the new id is one past the largest existing id.
 * `closeBranch` (`MERGED` or `DROPPED`, never for `MAIN`) empties the root vector so the branch's pages become unreachable.
+
+Neither logs a `Changes` record. The `BranchMeta` record says what the roots become: on replay a new `ACTIVE` branch takes its parent's roots and a closed one gets empty roots ([WAL and recovery](wal-and-recovery.md#8-recovery)).
 
 These commits carry no member or slot changes, so their `CommitEvent` is empty and nothing is written to the change feed (see [change feed](../storage/change-feed.md)).

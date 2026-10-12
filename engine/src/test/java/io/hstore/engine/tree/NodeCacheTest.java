@@ -5,6 +5,13 @@ package io.hstore.engine.tree;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.random.RandomGenerator;
 import java.util.random.RandomGeneratorFactory;
 import java.util.stream.LongStream;
@@ -90,5 +97,63 @@ class NodeCacheTest {
         assertEquals(16, NodeCache.shardsFor(256L << 20, PAGE));
         assertEquals(1, NodeCache.shardsFor(1 << 20, PAGE));
         assertEquals(1, NodeCache.shardsFor(1, PAGE));
+    }
+
+    @Test
+    void everyPageCachedLongEnoughIsFoundAndNothingElseIs() {
+        NodeCache cache = new NodeCache(64L << 20, PAGE);
+        for (long page = 1; page <= 50_000; page++) {
+            cache.put(page, node(page), 100);
+            if (page % 3 == 0) {
+                cache.put(page, node(page), 100);
+            }
+        }
+        for (long page = 1; page <= 50_000; page++) {
+            assertEquals(page, ((Leaf) cache.get(page)).firstKey());
+        }
+        for (long page = 50_001; page <= 60_000; page++) {
+            assertNull(cache.get(page));
+        }
+        cache.clear();
+        assertNull(cache.get(1));
+        assertEquals(0, cache.residentBytes());
+    }
+
+    @Test
+    void readersSeeTheRightNodeWhileWritersEvictAndGrowTheTable() throws Exception {
+        NodeCache cache = new NodeCache(256 * 1024, PAGE);
+        AtomicBoolean done = new AtomicBoolean();
+        AtomicLong wrong = new AtomicLong();
+        AtomicLong found = new AtomicLong();
+        try (ExecutorService readers = Executors.newFixedThreadPool(4)) {
+            List<Future<?>> running = new ArrayList<>();
+            for (int t = 0; t < 4; t++) {
+                RandomGenerator random = RandomGeneratorFactory.of("L64X128MixRandom").create(t);
+                running.add(readers.submit(() -> {
+                    while (!done.get()) {
+                        long page = 1 + random.nextLong(20_000);
+                        Node node = cache.get(page);
+                        if (node != null) {
+                            found.incrementAndGet();
+                            if (((Leaf) node).firstKey() != page) {
+                                wrong.incrementAndGet();
+                            }
+                        }
+                    }
+                }));
+            }
+            RandomGenerator random = RandomGeneratorFactory.of("L64X128MixRandom").create(99);
+            for (int round = 0; round < 300_000; round++) {
+                long page = 1 + random.nextLong(20_000);
+                cache.put(page, node(page), 64 + random.nextInt(512));
+            }
+            done.set(true);
+            for (Future<?> reader : running) {
+                reader.get();
+            }
+        }
+        assertEquals(0, wrong.get());
+        assertTrue(found.get() > 0);
+        assertTrue(cache.residentBytes() <= 256 * 1024);
     }
 }

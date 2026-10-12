@@ -29,14 +29,13 @@ public final class TreeWalker {
         switch (node) {
             case Leaf leaf -> {
                 if (schema.codec().holdsRefs()) {
-                    ValueCodec.RefMapper mapper = (nested, nestedSchema) -> {
+                    ValueCodec.RefVisitor visitor = (nested, nestedSchema) -> {
                         if (nested instanceof Ref.Stored(long child, int _, Summary _)) {
                             into.accept(child, nestedSchema, UNKNOWN_HEIGHT);
                         }
-                        return nested;
                     };
                     for (int i = 0; i < leaf.size(); i++) {
-                        nested(schema, leaf.value(i), mapper);
+                        nested(schema, leaf.value(i), visitor);
                     }
                 }
             }
@@ -50,7 +49,27 @@ public final class TreeWalker {
         }
     }
 
-    private static <V> void nested(TreeSchema<V> schema, Object value, ValueCodec.RefMapper mapper) {
-        schema.codec().mapRefs(schema.cast(value), mapper);
+    public static void forEachStored(Ref ref, TreeSchema<?> schema, Reference into) {
+        switch (ref) {
+            case Ref.Stored(long pageId, int _, Summary _) -> into.accept(pageId, schema, UNKNOWN_HEIGHT);
+            case Ref.Pending(Leaf leaf) -> {
+                if (schema.codec().holdsRefs()) {
+                    for (int i = 0; i < leaf.size(); i++) {
+                        nested(schema, leaf.value(i), (nested, nestedSchema) -> forEachStored(nested, nestedSchema, into));
+                    }
+                }
+            }
+            case Ref.Pending(Branch branch) -> {
+                for (int i = 0; i < branch.size(); i++) {
+                    forEachStored(branch.child(i), schema, into);
+                }
+            }
+            default -> {
+            }
+        }
+    }
+
+    private static <V> void nested(TreeSchema<V> schema, Object value, ValueCodec.RefVisitor visitor) {
+        schema.codec().forEachRef(schema.cast(value), visitor);
     }
 }

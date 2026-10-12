@@ -126,6 +126,7 @@ final class ServerConfig {
                 .withWalMode(string(Setting.WAL_MODE).equalsIgnoreCase("images") ? WalMode.PAGE_IMAGES : WalMode.PAGE_REFERENCES)
                 .withNodeCacheBytes(megabytes(Setting.NODE_CACHE_MB))
                 .withCheckpointWalBytes(number(Setting.CHECKPOINT_WAL_MB) << 20)
+                .withWriteBufferBytes(megabytes(Setting.WRITE_BUFFER_MB))
                 .withHistoryLimit(integer(Setting.HISTORY_LIMIT))
                 .withCompactionLiveRatio(Double.parseDouble(string(Setting.COMPACTION_LIVE_RATIO)))
                 .withFeedRetention(number(Setting.FEED_RETENTION_GENERATIONS));

@@ -22,7 +22,7 @@ record EdgeRecord(int type, EdgeKind kind, Ref members, Ref order, long version,
 |---|---|
 | `type` | id of the `TypeDef` in the schema slot `TYPES` |
 | `canonicalKey` | optional, at most `NodeRecord.MAX_KEY_LENGTH` = 512 characters; unique per `(tenant, type)` |
-| `members` / `order` | roots of the membership tree and (for ordered edges) the order tree, see [topology](../storage/topology.md) |
+| `members` / `order` | roots of the membership tree and (for ordered edges) the order tree, see [topology](../storage/topology.md). A small tree (at most 32 members that fit in about 100 bytes) is kept inside the record itself, so reading a typical edge needs no page beyond the catalog leaf |
 | `version` | incremented on every `withRoots` (membership change) |
 | `embeddingRef` | payload reference of the node's current embedding vector (set by `Writer.embed`) |
 | `tenant` | owning tenant; enforced by every `Reader` (see [security](security.md)) |
@@ -306,6 +306,12 @@ yields `Incident(edge, roles, locator)`; `Reader.position(incident)` converts th
 position. Membership trees, their summaries (role bitmaps, weight min/max/sum, validity bounds) and the reverse
 index are described in [topology](../storage/topology.md).
 
+How a membership is stored is invisible through the API. A small edge's members live inline in its catalog record,
+and a larger one's in a tree of its own pages; an edge moves between the two as it grows and shrinks, and reads,
+history, the change feed and conflict checks behave the same either way. A member with no roles, weight, validity,
+payload or qualifier costs no `Incidence` object while it sits in the node cache. The record is built when it is
+read.
+
 `MemberSpec` (`MemberSpec.java`) carries the per-member options on writes:
 `MemberSpec.roles("host").withWeight(0.75).withValidity(new Validity(0, 1_000))`.
 
@@ -461,6 +467,8 @@ Optional.empty
 | `property(atom, name[, validAt])`, `properties`, `text(value)`, `document` | property access; `text` dereferences payloads |
 | `edge`, `members`, `members(edge, validAt)`, `membersWithRole`, `membersWeighted` | membership access with summary pruning |
 | `memberIds(edge)` | member ids only, as a `LongStream` in membership order, without building `Member` records |
+| `forEachMemberId(edge, action)` | the same ids handed to a `LongConsumer`, with nothing allocated per member |
 | `cardinality`, `degree`, `incident`, `position` | topology statistics and reverse lookup |
+| `forEachIncidentEdge(atom, action)` | the ids of the hyperedges containing an atom, handed to a `LongConsumer` without building `Incident` records |
 | `lookup`, `range` | property and JSON index access with exact re-check |
 | `similar(text, k, consistency)`, `similar(model, vector, k, consistency)`, `embedding` | [semantic](semantic.md) |

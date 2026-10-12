@@ -9,13 +9,22 @@ import java.lang.management.ManagementFactory;
 record JvmUsage(long collections, long pauseMillis, long allocated) {
 
     static JvmUsage now() {
+        return now(true);
+    }
+
+    static JvmUsage onThisThread() {
+        return now(false);
+    }
+
+    private static JvmUsage now(boolean allThreads) {
         long collections = 0;
         long pauseMillis = 0;
         for (GarbageCollectorMXBean collector : ManagementFactory.getGarbageCollectorMXBeans()) {
             collections += Math.max(0, collector.getCollectionCount());
             pauseMillis += Math.max(0, collector.getCollectionTime());
         }
-        long allocated = ((com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean()).getTotalThreadAllocatedBytes();
+        com.sun.management.ThreadMXBean threads = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+        long allocated = allThreads ? threads.getTotalThreadAllocatedBytes() : threads.getCurrentThreadAllocatedBytes();
         return new JvmUsage(collections, pauseMillis, allocated);
     }
 

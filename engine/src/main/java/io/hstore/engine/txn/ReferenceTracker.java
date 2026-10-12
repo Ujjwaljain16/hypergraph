@@ -3,13 +3,12 @@
 
 package io.hstore.engine.txn;
 
-import io.hstore.engine.catalog.Generation;
 
 public interface ReferenceTracker {
 
     ReferenceTracker NONE = new ReferenceTracker() {
         @Override
-        public void committed(Generation before, Generation after, long[] spilled) {
+        public void provisional(long generation, long[] pages) {
         }
 
         @Override
@@ -17,7 +16,7 @@ public interface ReferenceTracker {
         }
     };
 
-    void committed(Generation before, Generation after, long[] spilled);
+    void provisional(long generation, long[] pages);
 
     void discarded(long[] spilled);
 }

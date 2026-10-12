@@ -23,6 +23,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.function.BinaryOperator;
 import java.util.function.Consumer;
+import java.util.function.LongConsumer;
 import java.util.function.UnaryOperator;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
@@ -125,6 +126,13 @@ public record Hyperedge(long id, EdgeKind kind, Tree<Incidence> members, Tree<Lo
             case SET -> members.keys();
             case ORDERED -> members.values().mapToLong(Incidence::member);
         };
+    }
+
+    public void forEachMemberId(LongConsumer action) {
+        switch (kind) {
+            case SET -> members.forEachKey(action);
+            case ORDERED -> members.forEachValue(incidence -> action.accept(incidence.member()));
+        }
     }
 
     public Stream<Incidence> validAt(long instant) {

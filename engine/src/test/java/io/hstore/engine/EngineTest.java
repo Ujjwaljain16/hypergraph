@@ -11,6 +11,7 @@ import io.hstore.engine.page.ByteCursor;
 import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageId;
 import io.hstore.engine.page.SegmentInfo;
+import io.hstore.engine.page.SegmentState;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Hyperedge;
 import io.hstore.engine.topology.Incidence;
@@ -31,7 +32,10 @@ import io.hstore.engine.txn.TxnOptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -523,7 +527,7 @@ class EngineTest {
 
     @Test
     void compactionReclaimsChurnedSegments() {
-        EngineOptions options = small().withPagesPerSegment(64).withHistoryLimit(2);
+        EngineOptions options = small().withPagesPerSegment(64).withHistoryLimit(2).withMaintenanceInterval(Duration.ofHours(1));
         try (StorageEngine engine = StorageEngine.open(directory, options)) {
             long edge = engine.write(txn -> txn.createEdge(EDGE, EdgeKind.SET));
             LinkedHashSet<Long> oracle = new LinkedHashSet<>();
@@ -546,6 +550,7 @@ class EngineTest {
                         oracle.remove(10_000L + base - 100 + i);
                     }
                 }
+                engine.checkpoint();
             }
             int before = engine.stats().segments().size();
             engine.compact();
@@ -560,6 +565,10 @@ class EngineTest {
                 long bytes = live.getOrDefault(segment.id(), 0L);
                 assertEquals(0, bytes % PageId.UNIT_BYTES);
                 assertTrue(bytes <= segment.bytes(), "segment " + segment.id() + " live " + bytes + " of " + segment.bytes());
+                if (segment.state() == SegmentState.SEALED) {
+                    assertTrue(bytes >= segment.bytes() * options.compactionLiveRatio(),
+                            "sealed segment " + segment.id() + " is only " + bytes + " of " + segment.bytes() + " bytes live");
+                }
             }
             engine.read(snapshot -> {
                 assertEquals(List.copyOf(new TreeSet<>(oracle)), snapshot.requireEdge(edge).stream().map(Incidence::member).toList());
@@ -602,5 +611,13 @@ class EngineTest {
             assertEquals(Set.of("buyer", "approver"), new HashSet<>(engine.dictionary().roles(roleSet)));
             assertEquals(List.of(roleSet), engine.dictionary().roleSetsContaining("buyer"));
         }
+    }
+
+    @Test
+    void directoriesFromTheInlineMemberFormatAreRefused() throws IOException {
+        Files.writeString(directory.resolve("FORMAT"), "format=6\npage-size=1024\n");
+        HStoreException refused = assertThrows(HStoreException.class, () -> StorageEngine.open(directory, small()).close());
+        assertTrue(refused.getMessage().endsWith("uses storage format 6; this build reads format 7 (commits logged as key changes); export and reload it"),
+                refused.getMessage());
     }
 }

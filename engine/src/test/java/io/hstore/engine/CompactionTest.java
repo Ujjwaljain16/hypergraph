@@ -20,6 +20,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -45,7 +46,8 @@ class CompactionTest {
     Path directory;
 
     private static EngineOptions options() {
-        return EngineTest.small().withPagesPerSegment(64).withHistoryLimit(2).withCheckpointWalBytes(Long.MAX_VALUE);
+        return EngineTest.small().withPagesPerSegment(64).withHistoryLimit(2).withCheckpointWalBytes(Long.MAX_VALUE)
+                .withMaintenanceInterval(Duration.ofHours(1));
     }
 
     @Test
@@ -82,17 +84,21 @@ class CompactionTest {
                 written.forEach(member -> txn.insert(created, member));
                 return created;
             });
+            engine.checkpoint();
             Set<Integer> early = segmentIds(engine);
             edge = churn(engine);
             earlier = engine.stats().generation() - 10;
             Compactor.Report report = engine.compact();
             assertTrue(report.compacted().stream().anyMatch(early::contains), "no early segment was compacted: " + report.compacted());
             report.compacted().forEach(victim -> assertFalse(segmentIds(engine).contains(victim)));
+            try (Snapshot old = engine.snapshotAt(earlier, 0)) {
+                assertEquals(written, old.requireEdge(large).stream().map(Incidence::member).toList());
+                assertEquals(afterRound(ROUNDS - 11), old.requireEdge(edge).stream().map(Incidence::member).toList());
+            }
         }
-        try (StorageEngine engine = StorageEngine.open(directory, options);
-             Snapshot old = engine.snapshotAt(earlier, 0)) {
-            assertEquals(written, old.requireEdge(large).stream().map(Incidence::member).toList());
-            assertEquals(afterRound(ROUNDS - 11), old.requireEdge(edge).stream().map(Incidence::member).toList());
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
+            assertEquals(written, engine.read(snapshot -> snapshot.requireEdge(large).stream().map(Incidence::member).toList()));
+            assertEquals(afterRound(ROUNDS - 1), engine.read(snapshot -> snapshot.requireEdge(edge).stream().map(Incidence::member).toList()));
         }
     }
 
@@ -140,10 +146,13 @@ class CompactionTest {
                     }
                     return null;
                 });
-                for (int i = 0; i < 3; i++) {
-                    engine.compact();
+                try {
+                    for (int i = 0; i < 3; i++) {
+                        engine.compact();
+                    }
+                } finally {
+                    compacting.set(false);
                 }
-                compacting.set(false);
                 writes.get();
             }
             assertEquals(conflicts, engine.stats().conflicts());
@@ -269,6 +278,7 @@ class CompactionTest {
                 }
                 return null;
             });
+            engine.checkpoint();
         }
     }
 

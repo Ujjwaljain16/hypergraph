@@ -9,6 +9,7 @@ import io.hstore.engine.catalog.CatalogStore;
 import io.hstore.engine.catalog.SlotRegistry;
 import io.hstore.engine.feed.ChangeFeed;
 import io.hstore.engine.feed.FeedCodec;
+import io.hstore.engine.maintenance.ChangeLogCheck;
 import io.hstore.engine.maintenance.Checkpointer;
 import io.hstore.engine.maintenance.Compactor;
 import io.hstore.engine.maintenance.Recovery;
@@ -36,17 +37,17 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
 public final class StorageEngine implements AutoCloseable {
 
     private static final System.Logger LOG = System.getLogger("hstore.engine");
-    private static final String FORMAT_VERSION = "5";
+    private static final String FORMAT_VERSION = "7";
     private static final int CHANGED_COUNTS_LIMIT = 1 << 20;
 
     private static final int MAX_ATTEMPTS = 8;
-    private static final Duration MAINTENANCE_INTERVAL = Duration.ofMillis(500);
 
     private final Path directory;
     private final EngineOptions options;
@@ -82,16 +83,17 @@ public final class StorageEngine implements AutoCloseable {
         this.slots = new SlotRegistry(options.slots());
         FeedCodec codec = new FeedCodec(slots);
         this.feed = ChangeFeed.open(directory.resolve("feed"), codec, options.walSegmentBytes());
-        this.recovery = Recovery.recover(checkpoint, wal, pages, feed, codec);
         this.cache = new NodeCache(options.nodeCacheBytes(), options.pageSize());
         PagedNodeSource source = new PagedNodeSource(pages, cache);
-        this.references = ReferenceCounter.recover(pages, source, slots, checkpoint.current(), recovery.replayed(),
-                recovery.image().history(), recovery.image().current());
+        this.recovery = Recovery.recover(checkpoint, wal, pages, feed, codec, slots, source);
+        this.references = ReferenceCounter.recover(pages, source, slots, checkpoint.current(), checkpoint.history(),
+                recovery.image().current().id());
         TransactionManager.Storage storage = new TransactionManager.Storage(pages, source, wal, feed, codec, slots,
-                options.derivations(), options.durability(), options.walMode(), options.faults(), options.historyLimit(), references);
+                options.derivations(), options.durability(), options.walMode(), options.faults(), options.historyLimit(), references,
+                options.writeBufferBytes());
         this.transactions = new TransactionManager(storage, recovery.image().current(), recovery.image().history());
-        this.checkpointer = new Checkpointer(transactions, pages, wal, feed, catalog, references, options.faults(), options.historyLimit(),
-                checkpoint.checkpointLsn());
+        this.checkpointer = new Checkpointer(transactions, pages, source, wal, feed, catalog, references, slots, options.faults(),
+                checkpoint.current(), checkpoint.checkpointLsn());
         this.compactor = new Compactor(transactions, pages, checkpointer, options.faults());
         this.dictionary = new Dictionary(transactions);
         checkpointer.checkpoint();
@@ -100,6 +102,7 @@ public final class StorageEngine implements AutoCloseable {
         LOG.log(System.Logger.Level.INFO, "database at {0} is ready: generation {1}, {2} data segments, page size {3}, {4} durability, {5} wal",
                 directory, transactions.current().id(), pages.segments().size(), options.pageSize(), options.durability(), options.walMode());
         this.maintainer = Thread.ofVirtual().name("hstore-maintenance").start(this::maintain);
+        transactions.whenFull(() -> LockSupport.unpark(maintainer));
     }
 
     public static StorageEngine open(Path directory, EngineOptions options) {
@@ -132,7 +135,7 @@ public final class StorageEngine implements AutoCloseable {
             }
             if (!format.getProperty("format", "1").equals(FORMAT_VERSION)) {
                 throw HStoreException.invalid("database " + directory + " uses storage format " + format.getProperty("format", "1")
-                        + "; this build reads format " + FORMAT_VERSION + " (reference counts); export and reload it");
+                        + "; this build reads format " + FORMAT_VERSION + " (commits logged as key changes); export and reload it");
             }
             int stored = Integer.parseInt(format.getProperty("page-size"));
             if (stored != options.pageSize()) {
@@ -305,7 +308,18 @@ public final class StorageEngine implements AutoCloseable {
 
     public ReferenceCounter.Verification verifyReferences() {
         requireOpen();
-        return transactions.exclusive(() -> references.verify(transactions.current(), transactions.history()));
+        maintenance.lock();
+        try {
+            timedCheckpoint();
+            return transactions.exclusive(() -> references.verify(checkpointer.materialized(), transactions.history()));
+        } finally {
+            maintenance.unlock();
+        }
+    }
+
+    public ChangeLogCheck.Result verifyChangeLog() {
+        requireOpen();
+        return transactions.exclusive(() -> ChangeLogCheck.verify(wal, transactions.history(), slots, transactions.source()));
     }
 
     public EngineStats stats() {
@@ -318,12 +332,16 @@ public final class StorageEngine implements AutoCloseable {
     private void maintain() {
         while (!closed) {
             try {
-                Thread.sleep(MAINTENANCE_INTERVAL);
+                LockSupport.parkNanos(options.maintenanceInterval().toNanos());
+                if (Thread.interrupted()) {
+                    return;
+                }
                 if (closed || !maintenance.tryLock()) {
                     continue;
                 }
                 try {
-                    if (checkpointer.walSinceCheckpoint() > options.checkpointWalBytes()
+                    if (transactions.recountUnwritten() > options.writeBufferBytes() / 2
+                            || checkpointer.walSinceCheckpoint() > options.checkpointWalBytes()
                             || pages.bytesWritten() - writtenAtCheckpoint > options.checkpointWalBytes()
                             || references.pending() > CHANGED_COUNTS_LIMIT) {
                         timedCheckpoint();
@@ -342,8 +360,6 @@ public final class StorageEngine implements AutoCloseable {
                 } finally {
                     maintenance.unlock();
                 }
-            } catch (InterruptedException e) {
-                return;
             } catch (RuntimeException e) {
                 if (!closed) {
                     System.getLogger("hstore").log(System.Logger.Level.WARNING, "background maintenance failed", e);
@@ -387,7 +403,7 @@ public final class StorageEngine implements AutoCloseable {
             references.close();
             maintainer.interrupt();
             try {
-                maintainer.join(MAINTENANCE_INTERVAL.multipliedBy(4));
+                maintainer.join(Duration.ofSeconds(2));
             } catch (InterruptedException e) {
                 interrupted = true;
             }

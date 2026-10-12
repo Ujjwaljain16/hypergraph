@@ -8,6 +8,8 @@ import io.hstore.engine.page.ByteCursor;
 import java.util.AbstractList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
+import java.util.function.LongConsumer;
 
 public final class Leaf extends Node {
 
@@ -15,16 +17,22 @@ public final class Leaf extends Node {
 
     private long[] keys;
     private Object[] values;
+    private final long[] words;
     private int size;
     private int keyBytes;
     private int valueBytes;
 
-    private Leaf(TreeSchema<?> schema, Object owner, long[] keys, Object[] values, int size, Summary summary) {
+    private Leaf(TreeSchema<?> schema, Object owner, long[] keys, Object[] values, long[] words, int size, Summary summary) {
         super(schema, owner, summary);
         this.keys = keys;
         this.values = values;
+        this.words = words;
         this.size = size;
         remeasure();
+    }
+
+    private Leaf(TreeSchema<?> schema, Object owner, long[] keys, Object[] values, int size, Summary summary) {
+        this(schema, owner, keys, values, null, size, summary);
     }
 
     static Leaf owned(TreeSchema<?> schema, Object owner, long[] keys, Object[] values, int size) {
@@ -33,6 +41,10 @@ public final class Leaf extends Node {
 
     static Leaf decoded(TreeSchema<?> schema, long[] keys, Object[] values, Summary summary) {
         return new Leaf(schema, null, keys, values, keys.length, summary);
+    }
+
+    static Leaf implied(TreeSchema<?> schema, long[] keys, long[] words, Summary summary) {
+        return new Leaf(schema, null, keys, null, words, keys.length, summary);
     }
 
     static int keyStreamBytes(long[] keys, int size) {
@@ -54,17 +66,69 @@ public final class Leaf extends Node {
         keyBytes = keyStreamBytes(keys, size);
         valueBytes = 0;
         for (int i = 0; i < size; i++) {
-            valueBytes += schema.entryBytes(values[i]);
+            valueBytes += values != null ? schema.entryBytes(values[i]) : schema.impliedBytes(words[i]);
         }
     }
 
     @Override
     int heapBytes() {
-        return NODE_HEAP_BYTES + 2 * ARRAY_HEAP_BYTES + Long.BYTES * keys.length + Integer.BYTES * values.length
+        if (values == null) {
+            return NODE_HEAP_BYTES + 2 * ARRAY_HEAP_BYTES + Long.BYTES * keys.length + (words == keys ? 0 : Long.BYTES * words.length);
+        }
+        int bytes = NODE_HEAP_BYTES + 2 * ARRAY_HEAP_BYTES + Long.BYTES * keys.length + Integer.BYTES * values.length
                 + ENTRY_HEAP_BYTES * size + valueBytes;
+        return schema.codec().holdsRefs() ? bytes + inlineHeapBytes(schema) : bytes;
+    }
+
+    private <V> int inlineHeapBytes(TreeSchema<V> typed) {
+        int[] total = new int[1];
+        ValueCodec.RefVisitor visitor = (ref, _) -> {
+            if (ref instanceof Ref.Inline(Leaf inline)) {
+                total[0] += inline.heapBytes();
+            }
+        };
+        for (int i = 0; i < size; i++) {
+            typed.codec().forEachRef(typed.cast(value(i)), visitor);
+        }
+        return total[0];
+    }
+
+    boolean sameEntries(Leaf other) {
+        if (this == other) {
+            return true;
+        }
+        if (schema.id() != other.schema.id() || size != other.size || !Arrays.equals(keys, 0, size, other.keys, 0, size)) {
+            return false;
+        }
+        if (values == null && other.values == null) {
+            return Arrays.equals(words, 0, size, other.words, 0, size);
+        }
+        for (int i = 0; i < size; i++) {
+            if (!Objects.equals(value(i), other.value(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     int search(long key) {
+        if (size >= Trees.INTERPOLATE_FROM) {
+            long low = keys[0];
+            long high = keys[size - 1];
+            if (key > low && key < high) {
+                int guess = Math.clamp((long) (((double) key - low) / ((double) high - low) * (size - 1)), 0, size - 1);
+                long found = keys[guess];
+                if (found == key) {
+                    return guess;
+                }
+                if (found < key) {
+                    int end = Math.min(size, guess + Trees.INTERPOLATE_WINDOW + 1);
+                    return keys[end - 1] >= key ? Arrays.binarySearch(keys, guess + 1, end, key) : Arrays.binarySearch(keys, end, size, key);
+                }
+                int start = Math.max(0, guess - Trees.INTERPOLATE_WINDOW);
+                return keys[start] <= key ? Arrays.binarySearch(keys, start, guess, key) : Arrays.binarySearch(keys, 0, start, key);
+            }
+        }
         return Arrays.binarySearch(keys, 0, size, key);
     }
 
@@ -72,8 +136,19 @@ public final class Leaf extends Node {
         return keys[index];
     }
 
+    void forEachKey(LongConsumer action) {
+        for (int i = 0; i < size; i++) {
+            action.accept(keys[i]);
+        }
+    }
+
+    long[] impliedWords() {
+        return values == null ? words : null;
+    }
+
     Object value(int index) {
-        return values[index];
+        Object[] stored = values;
+        return stored != null ? stored[index] : schema.implied(words[index]);
     }
 
     int bytes() {
@@ -92,7 +167,7 @@ public final class Leaf extends Node {
         return new AbstractList<>() {
             @Override
             public Object get(int index) {
-                return values[index];
+                return value(index);
             }
 
             @Override
@@ -108,11 +183,26 @@ public final class Leaf extends Node {
 
     Leaf copyFor(WriteScope scope) {
         int capacity = size + Math.max(4, size >> 3);
-        return new Leaf(schema, scope.token(), Arrays.copyOf(keys, capacity), Arrays.copyOf(values, capacity), size, null);
+        return new Leaf(schema, scope.token(), Arrays.copyOf(keys, capacity), valueArray(capacity), size, null);
     }
 
     Leaf frozenWith(Object[] mappedValues) {
-        return new Leaf(schema, null, keyArray(), Arrays.copyOf(mappedValues, size), size, summary());
+        long[] frozenKeys = keyArray();
+        long[] implied = schema.impliedWords(frozenKeys, Arrays.asList(mappedValues).subList(0, size));
+        return implied != null
+                ? new Leaf(schema, null, frozenKeys, null, implied, size, summary())
+                : new Leaf(schema, null, frozenKeys, Arrays.copyOf(mappedValues, size), size, summary());
+    }
+
+    private Object[] valueArray(int capacity) {
+        if (values != null) {
+            return Arrays.copyOf(values, capacity);
+        }
+        Object[] copy = new Object[capacity];
+        for (int i = 0; i < size; i++) {
+            copy[i] = value(i);
+        }
+        return copy;
     }
 
     void insert(int position, long key, Object value) {
@@ -183,15 +273,15 @@ public final class Leaf extends Node {
 
     private int cost(int index) {
         int key = index == 0 ? ByteCursor.signedVarLongSize(keys[0]) : gap(keys[index - 1], keys[index]);
-        return key + schema.entryBytes(values[index]);
+        return key + schema.entryBytes(value(index));
     }
 
     static Leaf concat(TreeSchema<?> schema, Object owner, Leaf left, Leaf right) {
         int total = left.size + right.size;
         long[] keys = Arrays.copyOf(left.keys, total + 4);
-        Object[] values = Arrays.copyOf(left.values, total + 4);
+        Object[] values = left.valueArray(total + 4);
         System.arraycopy(right.keys, 0, keys, left.size, right.size);
-        System.arraycopy(right.values, 0, values, left.size, right.size);
+        System.arraycopy(right.valueArray(right.size), 0, values, left.size, right.size);
         return owned(schema, owner, keys, values, total);
     }
 
@@ -199,7 +289,7 @@ public final class Leaf extends Node {
     Summary computeSummary() {
         Summary.Builder builder = Summary.builder(schema.fingerprint());
         for (int i = 0; i < size; i++) {
-            schema.measureEntry(keys[i], values[i], builder);
+            schema.measureEntry(keys[i], value(i), builder);
         }
         return builder.build();
     }
