@@ -270,6 +270,10 @@ not what drives HStore's footprint:
   images are live, and the background pass runs after every `checkpoint_wal_mb` of writes
   ([maintenance.md](storage/maintenance.md)). Raising `compaction_live_ratio` trades write amplification for
   space.
+* **Crash recovery since storage format 7 (`recover`, not in the tables above).** Recovery now replays each
+  commit's changed keys onto the trees of the last checkpoint, which takes more CPU than pointing the roots at
+  pages that were already written. On a busy laptop at scale 1, the median went from 90 ms on format 6 to
+  171 ms, against 123 ms for HyperGraphDB. That hasn't been rerun on an idle machine yet.
 
 ### Inline member trees
 
