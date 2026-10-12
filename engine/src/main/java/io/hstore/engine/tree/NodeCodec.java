@@ -9,6 +9,7 @@ import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageType;
 
 import java.lang.foreign.MemorySegment;
+import java.util.Collections;
 import java.util.List;
 
 public final class NodeCodec {
@@ -72,8 +73,28 @@ public final class NodeCodec {
             return Leaf.implied(schema, keys, words, summary);
         }
         Object[] values = new Object[keys.length];
-        schema.codec().decode(in, keys, values);
+        if (schema.codec().independentValues()) {
+            decodeFramed(in, schema, keys, values);
+        } else {
+            schema.codec().decode(in, keys, values);
+        }
         return Leaf.decoded(schema, keys, values, summary);
+    }
+
+    private static void decodeFramed(ByteCursor in, TreeSchema<?> schema, long[] keys, Object[] into) {
+        long[] key = new long[1];
+        Object[] value = new Object[1];
+        for (int i = 0; i < keys.length; i++) {
+            long length = in.getVarLong();
+            long end = in.position() + length;
+            key[0] = keys[i];
+            schema.codec().decode(in, key, value);
+            if (in.position() != end) {
+                throw new IllegalStateException("value " + i + " of a " + schema + " leaf is " + length + " bytes long but decoded from "
+                        + (in.position() - end + length) + " bytes");
+            }
+            into[i] = value[0];
+        }
     }
 
     private static long[] decodeKeys(ByteCursor in, int count) {
@@ -93,7 +114,19 @@ public final class NodeCodec {
         }
         @SuppressWarnings("unchecked")
         List<V> values = (List<V>) leaf.valueList();
-        schema.codec().encode(out, keys, values);
+        if (!schema.codec().independentValues()) {
+            schema.codec().encode(out, keys, values);
+            return;
+        }
+        ByteCursor value = ByteCursor.growable(256);
+        long[] key = new long[1];
+        for (int i = 0; i < keys.length; i++) {
+            value.position(0);
+            key[0] = keys[i];
+            schema.codec().encode(value, key, Collections.singletonList(values.get(i)));
+            MemorySegment written = value.written();
+            out.putVarLong(written.byteSize()).putSegment(written);
+        }
     }
 
     private static boolean refersToPages(Leaf leaf) {

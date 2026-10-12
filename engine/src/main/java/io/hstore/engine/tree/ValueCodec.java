@@ -47,6 +47,10 @@ public interface ValueCodec<V> {
         return false;
     }
 
+    default boolean independentValues() {
+        return false;
+    }
+
     default V mapRefs(V value, RefMapper mapper) {
         return value;
     }
@@ -85,6 +89,11 @@ public interface ValueCodec<V> {
                 for (int i = 0; i < into.length; i++) {
                     into[i] = reader.apply(in);
                 }
+            }
+
+            @Override
+            public boolean independentValues() {
+                return true;
             }
         };
     }

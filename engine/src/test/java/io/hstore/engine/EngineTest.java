@@ -614,10 +614,10 @@ class EngineTest {
     }
 
     @Test
-    void directoriesFromTheInlineMemberFormatAreRefused() throws IOException {
-        Files.writeString(directory.resolve("FORMAT"), "format=6\npage-size=1024\n");
+    void directoriesFromBeforeFramedLeafRecordsAreRefused() throws IOException {
+        Files.writeString(directory.resolve("FORMAT"), "format=7\npage-size=1024\n");
         HStoreException refused = assertThrows(HStoreException.class, () -> StorageEngine.open(directory, small()).close());
-        assertTrue(refused.getMessage().endsWith("uses storage format 6; this build reads format 7 (commits logged as key changes); export and reload it"),
+        assertTrue(refused.getMessage().endsWith("uses storage format 7; this build reads format 8 (leaf records framed by length); export and reload it"),
                 refused.getMessage());
     }
 }
