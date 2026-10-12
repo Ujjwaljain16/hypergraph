@@ -21,6 +21,7 @@ public final class Leaf extends Node {
     private int size;
     private int keyBytes;
     private int valueBytes;
+    private volatile boolean measured;
 
     private Leaf(TreeSchema<?> schema, Object owner, long[] keys, Object[] values, long[] words, int size, Summary summary) {
         super(schema, owner, summary);
@@ -28,7 +29,9 @@ public final class Leaf extends Node {
         this.values = values;
         this.words = words;
         this.size = size;
-        remeasure();
+        if (owner != null) {
+            remeasure();
+        }
     }
 
     private Leaf(TreeSchema<?> schema, Object owner, long[] keys, Object[] values, int size, Summary summary) {
@@ -63,10 +66,18 @@ public final class Leaf extends Node {
     }
 
     private void remeasure() {
-        keyBytes = keyStreamBytes(keys, size);
-        valueBytes = 0;
+        int valueTotal = 0;
         for (int i = 0; i < size; i++) {
-            valueBytes += values != null ? schema.entryBytes(values[i]) : schema.impliedBytes(words[i]);
+            valueTotal += values != null ? schema.entryBytes(values[i]) : schema.impliedBytes(words[i]);
+        }
+        keyBytes = keyStreamBytes(keys, size);
+        valueBytes = valueTotal;
+        measured = true;
+    }
+
+    private void measure() {
+        if (!measured) {
+            remeasure();
         }
     }
 
@@ -75,6 +86,7 @@ public final class Leaf extends Node {
         if (values == null) {
             return NODE_HEAP_BYTES + 2 * ARRAY_HEAP_BYTES + Long.BYTES * keys.length + (words == keys ? 0 : Long.BYTES * words.length);
         }
+        measure();
         int bytes = NODE_HEAP_BYTES + 2 * ARRAY_HEAP_BYTES + Long.BYTES * keys.length + Integer.BYTES * values.length
                 + ENTRY_HEAP_BYTES * size + valueBytes;
         return schema.codec().holdsRefs() ? bytes + inlineHeapBytes(schema) : bytes;
@@ -152,6 +164,7 @@ public final class Leaf extends Node {
     }
 
     int bytes() {
+        measure();
         return keyBytes + valueBytes + schema.leafOverhead(size);
     }
 
@@ -206,6 +219,7 @@ public final class Leaf extends Node {
     }
 
     void insert(int position, long key, Object value) {
+        measure();
         if (size == keys.length) {
             int capacity = Math.max(8, size + (size >> 1));
             keys = Arrays.copyOf(keys, capacity);
@@ -235,12 +249,14 @@ public final class Leaf extends Node {
     }
 
     void replace(int position, Object value) {
+        measure();
         valueBytes += schema.entryBytes(value) - schema.entryBytes(values[position]);
         values[position] = value;
         invalidate();
     }
 
     void remove(int position) {
+        measure();
         long key = keys[position];
         valueBytes -= schema.entryBytes(values[position]);
         System.arraycopy(keys, position + 1, keys, position, size - position - 1);
