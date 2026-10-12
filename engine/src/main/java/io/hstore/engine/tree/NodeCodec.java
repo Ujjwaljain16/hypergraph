@@ -151,7 +151,7 @@ public final class NodeCodec {
         }
     }
 
-    private static boolean refersToPages(Leaf leaf) {
+    static boolean refersToPages(Leaf leaf) {
         return leaf.schema.codec().holdsRefs() && refersToPages(leaf.schema, leaf.valueList());
     }
 
@@ -193,7 +193,7 @@ public final class NodeCodec {
         return switch (header.type()) {
             case LEAF -> {
                 if (schema.codec().independentValues()) {
-                    yield Leaf.packed(schema, keys, owned(page), offsets(in, count, header, pageId), summary);
+                    yield Leaf.packed(schema, keys, owned(page), offsets(in, count, header, pageId), header.refersToPages(), summary);
                 }
                 Leaf leaf = decodeLeaf(in, schema, keys, summary);
                 if (header.refersToPages() != refersToPages(leaf)) {

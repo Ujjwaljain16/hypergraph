@@ -37,7 +37,8 @@ class PackedLeafTest {
 
     private final MemoryPages pages = new MemoryPages(PAGE);
     private final List<AtomRecord> expected = new ArrayList<>();
-    private long rootPage;
+    private final Ref root;
+    private final long rootPage;
 
     PackedLeafTest() {
         WriteScope scope = new WriteScope();
@@ -47,7 +48,8 @@ class PackedLeafTest {
             catalog = catalog.put(scope, atom, record);
         }
         Tree<AtomRecord> written = pages.persist(catalog);
-        rootPage = ((Ref.Stored) written.root()).pageId();
+        root = written.root();
+        rootPage = ((Ref.Stored) root).pageId();
         written.stream().forEach(entry -> expected.add(entry.value()));
     }
 
@@ -145,6 +147,18 @@ class PackedLeafTest {
         cache.clear();
         cleared.value(4);
         assertEquals(0, cache.residentBytes());
+    }
+
+    @Test
+    void checkingTheTreeFindsAPackedLeafWhoseHeaderClaimsPageReferencesItLacks() {
+        MemorySegment image = pages.image(rootPage);
+        PageHeader header = PageHeader.verify(image, rootPage);
+        assertTrue(!header.refersToPages());
+        new TreeVerifier(pages).verify(root, EngineSlots.ATOM_SCHEMA);
+        image.set(ValueLayout.JAVA_BYTE, 7, (byte) (image.get(ValueLayout.JAVA_BYTE, 7) | 1));
+        PageHeader.seal(image, header.payloadLength());
+        RuntimeException fault = assertThrows(RuntimeException.class, () -> new TreeVerifier(pages).verify(root, EngineSlots.ATOM_SCHEMA));
+        assertTrue(fault.getMessage().contains("disagree on whether it refers to other pages"), fault.getMessage());
     }
 
     @Test

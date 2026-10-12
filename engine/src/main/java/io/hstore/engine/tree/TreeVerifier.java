@@ -60,6 +60,9 @@ public final class TreeVerifier {
                         report = report.plus(nested(schema, leaf.value(i)));
                     }
                 }
+                if (!leaf.pageFlagMatches()) {
+                    throw fault(ref, "page header and contents disagree on whether it refers to other pages in " + schema);
+                }
                 report = report.plus(new Report(0, leaf.size(), 0, 0));
             }
             case Branch branch -> {

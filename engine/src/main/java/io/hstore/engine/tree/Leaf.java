@@ -35,6 +35,7 @@ public final class Leaf extends Node {
     private final long[] words;
     private final MemorySegment packed;
     private final int[] offsets;
+    private final boolean flaggedAsReferring;
     private int size;
     private int keyBytes;
     private int valueBytes;
@@ -49,19 +50,21 @@ public final class Leaf extends Node {
         this.words = words;
         this.packed = null;
         this.offsets = null;
+        this.flaggedAsReferring = false;
         this.size = size;
         if (owner != null) {
             remeasure();
         }
     }
 
-    private Leaf(TreeSchema<?> schema, long[] keys, MemorySegment packed, int[] offsets, Summary summary) {
+    private Leaf(TreeSchema<?> schema, long[] keys, MemorySegment packed, int[] offsets, boolean flaggedAsReferring, Summary summary) {
         super(schema, null, summary);
         this.keys = keys;
         this.values = new Object[keys.length];
         this.words = null;
         this.packed = packed;
         this.offsets = offsets;
+        this.flaggedAsReferring = flaggedAsReferring;
         this.size = keys.length;
     }
 
@@ -81,8 +84,12 @@ public final class Leaf extends Node {
         return new Leaf(schema, null, keys, null, words, keys.length, summary);
     }
 
-    static Leaf packed(TreeSchema<?> schema, long[] keys, MemorySegment page, int[] offsets, Summary summary) {
-        return new Leaf(schema, keys, page, offsets, summary);
+    static Leaf packed(TreeSchema<?> schema, long[] keys, MemorySegment page, int[] offsets, boolean flaggedAsReferring, Summary summary) {
+        return new Leaf(schema, keys, page, offsets, flaggedAsReferring, summary);
+    }
+
+    boolean pageFlagMatches() {
+        return packed == null || flaggedAsReferring == NodeCodec.refersToPages(this);
     }
 
     static int keyStreamBytes(long[] keys, int size) {
