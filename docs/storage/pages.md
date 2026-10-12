@@ -317,6 +317,25 @@ ever appended to or deleted, never truncated, so a map can't end up pointing pas
 A short read at the end of the file returns what it got, and the header check rejects it. Both paths return
 read-only memory, so nothing can write into a stored image through a read.
 
+### Interrupted threads
+
+A `FileChannel` closes itself, for every thread using it, when a thread is interrupted during a read, write, sync or
+map on it. Commits, reads and feed subscribers run on the caller's threads, and callers do interrupt them, for
+example when a request times out. Before this was handled, one interrupted commit closed the write-ahead log and
+every later commit failed until the process restarted.
+
+Segment files, the active write-ahead log segment, the change feed's segments, `pages.dir` and `pages.ref` therefore
+go through `page/FileHandle`:
+
+* It clears the caller's interrupt flag for the length of the call and sets it again afterwards, so the caller still
+  sees its interrupt.
+* If the channel was closed anyway (an interrupt that arrived in the middle of the call, or another thread's
+  interrupt), it reopens the file and runs the call again. Every read and write is positional, so running it again
+  reads or writes the same bytes.
+
+A checkpoint and `close()` also run with the flag cleared, because they write short-lived files such as the catalog
+and the reference journal.
+
 ## Caching and I/O accounting
 
 `PagedNodeSource.load(pageId, schema)` (`tree/PagedNodeSource.java`):

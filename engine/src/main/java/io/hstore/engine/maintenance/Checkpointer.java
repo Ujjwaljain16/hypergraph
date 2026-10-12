@@ -9,6 +9,7 @@ import io.hstore.engine.catalog.CatalogStore;
 import io.hstore.engine.catalog.Generation;
 import io.hstore.engine.catalog.SlotRegistry;
 import io.hstore.engine.feed.ChangeFeed;
+import io.hstore.engine.page.FileHandle;
 import io.hstore.engine.page.PageStore;
 import io.hstore.engine.tree.Epoch;
 import io.hstore.engine.tree.Materializer;
@@ -73,6 +74,10 @@ public final class Checkpointer {
     }
 
     public Result checkpoint() {
+        return FileHandle.uninterrupted(this::take);
+    }
+
+    private Result take() {
         Generation target = transactions.current();
         Epoch epoch = new Epoch();
         LongStream.Builder written = LongStream.builder();

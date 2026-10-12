@@ -14,7 +14,6 @@ import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 
 final class MappedLongs implements AutoCloseable {
@@ -28,20 +27,20 @@ final class MappedLongs implements AutoCloseable {
     private static final VarHandle ENTRY = LONG.varHandle();
 
     private final Path path;
-    private final FileChannel channel;
+    private final FileHandle file;
     private boolean fresh;
     private volatile MemorySegment[] chunks = new MemorySegment[0];
 
-    private MappedLongs(Path path, FileChannel channel) {
+    private MappedLongs(Path path, FileHandle file) {
         this.path = path;
-        this.channel = channel;
+        this.file = file;
     }
 
     static MappedLongs open(Path path, int magic, int format, String what) {
         try {
-            FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
-            long size = channel.size();
-            MappedLongs longs = new MappedLongs(path, channel);
+            FileHandle file = FileHandle.open(path);
+            long size = file.size();
+            MappedLongs longs = new MappedLongs(path, file);
             longs.mapThrough(size == 0 ? 0 : (int) ((size - 1) >>> CHUNK_SHIFT));
             MemorySegment header = longs.chunks[0];
             longs.fresh = header.get(INT, 0) == 0 && header.get(INT, 4) == 0 && header.get(LONG, 8) == 0;
@@ -50,7 +49,7 @@ final class MappedLongs implements AutoCloseable {
                 header.set(INT, 4, format);
                 header.force();
             } else if (header.get(INT, 0) != magic || header.get(INT, 4) != format) {
-                channel.close();
+                file.close();
                 throw HStoreException.invalid(what + " " + path + " has an unknown format");
             }
             return longs;
@@ -101,7 +100,8 @@ final class MappedLongs implements AutoCloseable {
         MemorySegment[] grown = Arrays.copyOf(mapped, last + 1);
         try {
             for (int chunk = mapped.length; chunk <= last; chunk++) {
-                grown[chunk] = channel.map(FileChannel.MapMode.READ_WRITE, chunk * CHUNK_BYTES, CHUNK_BYTES, Arena.ofAuto());
+                long offset = chunk * CHUNK_BYTES;
+                grown[chunk] = file.call(channel -> channel.map(FileChannel.MapMode.READ_WRITE, offset, CHUNK_BYTES, Arena.ofAuto()));
             }
         } catch (IOException e) {
             throw new UncheckedIOException("cannot grow " + path, e);
@@ -112,7 +112,7 @@ final class MappedLongs implements AutoCloseable {
     @Override
     public void close() {
         try {
-            channel.close();
+            file.close();
         } catch (IOException e) {
             throw new UncheckedIOException("cannot close " + path, e);
         }

@@ -100,6 +100,33 @@ class PageStoreTest {
     }
 
     @Test
+    void anInterruptedThreadReadsAndWritesPagesWithoutClosingTheSegment() throws Exception {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+            long before = write(store, PAGE_SIZE);
+            byte[] expected = bytes(store.read(before));
+            long[] written = new long[1];
+            boolean[] stillInterrupted = new boolean[1];
+            List<byte[]> seen = new ArrayList<>();
+            Thread interrupted = Thread.ofPlatform().start(() -> {
+                Thread.currentThread().interrupt();
+                written[0] = write(store, PAGE_SIZE / 2);
+                seen.add(bytes(store.read(before)));
+                store.sync();
+                stillInterrupted[0] = Thread.currentThread().isInterrupted();
+            });
+            interrupted.join();
+            assertTrue(stillInterrupted[0]);
+            assertArrayEquals(expected, seen.getFirst());
+            long after = write(store, PAGE_SIZE);
+            assertEquals(store.segmentOf(before), store.segmentOf(after));
+            assertEquals(0, store.mappedBytes(store.segmentOf(after)));
+            assertArrayEquals(expected, bytes(store.read(before)));
+            assertArrayEquals(image(new Random(PAGE_SIZE / 2), PAGE_SIZE / 2), bytes(store.read(written[0])));
+            store.sync();
+        }
+    }
+
+    @Test
     void pagesAreNumberedInOrderWhicheverSegmentHoldsThem() {
         try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
             List<Long> ids = new ArrayList<>();

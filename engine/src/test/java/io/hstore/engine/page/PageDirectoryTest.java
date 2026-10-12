@@ -13,11 +13,30 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PageDirectoryTest {
 
     @TempDir
     Path directory;
+
+    @Test
+    void anInterruptedThreadGrowsTheDirectoryWithoutClosingIt() throws Exception {
+        long far = 3L << 20;
+        boolean[] keptInterrupt = new boolean[1];
+        try (PageDirectory pages = PageDirectory.open(directory.resolve(PageDirectory.FILE))) {
+            Thread grower = Thread.ofPlatform().start(() -> {
+                Thread.currentThread().interrupt();
+                pages.put(far, 42);
+                keptInterrupt[0] = Thread.currentThread().isInterrupted();
+            });
+            grower.join();
+            pages.put(far * 2, 43);
+            assertTrue(keptInterrupt[0]);
+            assertEquals(42, pages.get(far));
+            assertEquals(43, pages.get(far * 2));
+        }
+    }
 
     @Test
     void addressesAndTheNextNumberSurviveReopenAcrossChunks() {

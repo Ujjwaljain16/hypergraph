@@ -6,6 +6,7 @@ package io.hstore.engine.wal;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.page.ByteCursor;
 import io.hstore.engine.page.Checksums;
+import io.hstore.engine.page.FileHandle;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -44,7 +45,7 @@ public final class WriteAheadLog implements AutoCloseable {
     private final ReentrantLock lock = new ReentrantLock();
     private final NavigableMap<Long, Path> segments = new TreeMap<>();
     private final AtomicLong bytesAppended = new AtomicLong();
-    private FileChannel active;
+    private FileHandle active;
     private long activeStart;
     private long end;
     private boolean dirty;
@@ -76,9 +77,12 @@ public final class WriteAheadLog implements AutoCloseable {
                 validEnd = positioned.next();
             }
             activeStart = last.getKey();
-            active = FileChannel.open(last.getValue(), StandardOpenOption.READ, StandardOpenOption.WRITE);
-            active.truncate(validEnd - activeStart);
-            active.force(true);
+            active = FileHandle.open(last.getValue());
+            long length = validEnd - activeStart;
+            active.run(channel -> {
+                channel.truncate(length);
+                channel.force(true);
+            });
             end = validEnd;
         } catch (IOException e) {
             throw new UncheckedIOException("cannot open write-ahead log " + directory, e);
@@ -130,9 +134,11 @@ public final class WriteAheadLog implements AutoCloseable {
             }
             ByteBuffer buffer = bytes.asByteBuffer();
             long position = end - activeStart;
-            while (buffer.hasRemaining()) {
-                position += active.write(buffer, position);
-            }
+            active.run(channel -> {
+                while (buffer.hasRemaining()) {
+                    channel.write(buffer, position + buffer.position());
+                }
+            });
             dirty = true;
         } catch (IOException e) {
             throw HStoreException.io("write-ahead log append failed", e);
@@ -141,12 +147,12 @@ public final class WriteAheadLog implements AutoCloseable {
 
     private void roll() throws IOException {
         if (active != null) {
-            active.force(true);
+            active.run(channel -> channel.force(true));
             active.close();
         }
         activeStart = end;
         Path path = pathFor(activeStart);
-        active = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE);
+        active = FileHandle.open(path);
         segments.put(activeStart, path);
         syncDirectory();
     }
@@ -163,7 +169,7 @@ public final class WriteAheadLog implements AutoCloseable {
         lock.lock();
         try {
             if (dirty && active != null) {
-                active.force(false);
+                active.run(channel -> channel.force(false));
                 dirty = false;
             }
         } catch (IOException e) {
@@ -225,7 +231,7 @@ public final class WriteAheadLog implements AutoCloseable {
         lock.lock();
         try {
             if (active != null) {
-                active.force(true);
+                active.run(channel -> channel.force(true));
                 active.close();
                 active = null;
             }
