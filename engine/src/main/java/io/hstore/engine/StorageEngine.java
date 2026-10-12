@@ -93,7 +93,7 @@ public final class StorageEngine implements AutoCloseable {
                 options.writeBufferBytes());
         this.transactions = new TransactionManager(storage, recovery.image().current(), recovery.image().history());
         this.checkpointer = new Checkpointer(transactions, pages, source, wal, feed, catalog, references, slots, options.faults(),
-                checkpoint.current(), checkpoint.checkpointLsn());
+                checkpoint.current(), recovery.image().checkpointLsn());
         this.compactor = new Compactor(transactions, pages, checkpointer, options.faults());
         this.dictionary = new Dictionary(transactions);
         checkpointer.checkpoint();
