@@ -100,6 +100,7 @@ class InlineMembersTest {
                 return null;
             });
             assertEquals(List.of(BASE + 9, BASE + 2, BASE + 5), ordered(engine, edge));
+            assertEquals(List.of(BASE + 9, BASE + 2, BASE + 5), visited(engine, edge));
             engine.write(txn -> {
                 for (int i = 0; i < 40; i++) {
                     txn.insertAt(edge, 0, Incidence.of(BASE + 100 + i));
@@ -457,6 +458,15 @@ class InlineMembersTest {
 
     private static List<Long> ordered(StorageEngine engine, long edge) {
         return engine.read(snapshot -> snapshot.requireEdge(edge).stream().map(Incidence::member).toList());
+    }
+
+    private static List<Long> visited(StorageEngine engine, long edge) {
+        List<Long> members = new ArrayList<>();
+        engine.read(snapshot -> {
+            snapshot.requireEdge(edge).forEachMemberId(members::add);
+            return null;
+        });
+        return members;
     }
 
     private static void assertShapes(StorageEngine engine, Map<Long, List<Long>> expected, Map<Long, Class<? extends Ref>> shapes) {

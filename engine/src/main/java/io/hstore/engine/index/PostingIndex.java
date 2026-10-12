@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.LongConsumer;
 import java.util.function.ToLongFunction;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -108,6 +109,19 @@ public final class PostingIndex<P> {
                     IntStream.range(0, keys.length).mapToObj(i -> new Entry<>(keys[i], values.get(i)));
             case Postings.Promoted<P>(Ref root) -> subtree(index, root).stream();
         }).orElseGet(Stream::empty);
+    }
+
+    public void forEachPosting(Tree<Postings<P>> index, long key, LongConsumer action) {
+        index.get(key).ifPresent(value -> {
+            switch (value) {
+                case Postings.Inline<P> inline -> {
+                    for (long posting : inline.keys()) {
+                        action.accept(posting);
+                    }
+                }
+                case Postings.Promoted<P>(Ref root) -> subtree(index, root).forEachKey(action);
+            }
+        });
     }
 
     public Tree<P> tree(Tree<Postings<P>> index, long key) {

@@ -71,7 +71,7 @@ public final class Comparison {
 
     private static final int BATCH = 1_000;
     private static final int SCAN_PASSES = 400;
-    private static final int SCAN_WARMUP = 40;
+    private static final long WARM_UP_NANOS = 2_000_000_000L;
     private static final int COMMITS = 5_000;
     private static final int ID_BYTES = 8;
     private static final int UPDATE_BYTES = ID_BYTES + 24;
@@ -169,11 +169,9 @@ public final class Comparison {
                 store.largeEdge(largeSize);
                 return largeSize;
             })));
-            for (int i = 0; i < SCAN_WARMUP; i++) {
-                store.scanLargeEdge();
-            }
-            results.add(reading(store, () -> measureReading("large.scan", "enumerate all members of the large hyperedge (x%d, after %d warm-up passes)"
-                    .formatted(SCAN_PASSES, SCAN_WARMUP), (long) SCAN_PASSES * largeSize, () -> {
+            warmUp(store::scanLargeEdge);
+            results.add(reading(store, () -> measureReading("large.scan", "enumerate all members of the large hyperedge (x%d, after a warm-up)"
+                    .formatted(SCAN_PASSES), (long) SCAN_PASSES * largeSize, () -> {
                 long total = 0;
                 for (int i = 0; i < SCAN_PASSES; i++) {
                     total += store.scanLargeEdge();
@@ -315,9 +313,16 @@ public final class Comparison {
         return total;
     }
 
+    private static void warmUp(LongSupplier pass) {
+        long deadline = System.nanoTime() + WARM_UP_NANOS;
+        do {
+            pass.getAsLong();
+        } while (System.nanoTime() < deadline);
+    }
+
     private static Result read(Store store, String workload, String description, int operations, Slice slice, boolean warm) {
         if (warm) {
-            batched(Math.max(BATCH, operations / 10), slice);
+            warmUp(() -> batched(operations, slice));
         }
         return reading(store, () -> measureReading(workload, description, operations, () -> batched(operations, slice)));
     }
@@ -337,9 +342,13 @@ public final class Comparison {
 
     private static Result latency(String workload, String description, int operations, IntToLongFunction operation, boolean warm) {
         if (warm) {
-            for (int i = 0; i < operations / 10; i++) {
-                operation.applyAsLong(i);
-            }
+            warmUp(() -> {
+                long total = 0;
+                for (int i = 0; i < operations; i++) {
+                    total += operation.applyAsLong(i);
+                }
+                return total;
+            });
         }
         long[] nanos = new long[operations];
         long checksum = 0;
