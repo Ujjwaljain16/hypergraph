@@ -110,7 +110,7 @@ public final class Leaf extends Node {
     private void remeasure() {
         int valueTotal = 0;
         for (int i = 0; i < size; i++) {
-            valueTotal += values != null ? schema.entryBytes(value(i)) : schema.impliedBytes(words[i]);
+            valueTotal += values != null ? schema.entryBytes(peek(i)) : schema.impliedBytes(words[i]);
         }
         keyBytes = keyStreamBytes(keys, size);
         valueBytes = valueTotal;
@@ -231,9 +231,25 @@ public final class Leaf extends Node {
         return unpacked == ABSENT ? null : unpacked;
     }
 
-    private Object unpack(Object[] stored, int index) {
+    private Object peek(int index) {
+        if (packed == null) {
+            return value(index);
+        }
+        Object unpacked = UNPACKED_VALUES.getAcquire(values, index);
+        if (unpacked == null) {
+            return decode(index);
+        }
+        return unpacked == ABSENT ? null : unpacked;
+    }
+
+    private Object decode(int index) {
         Object[] decoded = new Object[1];
         schema.codec().decode(ByteCursor.over(packed).position(offsets[index]), new long[]{keys[index]}, decoded);
+        return decoded[0];
+    }
+
+    private Object unpack(Object[] stored, int index) {
+        Object[] decoded = {decode(index)};
         Object value = decoded[0] == null ? ABSENT : decoded[0];
         Object raced = UNPACKED_VALUES.compareAndExchangeRelease(stored, index, null, value);
         if (raced != null) {
@@ -299,7 +315,7 @@ public final class Leaf extends Node {
         }
         Object[] copy = new Object[capacity];
         for (int i = 0; i < size; i++) {
-            copy[i] = value(i);
+            copy[i] = peek(i);
         }
         return copy;
     }

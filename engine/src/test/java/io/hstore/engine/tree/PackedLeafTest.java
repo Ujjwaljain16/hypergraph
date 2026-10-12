@@ -84,6 +84,21 @@ class PackedLeafTest {
     }
 
     @Test
+    void aWriterCopiesAPackedLeafWithoutKeepingOrChargingItsRecords() {
+        Leaf leaf = load();
+        int packedOnly = leaf.heapBytes();
+        AtomicLong charged = new AtomicLong();
+        leaf.chargeTo(charged::addAndGet);
+        Leaf copy = leaf.copyFor(new WriteScope());
+        for (int i = 0; i < RECORDS; i++) {
+            assertEquals(expected.get(i), copy.value(i));
+        }
+        assertEquals(leaf.bytes(), copy.bytes());
+        assertEquals(packedOnly, leaf.heapBytes());
+        assertEquals(0, charged.get());
+    }
+
+    @Test
     void threadsReadingOneLeafSeeTheSameRecordsAndChargeEachOnce() throws Exception {
         Leaf leaf = load();
         int packedOnly = leaf.heapBytes();
