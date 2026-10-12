@@ -122,6 +122,30 @@ class CrashRecoveryTest {
         }
     }
 
+    @Test
+    void commitsAfterADiscardedTailSurviveTheNextCrash() throws Exception {
+        EngineOptions options = EngineTest.small().withWalMode(WalMode.PAGE_REFERENCES).withPagesPerSegment(100_000);
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
+            engine.write(txn -> txn.createNode(EngineTest.NODE, "durable"));
+        }
+        StorageEngine engine = StorageEngine.open(directory, options);
+        loadedNode(engine, "lost-1");
+        long beforeSecond = Files.size(lastSegment());
+        loadedNode(engine, "lost-2");
+        engine.halt();
+        try (FileChannel segment = FileChannel.open(lastSegment(), StandardOpenOption.WRITE)) {
+            segment.truncate(beforeSecond - 1);
+        }
+        StorageEngine recovered = StorageEngine.open(directory, options);
+        assertTrue(recovered.recovery().discardedCommits() >= 1);
+        recovered.write(txn -> txn.createNode(EngineTest.NODE, "afterwards"));
+        recovered.halt();
+        try (StorageEngine reopened = StorageEngine.open(directory, options)) {
+            assertTrue(reopened.read(snapshot -> snapshot.resolve(0, EngineTest.NODE, "afterwards")).isPresent());
+            assertTrue(reopened.read(snapshot -> snapshot.resolve(0, EngineTest.NODE, "durable")).isPresent());
+        }
+    }
+
     private static void loadedNode(StorageEngine engine, String key) {
         engine.write(txn -> {
             txn.createNode(EngineTest.NODE, key);
