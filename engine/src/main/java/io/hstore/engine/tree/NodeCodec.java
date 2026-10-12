@@ -9,6 +9,7 @@ import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageType;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.util.Collections;
 import java.util.List;
 
@@ -79,6 +80,27 @@ public final class NodeCodec {
             schema.codec().decode(in, keys, values);
         }
         return Leaf.decoded(schema, keys, values, summary);
+    }
+
+    private static int[] offsets(ByteCursor in, int count, PageHeader header, long pageId) {
+        int[] offsets = new int[count];
+        long end = PageHeader.SIZE + (long) header.payloadLength();
+        for (int i = 0; i < count; i++) {
+            long length = in.getVarLong();
+            offsets[i] = Math.toIntExact(in.position());
+            if (length < 0 || in.position() + length > end) {
+                throw HStoreException.corrupt(pageId, "value " + i + " runs past the end of the page");
+            }
+            in.skip(length);
+        }
+        if (in.position() != end) {
+            throw HStoreException.corrupt(pageId, "values end at byte " + in.position() + ", not at the end of the payload " + end);
+        }
+        return offsets;
+    }
+
+    private static MemorySegment owned(MemorySegment page) {
+        return page.isNative() ? MemorySegment.ofArray(page.toArray(ValueLayout.JAVA_BYTE)) : page;
     }
 
     private static void decodeFramed(ByteCursor in, TreeSchema<?> schema, long[] keys, Object[] into) {
@@ -170,6 +192,9 @@ public final class NodeCodec {
         long[] keys = decodeKeys(in, count);
         return switch (header.type()) {
             case LEAF -> {
+                if (schema.codec().independentValues()) {
+                    yield Leaf.packed(schema, keys, owned(page), offsets(in, count, header, pageId), summary);
+                }
                 Leaf leaf = decodeLeaf(in, schema, keys, summary);
                 if (header.refersToPages() != refersToPages(leaf)) {
                     throw HStoreException.corrupt(pageId, "page header and contents disagree on whether it refers to other pages");

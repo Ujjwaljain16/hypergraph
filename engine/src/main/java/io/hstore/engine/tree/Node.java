@@ -3,6 +3,8 @@
 
 package io.hstore.engine.tree;
 
+import java.util.function.IntConsumer;
+
 public sealed abstract class Node permits Leaf, Branch {
 
     static final int NODE_HEAP_BYTES = 144;
@@ -66,4 +68,7 @@ public sealed abstract class Node permits Leaf, Branch {
     abstract int size();
 
     abstract int heapBytes();
+
+    void chargeTo(IntConsumer charge) {
+    }
 }
