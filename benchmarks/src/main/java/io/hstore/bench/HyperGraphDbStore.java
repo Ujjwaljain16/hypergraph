@@ -39,10 +39,12 @@ final class HyperGraphDbStore implements Store {
     private long readBeforeReopen;
 
     private final long cacheBytes;
+    private final boolean sync;
 
     HyperGraphDbStore(Path directory, boolean sync, long cacheBytes) {
         this.directory = directory;
         this.cacheBytes = cacheBytes;
+        this.sync = sync;
         configuration.setTransactional(true);
         EnvironmentConfig environment = ((BJEStorageImplementation) configuration.getStoreImplementation()).getConfiguration().getEnvironmentConfig();
         if (sync) {
@@ -76,7 +78,11 @@ final class HyperGraphDbStore implements Store {
     }
 
     private <T> T transact(Callable<T> work) {
-        return graph.getTransactionManager().transact(work);
+        T result = graph.getTransactionManager().transact(work);
+        if (sync) {
+            environment().flushLog(true);
+        }
+        return result;
     }
 
     private <T> T read(Callable<T> work) {
