@@ -149,8 +149,8 @@ MATCH NODE p:Patient WHERE p.name = 'Asha Rao'
 `Temporal.diff(before, after)` compares two readers (two generations or two branches):
 
 1. `TreeDiff.diff` over the two catalog trees yields added, removed and changed atom records; structural sharing
-   between copy-on-write trees lets the diff skip shared subtrees in `O(1)` (`Ref.same`: same stored page id or
-   same in-memory node), and subtrees with disjoint key ranges are expanded on one side only
+   between copy-on-write trees lets the diff skip shared subtrees in `O(1)` (`Ref.same`: same stored page id,
+   same in-memory node, or equal entries for a small inline tree), and subtrees with disjoint key ranges are expanded on one side only
    ([persistent tree](../storage/persistent-tree.md)).
 2. Added atoms become `AtomCreated` plus, for edges, a `MembersChanged` delta against an empty edge.
 3. Removed atoms become `AtomDeleted`.

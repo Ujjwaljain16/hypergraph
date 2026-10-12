@@ -247,7 +247,8 @@ not what drives HStore's footprint:
   record carries roles, weight, validity, position and qualifier. The cost buys per-member metadata and
   snapshot-consistent reads, which a plain link cannot express. The benchmark now reads ids through
   `Reader.forEachMemberId`, which builds neither `Member` records nor tree entries; the numbers below predate that.
-  What remains is that every hyperedge keeps its members in a tree of its own, one more page to read.
+  Small hyperedges now keep their members inline in their catalog record, so the extra page per edge is gone
+  too (see *Inline member trees* below); the tables above predate that as well.
 * **Edge ingest at small batch sizes (about 0.6–0.8× in async mode).** Each commit rewrites the incident-tree
   paths of every touched member, which is copy-on-write write amplification. JE appends log records and
   defers the work to its cleaner. In `sync` mode group commit amortises the fsync and HStore leads (1.35×).
@@ -262,6 +263,37 @@ not what drives HStore's footprint:
   images are live, and the background pass runs after every `checkpoint_wal_mb` of writes
   ([maintenance.md](storage/maintenance.md)). Raising `compaction_live_ratio` trades write amplification for
   space.
+
+### Inline member trees
+
+Storage format 6 keeps a hyperedge's member tree inside its catalog record when it is a single leaf of at most 32
+members that fits in about 100 bytes ([persistent-tree.md](storage/persistent-tree.md#inline-trees)), and member
+leaves without per-member columns no longer hold an `Incidence` object per member. The table compares HStore
+before and after those two changes, alone, at scale 1 with `async` durability and `CACHE_MB=64`: three runs of
+each build, alternated, median shown. The machine was busy with other work during these runs, so the
+throughput column moves around by a lot from run to run. Allocation, bytes read and disk are steady and are the
+numbers to trust.
+
+| Workload | Before | After | Allocated per op | Read from storage per op |
+|---|---:|---:|---:|---:|
+| `read.members` | 615,661 ops/s | 726,507 ops/s | 979 B → 493 B | 73 B → 0 B |
+| `read.twohop` | 63,817 ops/s | 90,044 ops/s | 8,760 B → 5,947 B | 337 B → 0 B |
+| `large.scan` | 799 M ops/s | 687 M ops/s | 0 B → 0 B | 0 B → 0 B |
+| `large.probe` | 2.00 M ops/s | 1.72 M ops/s | 168 B → 232 B | 0 B → 2 B |
+| `ingest.edges` | 16,115 ops/s | 15,941 ops/s | 58.1 KB → 34.9 KB | |
+| `churn.remove` | 8,589 ops/s | 12,425 ops/s | 61.0 KB → 47.4 KB | |
+
+| Size | Before | After |
+|---|---:|---:|
+| `disk` after load | 197.2 MiB | 145.4 MiB |
+| `disk.churned` | 430.3 MiB | 296.5 MiB |
+| `disk.compacted` | 201.6 MiB | 66.1 MiB |
+| bytes written by `ingest.edges` | 152.5 MiB | 127.8 MiB |
+| heap retained after ingest | 53.7 MiB | 39.1 MiB |
+
+Member reads no longer touch a page of their own, which removes the reads that missed the 64 MiB cache. The one
+cost is in `large.probe`, which looks up a single member of the 50,000 member edge: its `Incidence` is now built
+when it is read instead of being kept in the cached leaf, about 64 bytes per lookup.
 
 ## Reproducing
 

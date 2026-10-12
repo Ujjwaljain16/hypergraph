@@ -10,9 +10,9 @@ This document describes the node structure, the write path, the summaries and th
 |---|---|---|
 | `Tree<V>(schema, source, root)` | `Tree.java` | An immutable handle. Every update returns a new `Tree`; the old one stays valid. |
 | `TreeSchema<V>(id, name, fingerprint, codec, measure)` | `TreeSchema.java` | Identity (1 byte, stored in every page header), fingerprint mode, value codec and entry measure. `KEY_BYTES = 10` is the worst-case varint key size. |
-| `Ref` = `Empty` / `Pending(Node)` / `Stored(pageId, Summary)` | `Ref.java` | A child pointer. `Pending` points at an in-memory node that has not been written yet. `Stored` points at a page and carries the child's full summary. |
+| `Ref` = `Empty` / `Pending(Node)` / `Stored(pageId, units, Summary)` / `Inline(Leaf)` | `Ref.java` | A child pointer. `Pending` points at an in-memory node that has not been written yet. `Stored` points at a page and carries the child's full summary. `Inline` carries a whole small leaf inside the value that refers to it (see [Inline trees](#inline-trees)). |
 | `Node` = `Leaf` / `Branch` | `Node.java`, `Leaf.java`, `Branch.java` | The schema, an `owner` token (null means frozen and shared), and a lazily computed, cached `Summary`. |
-| `NodeSource` | `NodeSource.java`, `PagedNodeSource.java` | Loads `Stored` refs into nodes, through `NodeCache`, then `PageStore`, then `NodeCodec.decode`. `NodeSource.ephemeral(pageSize)` is for purely in-memory trees. |
+| `NodeSource` | `NodeSource.java`, `PagedNodeSource.java` | Loads `Stored` refs into nodes, through `NodeCache`, then `PageStore`, then `NodeCodec.decode`. `NodeSource.ephemeral(pageSize)` is for purely in-memory trees. `Pending` and `Inline` refs already hold their node and never go through it. |
 | `Layout(pageSize, leafBudget, maxFanout)` | `Layout.java` | Size limits derived from the page size. |
 | `WriteScope` | `WriteScope.java` | The ownership token that decides which nodes may be mutated in place, plus an optional spill sink. |
 | `TreeWriter` | `TreeWriter.java` | Path-copying insert, update, delete and join. |
@@ -27,7 +27,8 @@ This document describes the node structure, the write path, the summaries and th
 ```text
 Leaf                                   Branch
   long[]   keys      (sorted, unique)    long[] separators   (separators[0] unused for routing)
-  Object[] values                        Ref[]  children
+  Object[] values    (null when implied) Ref[]  children
+  long[]   words     (only when implied)
   int      size                          int    size, height (leaf = 0)
   int      keyBytes  (exact varint size) long   count       (cached sum of child counts)
   int      valueBytes(codec.maxSize sum; bytes() adds codec.leafOverhead(size))
@@ -41,7 +42,7 @@ Leaf                                   Branch
 
 ```text
 leafBudget = pageSize − 80 (PageHeader.SIZE) − 96 (Summary.MAX_ENCODED_BYTES) − 32 (reserve)
-maxFanout  = leafBudget / (KEY_BYTES 10 + Ref.maxEncodedSize() (8 + 3 + 96))
+maxFanout  = leafBudget / (KEY_BYTES 10 + Ref.maxEncodedSize() (1 + 8 + 3 + 96))
 maxValueBytes = leafBudget / 2 − KEY_BYTES        (largest inline value; larger values throw HStoreException.limit)
 leaf underfull   ⇔ leaf.bytes()  < leafBudget / 4
 branch underfull ⇔ branch.size() < max(2, maxFanout / 4)
@@ -49,15 +50,17 @@ branch underfull ⇔ branch.size() < max(2, maxFanout / 4)
 
 | page size | leafBudget | maxFanout | maxValueBytes | leaf underfull below | branch underfull below |
 |---:|---:|---:|---:|---:|---:|
-| 4 096 | 3 888 | 34 | 1 934 | 972 B | 8 children |
-| 16 384 (default) | 16 176 | 141 | 8 078 | 4 044 B | 35 children |
-| 65 536 | 65 328 | 573 | 32 654 | 16 332 B | 143 children |
+| 4 096 | 3 888 | 32 | 1 934 | 972 B | 8 children |
+| 16 384 (default) | 16 176 | 137 | 8 078 | 4 044 B | 34 children |
+| 65 536 | 65 328 | 553 | 32 654 | 16 332 B | 138 children |
 
 **Exact leaf sizing.** A leaf tracks its encoded size incrementally instead of counting entries:
 
 * `keyBytes` is the exact size of the delta-varint key stream: `zigzag-varint(keys[0])` plus `Σ varint(keys[i] − keys[i−1])`.
 * `Leaf.insert` and `Leaf.remove` adjust it with `insertionDelta`, which accounts for the two gaps a key creates or closes.
 * `valueBytes` is the sum of `codec.maxSize(value)`.
+
+**Values implied by one number.** Some codecs can say that every value in a leaf follows from a single `long`. `IncidenceCodec` does this for a member leaf whose column flags are all clear: each value is just `Incidence.of(member)`. Such a leaf, when decoded or frozen, keeps `values = null` and a `long[] words` of member ids instead (for set edges that is the key array itself, so nothing extra is stored). `Leaf.value(i)` builds the `Incidence` when asked, so callers see the same values as before. A 200 member leaf goes from about 77 to about 9 bytes of heap per member for set edges, and to about 17 for ordered ones. Writable copies (`copyFor`, `concat`) still hold real objects, so nothing on the write path changes. Encoding such a leaf writes straight from the ids. The codec hooks are `decodeImplied`, `encodeImplied`, `impliedWords`, `implied` and `impliedSize` on `ValueCodec`.
 
 A leaf splits as soon as `bytes() > leafBudget`. `Leaf.splitOff(budget)` walks entries until the left part holds half the bytes, then keeps advancing until the right part fits the budget. Leaves therefore fill by *bytes*, not by entry count. A leaf of 8-byte dense keys holds thousands of entries, and a leaf of large records holds only a few.
 
@@ -163,12 +166,33 @@ A `WriteScope` built with a `PageSink` (every `Transaction` has one) can spill c
 
 ### Materialization
 
-`Materializer.materialize(ref, schema)` (`Materializer.java`) runs at commit, inside `TransactionManager.append`. It turns every `Pending` reference reachable from the new root vector into a `Stored` one, post-order:
+`Materializer.materialize(ref, schema)` (`Materializer.java`) runs at commit, inside `TransactionManager.append`. It turns every `Pending` reference reachable from the new root vector into a `Stored` or `Inline` one, post-order:
 
 1. For a branch, materialize every child first, then freeze the branch (`frozenWith`, which also sets `separators[0]` to the first child's min).
-2. For a leaf whose codec `holdsRefs()`, map every nested reference through `materialize` first. An `EdgeRecord` value in the catalog holds the roots of that edge's member tree and order tree; a promoted posting list holds a postings tree root. Nested trees are therefore always written before the leaf that points at them.
+2. For a leaf whose codec `holdsRefs()`, map every nested reference first. An `EdgeRecord` value in the catalog holds the roots of that edge's member tree and order tree; a promoted posting list holds a postings tree root. If the codec `inlinesSmallTrees()` and the nested tree is a pending leaf that `Ref.fitsInline`, it is frozen and becomes a `Ref.Inline`. Every other nested tree goes through `materialize`. Nested trees are therefore always settled before the leaf that points at them.
 3. Allocate a page id, encode with `NodeCodec.encode(frozen, pageId, epoch = new generation, pageSize)`, and hand the image to the sink. The sink records a WAL `Page` or `PageRef` record, queues the page write, and admits the frozen node into the `NodeCache` under its new page id, so the next reader finds it without decoding.
 4. Return `Ref.Stored(pageId, frozen.summary())`. Parents embed the child's full summary in their own page, which is what lets readers prune without loading children.
+
+### Inline trees
+
+Most hyperedges are small. In the benchmark dataset the mean is 3.6 members, and a page of its own for each of them costs a page write, a node cache entry and a page read every time the edge is read. So a small nested tree is kept inside the value that refers to it instead, as a `Ref.Inline(leaf)`.
+
+A tree is kept inline when all of these hold (`Ref.fitsInline`):
+
+* it is a nested tree in a value whose codec opts in with `inlinesSmallTrees()`. Only `AtomCodec` does today, so only the member and order trees of edges are ever inline. Slot roots and branch children are always pages;
+* it is a single leaf of 1 to 32 entries (`Ref.INLINE_MAX_ENTRIES`);
+* its codec holds no nested references itself;
+* `1 + varint(n) + leaf.bytes()` is no more than `Ref.maxEncodedSize()`, the 108 bytes a parent leaf already reserves for a pending reference.
+
+The last rule is what keeps pages from overflowing. While an edge is being changed, its record holds a `Pending` reference, which `AtomCodec.maxSize` counts at the full 108 bytes, and the catalog leaf is split against that. At commit the reference becomes either a stored one or an inline one, and both are at most that size, so the frozen leaf can only shrink. `leaf.bytes()` is the same upper bound that leaf splits already use, so the estimate never undercounts. The `Ref.Inline` constructor checks the rule again, so a decoded or hand-built inline reference that breaks it is rejected.
+
+The decision is made again at every commit that rewrites the tree. An edge that grows past the limit gets a page at its next commit, and one that shrinks back below it becomes inline again the next time its leaf is rewritten. A tree whose root is a branch that collapses to a single stored child keeps that page until the child is rewritten. That is harmless, since an inline tree and a stored tree with the same entries read the same way.
+
+An inline leaf is frozen (`owner == null`), so a writer copies it before changing it, exactly as for a leaf loaded from a page. Its summary is computed from its entries when first asked for, and it is the same summary the leaf would carry as a page, fingerprint included. `Materializer.pendingNodes`, which checks a commit against its page budget, does not count trees that will end up inline.
+
+**Equality.** `Ref.same` compares stored references by page id and pending ones by identity. Inline references have no identity worth comparing: two reads of the same catalog page decode two separate leaves. They are compared by content instead. Two inline references are the same when they belong to the same schema and have the same keys and equal values (`Leaf.sameEntries`). `Ref.Inline.equals` uses the same test, so `EdgeRecord.equals` compares inline member trees by content too. This is what the conflict checks in `Transaction` and `Op`, the shortcuts in `TreeAlgebra` and `TreeDiff`, and the read validation of serializable transactions rely on. A stored and an inline reference are never the same, even with equal entries. Every caller treats "not the same" as "look closer", so that only costs a slower path.
+
+**Heap.** The node cache weighs a catalog leaf with `Leaf.heapBytes()`, which adds the heap estimate of every inline leaf it holds, so inline trees count against `node_cache_mb` like any other node.
 
 ## Reading
 
@@ -260,11 +284,11 @@ The cost is proportional to the changed region plus O(height) per boundary, not 
 * each node's summary equal to its recomputed contents;
 * the root's summary equal to the root reference's summary.
 
-Nested trees (edge memberships, promoted postings) are verified recursively. Pages shared between branches or trees are counted once.
+Nested trees (edge memberships, promoted postings) are verified recursively, inline ones included. Pages shared between branches or trees are counted once, and an inline tree counts as a nested tree but not as a page.
 
 ## Complexity summary
 
-n is the tree size, B the fanout (141 for 16 KiB pages), and k the number of results.
+n is the tree size, B the fanout (137 for 16 KiB pages), and k the number of results.
 
 | Operation | Pages read (cold) | Notes |
 |---|---|---|

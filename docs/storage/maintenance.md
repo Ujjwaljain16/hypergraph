@@ -90,6 +90,13 @@ places that point at it in the current state of the database. A place is a branc
 reference in a branch node, or a nested tree's root inside a leaf value, such as an edge's member tree in the
 catalog. A page that two branches share through one parent is counted once for that parent, not once per branch.
 
+A small member or order tree kept inline in its edge record ([persistent-tree.md](persistent-tree.md#inline-trees))
+is not a place: it has no page, and its entries hold no references, so the counter never sees it. `TreeWalker`
+reports only `Ref.Stored` references, and a catalog leaf whose edges are all inline doesn't set `REFERS_TO_PAGES`,
+so the counter doesn't even decode it. When an edge grows past the inline limit, the commit writes its tree as a new
+page and the new catalog leaf points at it, which adds one like any new page. When it shrinks back, the new catalog
+leaf no longer points at that page, which takes one away like any other change. Neither case needs special code.
+
 **After each commit.** When the group committer publishes a generation, it hands `ReferenceCounter` the generation
 before and the one after. The counter works on its own thread (`hstore-references`), in commit order, so the commit
 itself only pays for putting that pair on a queue. For each branch whose roots changed it compares the two root
@@ -190,6 +197,10 @@ list of the pages moved in the current 4 MiB. `StorageEngine.compact()` checkpoi
 that died since the last checkpoint are released and counted as free, and again afterwards, which forces the page
 directory and persists the segment states. Then it calls `reclaim()`.
 
+Compaction only ever moves whole pages, and an inline member tree is part of its catalog page's bytes, so it moves
+with that page and needs no handling of its own. Since most edges are inline, a compaction of a typical database
+has far fewer member pages to move than it used to.
+
 Nothing here takes the commit lock and nothing commits. Commits carry on while pages move, readers keep using the
 node cache, whose entries are keyed by page number and stay valid, and retained history keeps working because old
 generations reach the moved pages through the same directory.
@@ -237,7 +248,8 @@ History and pins are also what hold dead pages back. A page waits until every ge
 * every node summary equal to its entries;
 * the root reference's summary equal to the tree.
 
-Nested trees are verified recursively and shared images only once.
+Nested trees are verified recursively and shared images only once. Inline trees are checked like any other
+nested tree, keys and summary included, but they are not pages, so they add to `nested trees` and not to `pages`.
 
 It then calls `StorageEngine.verifyReferences()`, which counts the references in the current state again from
 scratch and compares every entry of `pages.ref` with the result. It also walks the retained history and checks that
@@ -252,9 +264,9 @@ branch main
   property-index          162 entries        9 pages      8 nested trees  height 1
   properties              122 entries        1 pages      0 nested trees  height 1
   ...
-  catalog                 458 entries       86 pages     85 nested trees  height 1
-verified 105 pages: checksums, ordering, balance and summaries are consistent
-reference counts match the trees: 105 pages in use, 423 waiting for older readers
+  catalog                 458 entries        1 pages     85 nested trees  height 1
+verified 20 pages: checksums, ordering, balance and summaries are consistent
+reference counts match the trees: 20 pages in use, 423 waiting for older readers
 ```
 
 A failure names the page, for example `HStoreException.corrupt(pageId, "checksum mismatch")` or `"separator does not route child 3 in atoms#1"`, and the command exits non-zero.

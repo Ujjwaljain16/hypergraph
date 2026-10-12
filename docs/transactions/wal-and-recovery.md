@@ -24,7 +24,7 @@ Related: [transactions](transactions.md), [change feed](../storage/change-feed.m
 
 ```text
 <db>/
-  FORMAT                         properties: format=5, page-size=<bytes>
+  FORMAT                         properties: format=6, page-size=<bytes>
   LOCK                           exclusive FileLock held while open
   catalog/manifest               name of the current catalog image file
   catalog/generations/%016x.cat  checkpointed catalog images (3 newest retained)
@@ -49,7 +49,7 @@ All fixed-width integers are **little-endian** (`ByteCursor` uses `JAVA_INT_UNAL
 | `svarlong` | zigzag (`(v << 1) ^ (v >> 63)`) then `varlong` |
 | `blob` | `varint` length, then that many bytes |
 | `string` | `blob` of UTF-8 |
-| `Ref` | `i64 pageId`; `0` (`PageId.NONE`) means the empty tree and ends the encoding; otherwise followed by `varlong units` (the image size in 64-byte units, at most 3 bytes) and a `Summary` |
+| `Ref` | `u8 tag`. Tag `0` is the empty tree and ends the encoding. Tag `1` is followed by `i64 pageId`, `varlong units` (the image size in 64-byte units, at most 3 bytes) and a `Summary`. Tag `2` is an inline tree, which only appears nested inside catalog records, never in the log's own `Root` records ([pages.md](../storage/pages.md#payload-treenodecodecjava)) |
 | `Summary` | `varlong count`; if `count == 0` nothing else; otherwise `svarlong min`, `varlong (max - min)`, `svarlong weightSum`, `svarlong weightMin`, `svarlong weightMax`, `svarlong timeMin`, `svarlong timeMax`, `i64 roleBits`, `i64 fingerprint` (at most `Summary.MAX_ENCODED_BYTES = 96`) |
 
 ## 3. Segments and frames

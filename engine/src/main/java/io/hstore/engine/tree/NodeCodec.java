@@ -9,7 +9,6 @@ import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageType;
 
 import java.lang.foreign.MemorySegment;
-import java.util.Arrays;
 import java.util.List;
 
 public final class NodeCodec {
@@ -54,7 +53,44 @@ public final class NodeCodec {
         encodeValues(out, leaf.schema, keys, leaf);
     }
 
+    static void encodeInline(ByteCursor out, Leaf leaf) {
+        out.putVarLong(leaf.size());
+        encodeLeaf(out, leaf);
+    }
+
+    static Leaf decodeInline(ByteCursor in, TreeSchema<?> schema) {
+        int count = Math.toIntExact(in.getVarLong());
+        if (count < 1 || count > Ref.INLINE_MAX_ENTRIES) {
+            throw new IllegalStateException("inline tree of " + count + " entries in " + schema);
+        }
+        return decodeLeaf(in, schema, decodeKeys(in, count), null);
+    }
+
+    private static Leaf decodeLeaf(ByteCursor in, TreeSchema<?> schema, long[] keys, Summary summary) {
+        long[] words = schema.codec().decodeImplied(in, keys);
+        if (words != null) {
+            return Leaf.implied(schema, keys, words, summary);
+        }
+        Object[] values = new Object[keys.length];
+        schema.codec().decode(in, keys, values);
+        return Leaf.decoded(schema, keys, values, summary);
+    }
+
+    private static long[] decodeKeys(ByteCursor in, int count) {
+        long[] keys = new long[count];
+        keys[0] = in.getSignedVarLong();
+        for (int i = 1; i < count; i++) {
+            keys[i] = keys[i - 1] + in.getVarLong();
+        }
+        return keys;
+    }
+
     private static <V> void encodeValues(ByteCursor out, TreeSchema<V> schema, long[] keys, Leaf leaf) {
+        long[] words = leaf.impliedWords();
+        if (words != null) {
+            schema.codec().encodeImplied(out, keys, words);
+            return;
+        }
         @SuppressWarnings("unchecked")
         List<V> values = (List<V>) leaf.valueList();
         schema.codec().encode(out, keys, values);
@@ -98,19 +134,14 @@ public final class NodeCodec {
                 in.getSignedVarLong(), in.getSignedVarLong(), in.getSignedVarLong(),
                 in.getSignedVarLong(), in.getSignedVarLong(), in.getLong(), header.fingerprint());
         int count = header.slotCount();
-        long[] keys = new long[count];
-        keys[0] = in.getSignedVarLong();
-        for (int i = 1; i < count; i++) {
-            keys[i] = keys[i - 1] + in.getVarLong();
-        }
+        long[] keys = decodeKeys(in, count);
         return switch (header.type()) {
             case LEAF -> {
-                Object[] values = new Object[count];
-                schema.codec().decode(in, keys, values);
-                if (header.refersToPages() != (schema.codec().holdsRefs() && refersToPages(schema, Arrays.asList(values)))) {
+                Leaf leaf = decodeLeaf(in, schema, keys, summary);
+                if (header.refersToPages() != refersToPages(leaf)) {
                     throw HStoreException.corrupt(pageId, "page header and contents disagree on whether it refers to other pages");
                 }
-                yield Leaf.decoded(schema, keys, values, summary);
+                yield leaf;
             }
             case INTERNAL -> {
                 Ref[] children = new Ref[count];

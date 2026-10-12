@@ -20,7 +20,7 @@ sealed interface AtomRecord {
 | `dataRef` | Locator of the atom's property bag or payload, owned by the database layer. |
 | `embeddingRef` | Locator of the node's embedding. |
 | `kind` | `SET` or `ORDERED` (`topology/EdgeKind.java`). |
-| `members`, `order` | Roots of the edge's nested membership tree and order index. These are `Ref`s embedded *inside* the catalog value. |
+| `members`, `order` | Roots of the edge's nested membership tree and order index. These are `Ref`s embedded *inside* the catalog value. A tree of up to 32 entries that fits in a reference's space is carried whole, as a `Ref.Inline`; a larger one is a `Ref.Stored` page reference. |
 | `version` | Incremented by `EdgeRecord.withRoots` on every topology change. |
 | `tenant`, `isolation` | The tenant that owns the atom. The tenant id scopes every derived key (see below). |
 
@@ -33,12 +33,14 @@ NodeRecord: u8 tag=0 | varint type | u8 hasKey | [varint len | utf8 key] | varin
             | varint flags | varint tenant | varint isolation
 EdgeRecord: u8 tag=1 | varint type | u8 kind (0=SET, 1=ORDERED) | Ref members | Ref order
             | varint version | varint dataRef | varint tenant | varint isolation
-Ref:        i64le pageId (0 = empty) | [Summary encoding, only when pageId != 0]
+Ref:        u8 0                                         empty
+            | u8 1 | i64le pageId | varint units | Summary stored as a page
+            | u8 2 | varint n | keys | values              inline (n ≤ 32)
 ```
 
-Because `AtomCodec.holdsRefs()` is true, the materializer writes each edge's member and order trees *before* the catalog leaf that references them. `TreeWalker` and `TreeVerifier` descend into them, so the reference counts and `hstore check` cover them, and compaction moves their pages like any other. The catalog therefore forms a two-level tree of trees: catalog leaves hold edge records, and each edge record roots its own membership tree.
+Because `AtomCodec.holdsRefs()` is true, the materializer settles each edge's member and order trees *before* the catalog leaf that references them. Because `AtomCodec.inlinesSmallTrees()` is also true, a tree that is a single leaf small enough to fit where a stored reference would go is kept in the record itself rather than written as a page (the exact rule is in [persistent-tree.md](persistent-tree.md#inline-trees)). With the benchmark's mean of 3.6 members, almost every edge is stored this way: reading its members needs only the catalog leaf. `TreeWalker` and `TreeVerifier` descend into the trees that are pages, so the reference counts and `hstore check` cover them, and compaction moves their pages like any other. Inline trees travel inside the catalog page, so none of those need to know about them. The catalog therefore forms a two-level tree of trees: catalog leaves hold edge records, and each edge record holds or roots its own membership tree.
 
-A record's `contentHash()` feeds the catalog's SET fingerprint. The hash of an edge record is computed from `(1, type, kind, members.count, members.fingerprint, version, dataRef, tenant, isolation)`. It is a function of the edge's member *contents*, never of page ids, and compaction never changes page ids anyway, so it leaves catalog fingerprints alone.
+A record's `contentHash()` feeds the catalog's SET fingerprint. The hash of an edge record is computed from `(1, type, kind, members.count, members.fingerprint, version, dataRef, tenant, isolation)`. It is a function of the edge's member *contents*, never of page ids or of whether the member tree is inline, and compaction never changes page ids anyway, so it leaves catalog fingerprints alone.
 
 ## Hyperedges
 
@@ -103,6 +105,8 @@ for each present column c in order:
 
 A plain set edge with no roles or weights therefore encodes to one flag byte plus the delta-varint member keys, about 1–3 bytes per member.
 
+When a decoded or freshly written leaf has no column flags at all, the codec tells the leaf that its values are implied (`decodeImplied`, `impliedWords`). The leaf then keeps no `Incidence` objects: a set leaf keeps only its keys, and a sequenced leaf keeps its keys plus a `long[]` of member ids. `Leaf.value(i)` returns `Incidence.of(member)` on demand. This saves about 64 bytes of heap per member in the node cache, and decoding such a leaf allocates about an eighth of what it used to. The bytes on disk are the same either way.
+
 `IncidenceCodec.maxSize` charges each entry `Σ present column sizes` (plus the member varint when sequenced), and `IncidenceCodec.leafOverhead(n) = 1 + 6·⌈n/8⌉` charges the leaf for its flags byte and column bitmaps, so leaf sizes are an exact upper bound ([pages.md](pages.md#payload-treenodecodecjava)). The change feed reuses this codec to serialize a single incidence (`FeedCodec.writeIncidence`).
 
 ### Filtered member scans with summary pruning
@@ -139,7 +143,7 @@ A member is any atom id, so a hyperedge can contain other hyperedges. Nothing in
 
 ### Cardinality and degree in O(1)
 
-* **Cardinality** of an edge is `EdgeRecord.members.count()`, which reads `Ref.summary().count` from the catalog value without loading the member tree (`View.cardinality`).
+* **Cardinality** of an edge is `EdgeRecord.members.count()`, which reads `Ref.summary().count` from the catalog value without loading the member tree (`View.cardinality`). For an inline tree it is the leaf's entry count.
 * **Degree** of an atom is the size of its posting set in the reverse index (`PostingIndex.count`): the array length for inline postings, the root count for promoted ones.
 
 In the database layer, `Reader.edge(id)` and `Reader.members(id)` resolve the catalog record once and build the `Hyperedge` from it with `View.edge(id, EdgeRecord)`, so a member listing costs one catalog lookup plus the member-tree scan. Role names come from `Dictionary.roles(roleSet)`, which caches the resolved name list per role-set id. Symbols are append-only, so the cache never needs invalidation.

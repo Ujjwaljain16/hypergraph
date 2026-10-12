@@ -147,7 +147,7 @@ If any touched slot moved, the commit re-executes the op log against the latest 
 | Latest state of the edge | Result |
 |---|---|
 | Deleted, and it existed at the base | Conflict: `hyperedge e was deleted concurrently` |
-| Member root `Ref.same` as base | OK, nothing happened to the edge |
+| Member root `Ref.same` as base | OK, nothing happened to the edge. For a small edge whose members are inline this compares the members themselves, so an edge that was changed and then changed back counts as untouched |
 | Changed, and footprint not commutative or edge is not a `SET` edge | Conflict: `hyperedge e root changed since the transaction began` |
 | Changed, `SET` edge, commutative footprint | Diff base vs latest member trees with `TreeDiff.diff`; conflict only if any changed member key is one this transaction touched |
 
@@ -163,7 +163,7 @@ The transaction keeps the numbers of the pages it spilled. If it aborts, its com
 
 ### 5.4 Page budget
 
-`append` counts the pending tree nodes, nested trees included, with `Materializer.pendingNodes` and rejects the commit with `HStoreException.limit` (`ABORTED_RESOURCE_LIMIT`, not retryable) if that count exceeds `txn.options().maxPages() - txn.spilledPages()`. The check runs before anything is materialized, so a rejected commit allocates no segment space, admits nothing to the node cache and does no WAL or data I/O.
+`append` counts the pending tree nodes, nested trees included but not the ones that will be kept inline in their edge record, with `Materializer.pendingNodes` and rejects the commit with `HStoreException.limit` (`ABORTED_RESOURCE_LIMIT`, not retryable) if that count exceeds `txn.options().maxPages() - txn.spilledPages()`. The check runs before anything is materialized, so a rejected commit allocates no segment space, admits nothing to the node cache and does no WAL or data I/O.
 
 ### 5.5 Outcomes
 
@@ -185,7 +185,7 @@ The transaction keeps the numbers of the pages it spilled. If it aborts, its com
 **SERIALIZABLE.** `View` calls `observeAtom` / `observeKey` on every read; under `SERIALIZABLE` the transaction records the value as of the **base** snapshot for each atom (`atomReads`) and each `(slot, key)` (`keyReads`) on first observation. On the slow path, `validateReads(latest)` re-reads each recorded key in the latest roots and raises a conflict if:
 
 * a key read: `now.equals(seen)` is false;
-* an atom read: presence differs, or the record differs **unless** both are `EdgeRecord`s with the same member root (`Ref.same(was.members(), is.members())`). Membership changes made by replay are still validated through `verifyEdge`.
+* an atom read: presence differs, or the record differs **unless** both are `EdgeRecord`s with the same member root (`Ref.same(was.members(), is.members())`). Records compare inline member trees by content, so they count as equal when the members are. Membership changes made by replay are still validated through `verifyEdge`.
 
 The fast path never needs read validation: it is only taken when every touched slot, including every read slot, is byte-for-byte the same root as at the base. Validation is therefore at key granularity when slots moved and free when they did not.
 

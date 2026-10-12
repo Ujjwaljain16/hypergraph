@@ -9,12 +9,15 @@ import io.hstore.engine.page.ByteCursor;
 import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageId;
 import io.hstore.engine.topology.EdgeKind;
+import io.hstore.engine.topology.Incidence;
+import io.hstore.engine.topology.TopologySchemas;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -31,6 +34,8 @@ import java.util.stream.LongStream;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TreeTest {
@@ -294,6 +299,166 @@ class TreeTest {
             Leaf decoded = (Leaf) NodeCodec.decode(image, pageId, EngineSlots.ATOM_SCHEMA);
             assertEquals(values, decoded.valueList());
         }
+    }
+
+    @Test
+    void inlineTreesRoundTripInsideTheRecordThatHoldsThem() {
+        Leaf members = memberLeaf(10, 20, 30);
+        AtomRecord edge = new AtomRecord.EdgeRecord(2, EdgeKind.SET, new Ref.Inline(members), Ref.EMPTY, 3, 0, 0, 0);
+        AtomRecord stored = new AtomRecord.EdgeRecord(2, EdgeKind.SET, new Ref.Stored(PageId.pack(7, 0), 1, Summary.EMPTY), Ref.EMPTY, 0, 0, 0, 0);
+        long pageId = PageId.pack(1, 0);
+        for (List<AtomRecord> values : List.of(List.of(edge), List.of(edge, stored))) {
+            Leaf leaf = Leaf.owned(EngineSlots.ATOM_SCHEMA, null, LongStream.range(0, values.size()).toArray(), values.toArray(), values.size());
+            MemorySegment image = NodeCodec.encode(leaf, pageId, 1, 4096);
+            assertEquals(values.contains(stored), PageHeader.verify(image, pageId).refersToPages());
+            Leaf decoded = (Leaf) NodeCodec.decode(image, pageId, EngineSlots.ATOM_SCHEMA);
+            assertEquals(values, decoded.valueList());
+            AtomRecord.EdgeRecord read = (AtomRecord.EdgeRecord) decoded.value(0);
+            Ref.Inline inline = (Ref.Inline) read.members();
+            assertTrue(Ref.same(new Ref.Inline(members), inline));
+            assertEquals(members.summary(), inline.summary());
+            assertEquals(List.of(10L, 20L, 30L), new Tree<>(TopologySchemas.SET_MEMBERS, NodeSource.ephemeral(4096), inline).keys().boxed().toList());
+        }
+    }
+
+    @Test
+    void inlineReferencesAreTheSameOnlyWhenTheirEntriesAre() {
+        Ref a = new Ref.Inline(memberLeaf(1, 2, 3));
+        Ref b = new Ref.Inline(memberLeaf(1, 2, 3));
+        Ref c = new Ref.Inline(memberLeaf(1, 2, 4));
+        Leaf weighted = memberLeaf(1, 2, 3);
+        Ref d = new Ref.Inline(Leaf.decoded(TopologySchemas.SET_MEMBERS, weighted.keyArray(),
+                new Object[]{Incidence.of(1), Incidence.of(2), Incidence.of(3).withWeight(2.0)}, null));
+        assertTrue(Ref.same(a, b));
+        assertEquals(a, b);
+        assertEquals(a.hashCode(), b.hashCode());
+        assertFalse(Ref.same(a, c));
+        assertFalse(Ref.same(a, d));
+        assertFalse(Ref.same(a, new Ref.Pending(memberLeaf(1, 2, 3))));
+        assertFalse(Ref.same(a, Ref.EMPTY));
+    }
+
+    @Test
+    void referencesCarryATagAndInlineTreesNeedTheirSchema() {
+        Ref inline = new Ref.Inline(memberLeaf(5, 6));
+        Ref stored = new Ref.Stored(PageId.pack(9, 0), 2, memberLeaf(5, 6).summary());
+        ByteCursor out = ByteCursor.growable(256);
+        for (Ref ref : List.of(Ref.EMPTY, stored, inline)) {
+            long start = out.position();
+            Ref.write(out, ref);
+            assertTrue(out.position() - start <= Ref.encodedSize(ref));
+            assertTrue(Ref.encodedSize(ref) <= Ref.maxEncodedSize());
+        }
+        ByteCursor in = ByteCursor.wrap(out.toByteArray());
+        assertEquals(Ref.EMPTY, Ref.read(in, TopologySchemas.SET_MEMBERS));
+        assertEquals(stored, Ref.read(in, TopologySchemas.SET_MEMBERS));
+        assertEquals(inline, Ref.read(in, TopologySchemas.SET_MEMBERS));
+        ByteCursor schemaless = ByteCursor.wrap(out.toByteArray());
+        Ref.read(schemaless);
+        Ref.read(schemaless);
+        assertThrows(IllegalStateException.class, () -> Ref.read(schemaless));
+    }
+
+    @Test
+    void onlySmallLeavesWithoutNestedTreesFitInline() {
+        assertTrue(Ref.fitsInline(memberLeaf(LongStream.rangeClosed(1, Ref.INLINE_MAX_ENTRIES).toArray())));
+        assertFalse(Ref.fitsInline(memberLeaf(LongStream.rangeClosed(1, Ref.INLINE_MAX_ENTRIES + 1).toArray())));
+        assertFalse(Ref.fitsInline(memberLeaf(LongStream.rangeClosed(1, 20).map(i -> i << 40).toArray())));
+        Leaf catalog = Leaf.owned(EngineSlots.ATOM_SCHEMA, null, new long[]{1}, new Object[]{AtomRecord.NodeRecord.of(1, "n")}, 1);
+        assertFalse(Ref.fitsInline(catalog));
+    }
+
+    @Test
+    void materializingAnEdgeRecordInlinesSmallTreesWithTheSameSummary() {
+        MemoryPages pages = new MemoryPages(4096);
+        WriteScope scope = new WriteScope();
+        Tree<Incidence> small = Tree.empty(TopologySchemas.SET_MEMBERS, pages);
+        Tree<Incidence> large = Tree.empty(TopologySchemas.SET_MEMBERS, pages);
+        for (long member = 1; member <= 40; member++) {
+            Incidence incidence = Incidence.of(member).withWeight(member * 0.5);
+            large = large.put(scope, member, incidence);
+            if (member <= 5) {
+                small = small.put(scope, member, incidence);
+            }
+        }
+        Summary stored = pages.persist(small).summary();
+        AtomRecord.EdgeRecord edge = new AtomRecord.EdgeRecord(2, EdgeKind.SET, small.root(), Ref.EMPTY, 0, 0, 0, 0);
+        AtomRecord.EdgeRecord big = new AtomRecord.EdgeRecord(2, EdgeKind.SET, large.root(), Ref.EMPTY, 0, 0, 0, 0);
+        Tree<AtomRecord> catalog = Tree.empty(EngineSlots.ATOM_SCHEMA, pages).put(scope, 1, edge).put(scope, 2, big);
+        assertEquals(2, Materializer.pendingNodes(catalog.root(), EngineSlots.ATOM_SCHEMA));
+        Tree<AtomRecord> written = pages.persist(catalog);
+        AtomRecord.EdgeRecord inlined = (AtomRecord.EdgeRecord) written.get(1).orElseThrow();
+        AtomRecord.EdgeRecord paged = (AtomRecord.EdgeRecord) written.get(2).orElseThrow();
+        assertInstanceOf(Ref.Inline.class, inlined.members());
+        assertInstanceOf(Ref.Stored.class, paged.members());
+        assertEquals(stored, inlined.members().summary());
+        assertEquals(edge.contentHash(), inlined.contentHash());
+        assertEquals(small.stream().toList(), new Tree<>(TopologySchemas.SET_MEMBERS, pages, inlined.members()).stream().toList());
+        Leaf root = (Leaf) written.node(written.root());
+        Leaf bare = Leaf.decoded(EngineSlots.ATOM_SCHEMA, new long[]{1}, new Object[]{AtomRecord.EdgeRecord.of(2, EdgeKind.SET)}, null);
+        assertTrue(root.heapBytes() >= bare.heapBytes() + ((Ref.Inline) inlined.members()).leaf().heapBytes());
+    }
+
+    @Test
+    void plainMemberLeavesKeepNoIncidencePerMember() {
+        long pageId = PageId.pack(3, 0);
+        for (TreeSchema<Incidence> schema : List.of(TopologySchemas.SET_MEMBERS, TopologySchemas.ORDERED_MEMBERS)) {
+            long[] keys = LongStream.range(0, 200).map(i -> 10 + 3 * i).toArray();
+            boolean set = schema == TopologySchemas.SET_MEMBERS;
+            Object[] incidences = Arrays.stream(keys).mapToObj(key -> Incidence.of(set ? key : 7 * key)).toArray();
+            Leaf objects = Leaf.decoded(schema, keys, incidences, null);
+            MemorySegment image = NodeCodec.encode(objects, pageId, 1, 4096);
+            Leaf decoded = (Leaf) NodeCodec.decode(image, pageId, schema);
+            assertArrayEquals(image.toArray(ValueLayout.JAVA_BYTE),
+                    NodeCodec.encode(decoded, pageId, 1, 4096).toArray(ValueLayout.JAVA_BYTE));
+            assertEquals(objects.valueList(), decoded.valueList());
+            assertEquals(objects.summary(), decoded.summary());
+            assertEquals(objects.bytes(), decoded.bytes());
+            assertTrue(decoded.heapBytes() + 64 * keys.length <= objects.heapBytes(), decoded.heapBytes() + " vs " + objects.heapBytes());
+            Leaf frozen = objects.frozenWith(incidences);
+            assertEquals(decoded.heapBytes(), frozen.heapBytes());
+            assertTrue(decoded.sameEntries(objects) && objects.sameEntries(frozen));
+
+            Object[] mixed = incidences.clone();
+            mixed[5] = ((Incidence) mixed[5]).withWeight(2.0);
+            Leaf weighted = Leaf.decoded(schema, keys, mixed, null);
+            Leaf kept = (Leaf) NodeCodec.decode(NodeCodec.encode(weighted, pageId, 1, 4096), pageId, schema);
+            assertEquals(weighted.valueList(), kept.valueList());
+            assertEquals(weighted.heapBytes(), kept.heapBytes());
+            assertFalse(kept.sameEntries(decoded));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {1, 2, 3})
+    void memberTreesMatchAnOracleAcrossPlainAndWeightedLeaves(long seed) {
+        RandomGenerator random = random(seed);
+        MemoryPages pages = new MemoryPages(1024);
+        WriteScope scope = new WriteScope();
+        Tree<Incidence> tree = Tree.empty(TopologySchemas.SET_MEMBERS, pages);
+        TreeMap<Long, Incidence> oracle = new TreeMap<>();
+        for (int round = 0; round < 40; round++) {
+            for (int step = 0; step < 100; step++) {
+                long member = random.nextLong(3000);
+                if (random.nextInt(10) < 6) {
+                    Incidence incidence = member < 400 && random.nextInt(4) == 0 ? Incidence.of(member).withWeight(1.5) : Incidence.of(member);
+                    tree = tree.put(scope, member, incidence);
+                    oracle.put(member, incidence);
+                } else {
+                    tree = tree.remove(scope, member);
+                    oracle.remove(member);
+                }
+            }
+            tree = pages.persist(tree);
+            scope.freeze();
+            assertEquals(List.copyOf(oracle.values()), tree.values().toList());
+            checkInvariants(tree);
+        }
+    }
+
+    private static Leaf memberLeaf(long... members) {
+        Object[] values = Arrays.stream(members).mapToObj(Incidence::of).toArray();
+        return Leaf.decoded(TopologySchemas.SET_MEMBERS, members.clone(), values, null);
     }
 
     private static Summary verify(Tree<?> tree, Ref ref) {
