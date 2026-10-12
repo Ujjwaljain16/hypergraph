@@ -9,7 +9,6 @@ import io.hstore.engine.tree.Ref;
 import io.hstore.engine.tree.TreeSchema;
 import io.hstore.engine.tree.ValueCodec;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.function.ToLongFunction;
 
@@ -81,8 +80,16 @@ final class PostingsCodec<P> implements ValueCodec<Postings<P>> {
             }
             Object[] decoded = new Object[count];
             postings.codec().decode(in, postingKeys, decoded);
-            into[i] = inline(postingKeys, Arrays.stream(decoded).map(postings::cast).toList());
+            into[i] = inline(postingKeys, typed(decoded));
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<P> typed(Object[] decoded) {
+        for (Object value : decoded) {
+            postings.cast(value);
+        }
+        return (List<P>) List.of(decoded);
     }
 
     @Override
@@ -97,6 +104,17 @@ final class PostingsCodec<P> implements ValueCodec<Postings<P>> {
 
     @Override
     public Postings<P> mapRefs(Postings<P> value, RefMapper mapper) {
-        return value instanceof Postings.Promoted<P>(Ref root) ? new Postings.Promoted<>(mapper.map(root, postings)) : value;
+        if (!(value instanceof Postings.Promoted<P>(Ref root))) {
+            return value;
+        }
+        Ref mapped = mapper.map(root, postings);
+        return mapped == root ? value : new Postings.Promoted<>(mapped);
+    }
+
+    @Override
+    public void forEachRef(Postings<P> value, RefVisitor visitor) {
+        if (value instanceof Postings.Promoted<P>(Ref root)) {
+            visitor.visit(root, postings);
+        }
     }
 }

@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Comparator;
+import java.util.concurrent.locks.LockSupport;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -187,6 +188,41 @@ class CrashRecoveryTest {
             }
             assertEquals(400L, (long) engine.read(snapshot -> snapshot.countOfType(0, EngineTest.NODE)));
             assertTrue(engine.transactions().statistics().averageGroupCommit() >= 1.0);
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(WalMode.class)
+    void checkpointsTakenWhileCommitsRunLoseNothing(WalMode mode) throws Exception {
+        EngineOptions options = EngineTest.small().withWalMode(mode);
+        StorageEngine engine = StorageEngine.open(directory, options);
+        long edge = engine.write(txn -> txn.createEdge(EngineTest.EDGE, EdgeKind.ORDERED));
+        Thread writer = Thread.ofPlatform().start(() -> {
+            for (int i = 0; i < 400; i++) {
+                int n = i;
+                engine.write(txn -> {
+                    txn.append(edge, Incidence.of(txn.createNode(EngineTest.NODE, "n" + n)));
+                    return null;
+                });
+            }
+        });
+        int checkpoints = 0;
+        while (writer.isAlive()) {
+            engine.checkpoint();
+            checkpoints++;
+            LockSupport.parkNanos(20_000_000);
+        }
+        writer.join();
+        engine.halt();
+        assertTrue(checkpoints > 1, "only " + checkpoints + " checkpoints overlapped the writer");
+        try (StorageEngine recovered = StorageEngine.open(directory, options)) {
+            recovered.read(snapshot -> {
+                assertEquals(400, snapshot.requireEdge(edge).size());
+                assertEquals(400L, snapshot.countOfType(0, EngineTest.NODE));
+                snapshot.requireEdge(edge).stream().forEach(member -> assertEquals(1, snapshot.degree(member.member())));
+                return null;
+            });
+            recovered.verifyReferences();
         }
     }
 
