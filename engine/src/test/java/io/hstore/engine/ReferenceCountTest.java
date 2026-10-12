@@ -152,6 +152,7 @@ class ReferenceCountTest {
                 LongStream.range(0, 3_000).forEach(member -> txn.insert(edge, member));
                 return null;
             });
+            engine.checkpoint();
             long full;
             try (Snapshot reader = engine.snapshot()) {
                 for (int round = 0; round < 30; round++) {
@@ -209,6 +210,7 @@ class ReferenceCountTest {
                 txn.delete(edge);
                 return null;
             });
+            engine.checkpoint();
             for (int i = 0; i < 4; i++) {
                 engine.write(txn -> txn.createNode(EngineTest.NODE, "after-" + txn.id()));
             }

@@ -104,7 +104,8 @@ All validity intervals are half-open `[from, to)` in epoch milliseconds (`Validi
 Every commit produces a generation with a wall-clock timestamp. `AT GENERATION g` opens a snapshot of `g` on the
 session's branch; `AS OF t` resolves `TransactionManager.generationAsOf(t)` — the newest retained generation with
 `wallTime ≤ t` — and fails with `no retained generation precedes …` when `t` predates the retained window. The window
-holds the last `history_limit` generations (engine option, default 64). Historical snapshots are read-only.
+holds the last `history_limit` generations (engine option, default 64). It is kept in memory only, so after a restart
+it starts from the last checkpointed generation and the generations recovered from the write-ahead log. Historical snapshots are read-only.
 
 ### Validity time
 
@@ -171,7 +172,8 @@ Requirements:
 - `t` must be the branch's parent (`branch.parent() == target`), otherwise `INVALID_SCHEMA`; without `INTO` the
   parent is used.
 - The base generation must still be retained (`snapshotAt(base, parent)`); otherwise the merge fails with
-  `cannot merge branch … its fork generation … is no longer retained`.
+  `cannot merge branch … its fork generation … is no longer retained`. History doesn't survive a restart, so a
+  branch forked before the checkpoint the database reopened from can no longer be merged.
 - Merging a branch into itself is rejected.
 
 ```mermaid

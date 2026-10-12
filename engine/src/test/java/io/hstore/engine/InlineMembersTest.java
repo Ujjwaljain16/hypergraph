@@ -315,6 +315,7 @@ class InlineMembersTest {
                     });
                     model.get(edge).remove(first);
                 }
+                engine.checkpoint();
             }
             Compactor.Report report = engine.compact();
             assertFalse(report.compacted().isEmpty());
@@ -344,8 +345,6 @@ class InlineMembersTest {
                 return null;
             });
             try (Snapshot then = engine.snapshotAt(small, 0); Snapshot later = engine.snapshotAt(large, 0)) {
-                assertInstanceOf(Ref.Inline.class, record(then, edge).members());
-                assertInstanceOf(Ref.Stored.class, record(later, edge).members());
                 assertEquals(LongStream.range(BASE, BASE + 3).boxed().toList(), members(then, edge));
                 assertEquals(LongStream.range(BASE, BASE + 40).boxed().toList(), members(later, edge));
             }
@@ -441,6 +440,7 @@ class InlineMembersTest {
     }
 
     private static EdgeRecord record(StorageEngine engine, long edge) {
+        engine.checkpoint();
         return engine.read(snapshot -> record(snapshot, edge));
     }
 

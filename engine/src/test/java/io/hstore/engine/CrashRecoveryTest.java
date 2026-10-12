@@ -31,6 +31,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
+import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -100,9 +101,9 @@ class CrashRecoveryTest {
             engine.write(txn -> txn.createNode(EngineTest.NODE, "durable"));
         }
         StorageEngine engine = StorageEngine.open(directory, options);
-        engine.write(txn -> txn.createNode(EngineTest.NODE, "lost-1"));
+        loadedNode(engine, "lost-1");
         long beforeSecond = Files.size(lastSegment());
-        engine.write(txn -> txn.createNode(EngineTest.NODE, "lost-2"));
+        loadedNode(engine, "lost-2");
         engine.halt();
         try (FileChannel segment = FileChannel.open(lastSegment(), StandardOpenOption.WRITE)) {
             segment.truncate(beforeSecond - 1);
@@ -119,6 +120,15 @@ class CrashRecoveryTest {
         try (StorageEngine reopened = StorageEngine.open(directory, options)) {
             assertTrue(reopened.read(snapshot -> snapshot.resolve(0, EngineTest.NODE, "afterwards")).isPresent());
         }
+    }
+
+    private static void loadedNode(StorageEngine engine, String key) {
+        engine.write(txn -> {
+            txn.createNode(EngineTest.NODE, key);
+            long edge = txn.createEdge(EngineTest.EDGE, EdgeKind.SET);
+            txn.load(edge, LongStream.range(1_000_000, 1_020_000).mapToObj(Incidence::of).toList());
+            return null;
+        });
     }
 
     @ParameterizedTest

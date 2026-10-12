@@ -257,6 +257,8 @@ not what drives HStore's footprint:
 * **Edge ingest at small batch sizes (about 0.6–0.8× in async mode).** Each commit rewrites the incident-tree
   paths of every touched member, which is copy-on-write write amplification. JE appends log records and
   defers the work to its cleaner. In `sync` mode group commit amortises the fsync and HStore leads (1.35×).
+  Since storage format 7 a commit no longer writes those paths: it logs the keys it changed, and a checkpoint
+  writes each changed node once for all the commits since the previous one. These numbers predate that.
 * **Parallel incidence reads at scale 4 (0.46×).** Every probe batch opens a snapshot, which pins a
   generation in a shared skip-list map. At 10 threads this coordination, plus node-cache admission under
   churn (the hot set exceeded the 1,048,576-node cache these runs used), costs more than JE's latch-free cache hits. At scale 1
@@ -268,11 +270,15 @@ not what drives HStore's footprint:
   images are live, and the background pass runs after every `checkpoint_wal_mb` of writes
   ([maintenance.md](storage/maintenance.md)). Raising `compaction_live_ratio` trades write amplification for
   space.
+* **Crash recovery since storage format 7 (`recover`, not in the tables above).** Recovery now replays each
+  commit's changed keys onto the trees of the last checkpoint, which takes more CPU than pointing the roots at
+  pages that were already written. On a busy laptop at scale 1, the median went from 90 ms on format 6 to
+  171 ms, against 123 ms for HyperGraphDB. That hasn't been rerun on an idle machine yet.
 
 ### Inline member trees
 
-Storage format 6 keeps a hyperedge's member tree inside its catalog record when it is a single leaf of at most 32
-members that fits in about 100 bytes ([persistent-tree.md](storage/persistent-tree.md#inline-trees)), and member
+Storage format 6 started keeping a hyperedge's member tree inside its catalog record when it is a single leaf
+of at most 32 members that fits in about 100 bytes ([persistent-tree.md](storage/persistent-tree.md#inline-trees)), and member
 leaves without per-member columns no longer hold an `Incidence` object per member. The table compares HStore
 before and after those two changes, alone, at scale 1 with `async` durability and `CACHE_MB=64`: three runs of
 each build, alternated, median shown. The machine was busy with other work during these runs, so the

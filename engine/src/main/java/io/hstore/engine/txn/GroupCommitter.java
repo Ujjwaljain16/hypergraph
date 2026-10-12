@@ -16,17 +16,23 @@ import java.util.concurrent.locks.ReentrantLock;
 final class GroupCommitter implements AutoCloseable {
 
     interface Barrier {
-        void makeDurable(int batchSize);
+        void makeDurable(int batchSize, boolean wrotePages);
     }
 
     static final class Pending {
         private final Generation generation;
         private final Runnable publication;
+        private final boolean wrotePages;
         private boolean published;
 
         Pending(Generation generation, Runnable publication) {
+            this(generation, publication, true);
+        }
+
+        Pending(Generation generation, Runnable publication, boolean wrotePages) {
             this.generation = generation;
             this.publication = publication;
+            this.wrotePages = wrotePages;
         }
 
         Generation generation() {
@@ -105,7 +111,7 @@ final class GroupCommitter implements AutoCloseable {
         boolean interrupted = Thread.interrupted();
         lock.unlock();
         try {
-            barrier.makeDurable(batch.size());
+            barrier.makeDurable(batch.size(), batch.stream().anyMatch(pending -> pending.wrotePages));
             for (Pending pending : batch) {
                 pending.publication.run();
                 interrupted |= Thread.interrupted();

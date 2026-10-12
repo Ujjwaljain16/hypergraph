@@ -90,10 +90,11 @@ max_connections          = 200
 |---|---|---|---|
 | `page_size` | `HSTORE_PAGE_SIZE` | `16384` | Page size in bytes. Must be a power of two from 1 KiB to 1 MiB. It is recorded in `<data>/FORMAT` at creation, and opening with a different value fails with `database uses N byte pages, options request M`. |
 | `durability` | `HSTORE_DURABILITY` | `sync` | `sync`: a commit is acknowledged after the group-commit barrier has `fsync`ed it. `async`: acknowledged once appended, so a crash can lose a suffix of acknowledged commits but never corrupts the database. |
-| `wal_mode` | `HSTORE_WAL_MODE` | `references` | `references`: the WAL logs `PageRef(pageId, address, length, crc32c)` records and data pages are synced before the WAL. `images`: the WAL logs full page images. See [WAL and recovery](../transactions/wal-and-recovery.md). |
+| `wal_mode` | `HSTORE_WAL_MODE` | `references` | Applies to the pages a commit writes itself: spilled pages of bulk loads and trees that changed in more than 4,096 places. `references`: the WAL logs `PageRef(pageId, address, length, crc32c)` records and those pages are synced before the WAL. `images`: the WAL logs their full images. Ordinary commits log only the keys they changed, and pages written at checkpoints are not logged in either mode. See [WAL and recovery](../transactions/wal-and-recovery.md). |
 | `node_cache_mb` | `HSTORE_NODE_CACHE_MB` | `256` | Megabytes of Java heap for decoded tree nodes, each counted at an estimate of the memory it takes. |
 | `checkpoint_wal_mb` | `HSTORE_CHECKPOINT_WAL_MB` | `256` | WAL volume, or volume of pages written, since the last checkpoint that triggers a background checkpoint. |
-| `history_limit` | `HSTORE_HISTORY_LIMIT` | `64` | Committed generations kept addressable for `AT GENERATION`, `AS OF`, `HISTORY` and the Studio time slider. |
+| `write_buffer_mb` | `HSTORE_WRITE_BUFFER_MB` | `64` | Megabytes of Java heap held by committed tree nodes that no checkpoint has written yet. A background checkpoint starts once more than half of it is in use; a commit that finds it full waits for a checkpoint, for at most 30 seconds. Must be between 1 and 16,777,216. |
+| `history_limit` | `HSTORE_HISTORY_LIMIT` | `64` | Committed generations kept addressable for `AT GENERATION`, `AS OF`, `HISTORY` and the Studio time slider. History is kept in memory only: after a restart it holds the checkpointed generation and the generations replayed from the WAL after it. |
 | `compaction_live_ratio` | `HSTORE_COMPACTION_LIVE_RATIO` | `0.5` | Sealed segments whose live bytes fall below this fraction of their allocated bytes are emptied by compaction, which moves their live pages to the active segment: one segment (the emptiest) per background pass whenever one is below the ratio, or all of them with `COMPACT`. Pages count as free once nothing refers to them and no retained generation or open reader can reach them; a checkpoint releases them. Time-travel history is preserved. Emptied segments are deleted after the next checkpoint, once no reader that started before the move is still open. Must satisfy 0 < r < 1; other values fail at startup. |
 | `feed_retention_generations` | `HSTORE_FEED_RETENTION_GENERATIONS` | `100000` | Committed generations kept in the [change feed](../storage/change-feed.md) for `HISTORY`, `DIFF` and subscribers. After every checkpoint, whole feed segments that lie entirely below `current − N` are deleted. *Holds* lower that floor: the semantic index's last persisted generation and the generation of each continuous materialised view. Feed segments roll at the WAL segment size (`EngineOptions.walSegmentBytes`, 64 MiB). Must be ≥ 1. |
 
@@ -102,7 +103,7 @@ max_connections          = 200
 | Key | Environment | Default | Description |
 |---|---|---|---|
 | `query_page_budget` | `HSTORE_QUERY_PAGE_BUDGET` | `2000000` | Page visits allowed per query before it is aborted with `ABORTED_RESOURCE_LIMIT`. A tenant quota (`query_pages`) can lower it per tenant. |
-| `transaction_page_budget` | `HSTORE_TRANSACTION_PAGE_BUDGET` | `0` | Pages one transaction may write. `0` or a negative value means unlimited. A tenant quota (`transaction_pages`) can lower it per tenant. |
+| `transaction_page_budget` | `HSTORE_TRANSACTION_PAGE_BUDGET` | `0` | Pages one transaction may add: the tree nodes it created that will need a page of their own (small member trees kept inline don't count), plus the pages it spills. Most of them are written by the next checkpoint rather than by the commit. `0` or a negative value means unlimited. A tenant quota (`transaction_pages`) can lower it per tenant. |
 
 ### Semantic plane
 
@@ -156,18 +157,25 @@ The value must be between 1 and 16,777,216 (16 TiB). Two older names are refused
 `cache_mb`, the name this setting had before it was released, and `cache_nodes`, a node count. Both messages name
 `node_cache_mb`.
 
-**`checkpoint_wal_mb`.** A checkpoint writes the current generation's catalog image and truncates WAL segments
-before the checkpoint LSN. Lower values shorten recovery, since recovery replays WAL after the last checkpoint,
+**`checkpoint_wal_mb`.** A checkpoint writes the tree nodes that commits left in memory, publishes the catalog
+image of the generation it wrote, and truncates WAL segments before the checkpoint LSN. Lower values shorten recovery, since recovery replays WAL after the last checkpoint,
 at the cost of more frequent catalog writes. Recovery time scales roughly linearly with WAL volume since the
 last checkpoint. The same volume of page writes also triggers a checkpoint, which is what releases dead pages
 during a bulk load.
+
+**`write_buffer_mb`.** Commits keep their new tree nodes on the heap until a checkpoint writes them, and this
+setting bounds that heap. A key that many commits change is written once per checkpoint, so a larger buffer means
+fewer page writes for hot data and fewer checkpoints. The cost is heap, which the collector has to walk like the
+node cache, and a longer replay after a crash, since recovery replays every commit since the last checkpoint. If
+commits outrun checkpoints and the buffer fills, commits wait for room; one that waits 30 seconds logs a warning
+and commits anyway.
 
 **`durability` × `wal_mode`.**
 
 | Combination | Commit cost | Crash guarantee |
 |---|---|---|
-| `sync` + `references` (default) | data `fsync` + WAL `fsync` per group-commit batch, small WAL records | Every acknowledged commit survives. |
-| `sync` + `images` | WAL `fsync` per batch, WAL carries full pages (≈ page size × pages written) | Every acknowledged commit survives. Data pages need not be synced first. |
+| `sync` + `references` (default) | WAL `fsync` per group-commit batch, plus a data `fsync` when a commit in the batch wrote pages | Every acknowledged commit survives. |
+| `sync` + `images` | WAL `fsync` per batch; the WAL carries full images of the pages commits write themselves | Every acknowledged commit survives. Data pages need not be synced first. |
 | `async` + either | no `fsync` on the commit path | Recovery yields a *prefix* of the commit history. A suffix of acknowledged commits may be lost. Never a torn or mixed state. |
 
 Group commit amortises the `fsync` over concurrent committers. The Dashboard reports the observed average

@@ -84,6 +84,8 @@ Test suites:
 | `engine/…/tree/TreeTest` | tree invariants, summaries, intersection, diff |
 | `engine/…/EngineTest` | transactions, rebase, branches, history, compaction |
 | `engine/…/CrashRecoveryTest` | crash matrix, durable-prefix rule, group-commit barriers |
+| `engine/…/DeferredWritesTest` | pages written at checkpoints, the write buffer, crashes during a checkpoint while commits continue |
+| `engine/…/ChangeLogTest`, `database/…/ChangeLogReplayTest` | replaying each commit's logged key changes rebuilds the trees it published |
 | `database/…/DatabaseTest` | reader/writer API, properties, temporal, evidence |
 | `database/…/query/QueryLanguageTest` | HQL end to end, planner choices |
 | `database/…/SecurityTest` | tenant isolation, roles, quotas, three-way merge, JSON output |

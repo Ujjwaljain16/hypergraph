@@ -4,10 +4,13 @@
 package io.hstore.engine.tree;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.Iterator;
+import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 public final class TreeDiff {
@@ -30,6 +33,55 @@ public final class TreeDiff {
 
     public static <V> Stream<Delta<V>> diff(Tree<V> before, Tree<V> after) {
         return Tree.stream(new Walker<>(before, after)).map(Entry::value);
+    }
+
+    public static <V> Optional<String> difference(Tree<V> a, Tree<V> b) {
+        if (!a.summary().equals(b.summary())) {
+            return Optional.of("summaries differ: " + a.summary() + " and " + b.summary());
+        }
+        Iterator<Entry<V>> left = a.stream().iterator();
+        Iterator<Entry<V>> right = b.stream().iterator();
+        while (left.hasNext() && right.hasNext()) {
+            Entry<V> x = left.next();
+            Entry<V> y = right.next();
+            if (x.key() != y.key()) {
+                return Optional.of("keys differ: " + x.key() + " and " + y.key());
+            }
+            Optional<String> value = valueDifference(a, b, x.value(), y.value());
+            if (value.isPresent()) {
+                return Optional.of("key " + x.key() + ": " + value.get());
+            }
+        }
+        if (left.hasNext() || right.hasNext()) {
+            return Optional.of("one tree has more entries");
+        }
+        return Optional.empty();
+    }
+
+    private static <V> Optional<String> valueDifference(Tree<V> a, Tree<V> b, V x, V y) {
+        ValueCodec<V> codec = a.schema().codec();
+        if (!codec.holdsRefs()) {
+            return Objects.equals(x, y) ? Optional.empty() : Optional.of(x + " and " + y);
+        }
+        if (!Objects.equals(codec.mapRefs(x, (_, _) -> Ref.EMPTY), codec.mapRefs(y, (_, _) -> Ref.EMPTY))) {
+            return Optional.of(x + " and " + y);
+        }
+        List<Tree<?>> nestedX = new ArrayList<>();
+        List<Tree<?>> nestedY = new ArrayList<>();
+        codec.forEachRef(x, (ref, schema) -> nestedX.add(new Tree<>(schema, a.source(), ref)));
+        codec.forEachRef(y, (ref, schema) -> nestedY.add(new Tree<>(schema, b.source(), ref)));
+        for (int i = 0; i < nestedX.size(); i++) {
+            Optional<String> nested = nestedDifference(nestedX.get(i), nestedY.get(i));
+            if (nested.isPresent()) {
+                return Optional.of("nested tree " + i + ", " + nested.get());
+            }
+        }
+        return Optional.empty();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <V> Optional<String> nestedDifference(Tree<V> x, Tree<?> y) {
+        return difference(x, (Tree<V>) y);
     }
 
     private sealed interface Item {

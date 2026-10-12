@@ -8,9 +8,13 @@ public sealed abstract class Node permits Leaf, Branch {
     static final int NODE_HEAP_BYTES = 144;
     static final int ARRAY_HEAP_BYTES = 16;
 
+    private record Stamp(Ref ref, Epoch epoch) {
+    }
+
     final TreeSchema<?> schema;
     final Object owner;
     private volatile Summary summary;
+    private volatile Stamp stamp;
 
     Node(TreeSchema<?> schema, Object owner, Summary summary) {
         this.schema = schema;
@@ -33,6 +37,20 @@ public sealed abstract class Node permits Leaf, Branch {
 
     final void invalidate() {
         summary = null;
+    }
+
+    final void stamp(Ref written, Epoch epoch) {
+        stamp = new Stamp(written, epoch);
+    }
+
+    final Ref writtenIn(Epoch epoch) {
+        Stamp current = stamp;
+        return current != null && current.epoch() == epoch ? current.ref() : null;
+    }
+
+    final Ref published() {
+        Stamp current = stamp;
+        return current != null && current.epoch().published() ? current.ref() : null;
     }
 
     final boolean writableBy(WriteScope scope) {

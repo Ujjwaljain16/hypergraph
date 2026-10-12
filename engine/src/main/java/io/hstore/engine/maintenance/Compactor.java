@@ -18,6 +18,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public final class Compactor {
 
+    private static final long ACTIVE_FRACTION = 4;
+
     public record Report(Map<Integer, Long> liveBytes, List<Integer> compacted, long generation) {
     }
 
@@ -35,7 +37,20 @@ public final class Compactor {
     }
 
     public boolean worthwhile(double liveThreshold) {
-        return !victims(pages.liveBytes(), liveThreshold, 1).isEmpty();
+        return !victims(pages.liveBytes(), liveThreshold, 1).isEmpty() || activeMostlyDead(liveThreshold, pages.segmentBytes() / ACTIVE_FRACTION);
+    }
+
+    private void sealActiveIfMostlyDead(double liveThreshold, long minimumBytes) {
+        if (activeMostlyDead(liveThreshold, minimumBytes)) {
+            pages.sealActive(pages.activeSegment());
+        }
+    }
+
+    private boolean activeMostlyDead(double liveThreshold, long minimumBytes) {
+        int active = pages.activeSegment();
+        return pages.segments().stream()
+                .filter(segment -> segment.id() == active && segment.bytes() > 0 && segment.bytes() >= minimumBytes)
+                .anyMatch(segment -> pages.liveBytes().getOrDefault(segment.id(), 0L) < segment.bytes() * liveThreshold);
     }
 
     private List<Integer> victims(Map<Integer, Long> liveBytes, double liveThreshold, int maxVictims) {
@@ -54,6 +69,7 @@ public final class Compactor {
     }
 
     public Report compact(double liveThreshold, int maxVictims) {
+        sealActiveIfMostlyDead(liveThreshold, maxVictims == Integer.MAX_VALUE ? 0 : pages.segmentBytes() / ACTIVE_FRACTION);
         Map<Integer, Long> liveBytes = pages.liveBytes();
         List<Integer> victims = victims(liveBytes, liveThreshold, maxVictims);
         List<Integer> emptied = new ArrayList<>();

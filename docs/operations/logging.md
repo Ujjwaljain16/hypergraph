@@ -52,7 +52,7 @@ clean. `init` uses the configured level.
 | `engine` | `hstore.engine` | open, checkpoint, compaction, reclamation, shutdown (`StorageEngine`) |
 | `recovery` | `hstore.recovery` | crash recovery (`Recovery`) |
 | `references` | `hstore.references` | page reference counts (`ReferenceCounter`) |
-| `txn` | `hstore.txn` | branch lifecycle (`TransactionManager`) |
+| `txn` | `hstore.txn` | branch lifecycle and the write buffer (`TransactionManager`) |
 | `commit` | `hstore.commit` | group-commit pipeline (`GroupCommitter`) |
 | `feed` | `hstore.feed` | change-feed retention and subscribers (`ChangeFeed`) |
 | `wal` | `hstore.wal` | write-ahead log (`WriteAheadLog`; DEBUG only) |
@@ -72,9 +72,8 @@ This is every message the server emits. Placeholders are in `{braces}`.
 | LOG | main | `configuration: {key}={value} ({source}), …` | Settings that differ from their default, with source `file`, `environment` or `command line`. |
 | LOG | recovery | `recovered generation {g}: replayed {n} commits from lsn {lsn}, discarded {t} unfinished transactions and {c} non-durable commits` | Always logged at open. `{lsn}` is the checkpoint LSN replay started from. |
 | WARNING | recovery | `durable prefix ends before generation {g}: transaction {txn} references pages that never reached storage` | In `references` WAL mode, a committed transaction whose `PageRef` pages fail verification ends the recovered prefix. Later commits are discarded. Seen only after a crash with `durability = async` or a storage fault. |
-| LOG | references | `released {n} pages that no committed generation refers to` | Logged at open when pages written by transactions that never committed, for example ones cut short by a crash, were found and released. |
-| WARNING | references | `reference counts could not follow the log, rebuilding them` | Counting the commits replayed at open failed. The counts are rebuilt from the retained generations. |
-| LOG | references | `rebuilt reference counts in {ms} ms` | The counts were marked for rebuilding, or could not follow the log, and were recounted at open. |
+| LOG | references | `{n} pages are not counted yet; the first checkpoint counts them or releases them` | Logged at open when pages were written after the last checkpoint: spilled by a bulk load, written by a commit or by a checkpoint that never finished, or written by a transaction that never committed. The checkpoint at the end of the open keeps the ones the recovered trees use and marks the rest dead. |
+| LOG | references | `rebuilt reference counts in {ms} ms` | The counts were marked for rebuilding and were recounted at open from the checkpointed generation. |
 | WARNING | references | `{n} referenced pages have no address` | Pages that are counted as in use have no directory entry. Run `hstore check`. |
 | LOG | engine | `database at {dir} is ready: generation {g}, {n} data segments, page size {bytes}, {durability} durability, {walMode} wal` | Engine open complete. |
 | LOG | semantic | `loaded semantic index at generation {g} ({n} models)` | HNSW indexes restored from `<data>/semantic`. |
@@ -100,6 +99,7 @@ This is every message the server emits. Placeholders are in `{braces}`.
 | LOG | engine | `reclaimed retired segments {list}` |
 | WARNING | hstore | `background maintenance failed` (with DETAIL) |
 | ERROR | references | `reference counting stopped; the counts will be rebuilt when the database next opens` (with DETAIL). No more pages are released until a restart, so space stops being reclaimed but nothing is lost. |
+| WARNING | txn | `the write buffer stayed full for 30 s; committing anyway`: commits produced unwritten tree nodes faster than checkpoints wrote them, past `write_buffer_mb`, and this commit stopped waiting. |
 | LOG | txn | `created branch {name} (#{id}) from generation {g}` |
 | LOG | txn | `branch #{id} is now {MERGED or DROPPED}` |
 | ERROR | commit | `commit pipeline failed; the engine must be restarted` (with DETAIL). The committer leading a batch could not make it durable or publish it. All waiting and future committers fail. |
@@ -115,7 +115,7 @@ and in Docker it is the last line of `docker logs`. The storage-integrity failur
 
 | Message | Meaning |
 |---|---|
-| `database <dir> uses storage format N; this build reads format 6 (inline member trees); export and reload it` | `FORMAT` was written by an incompatible build. |
+| `database <dir> uses storage format N; this build reads format 7 (commits logged as key changes); export and reload it` | `FORMAT` was written by an incompatible build. |
 | `database uses N byte pages, options request M` | `page_size` differs from the value fixed at `init`. |
 | `write-ahead log segment <file> is damaged (<reason>) but later segments exist; replay would silently drop committed transactions` | `CORRUPT_LOG`: damage in a non-tail WAL segment. A torn record at the end of the *last* segment is normal after a crash. Replay simply ends there. Damage before later segments means storage corruption, so recovery refuses to guess. Restore from backup. |
 

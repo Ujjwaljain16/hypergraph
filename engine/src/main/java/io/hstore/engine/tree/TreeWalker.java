@@ -49,6 +49,26 @@ public final class TreeWalker {
         }
     }
 
+    public static void forEachStored(Ref ref, TreeSchema<?> schema, Reference into) {
+        switch (ref) {
+            case Ref.Stored(long pageId, int _, Summary _) -> into.accept(pageId, schema, UNKNOWN_HEIGHT);
+            case Ref.Pending(Leaf leaf) -> {
+                if (schema.codec().holdsRefs()) {
+                    for (int i = 0; i < leaf.size(); i++) {
+                        nested(schema, leaf.value(i), (nested, nestedSchema) -> forEachStored(nested, nestedSchema, into));
+                    }
+                }
+            }
+            case Ref.Pending(Branch branch) -> {
+                for (int i = 0; i < branch.size(); i++) {
+                    forEachStored(branch.child(i), schema, into);
+                }
+            }
+            default -> {
+            }
+        }
+    }
+
     private static <V> void nested(TreeSchema<V> schema, Object value, ValueCodec.RefVisitor visitor) {
         schema.codec().forEachRef(schema.cast(value), visitor);
     }
