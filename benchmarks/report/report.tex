@@ -1,0 +1,40 @@
+\documentclass[10pt,twocolumn]{article}
+\input{preamble}
+\input{gen/macros}
+\input{gen/summary-fig}
+
+\title{\Large\bfseries HStore and HyperGraphDB:\\ a storage-level benchmark of two persistent hypergraph engines}
+\author{Metacog Labs\\[2pt]\normalsize HStore 0.1.0, commit \texttt{459b8be}}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\input{sections/abstract}
+\end{abstract}
+
+\input{sections/introduction}
+\input{sections/systems}
+\input{sections/method}
+\input{sections/results}
+\input{sections/discussion}
+\input{sections/validity}
+\input{sections/conclusion}
+
+\bibliographystyle{plain}
+\begin{thebibliography}{9}\small
+\bibitem{hgdb} B.~Iordanov. HyperGraphDB: a generalized graph database. In \emph{Web-Age Information Management (WAIM) Workshops}, LNCS 6185, pages 25--36. Springer, 2010.
+\bibitem{je} Oracle. \emph{Berkeley DB Java Edition Architecture}. Oracle white paper, 2006.
+\bibitem{leapfrog} T.~L. Veldhuizen. Leapfrog triejoin: a simple, worst-case optimal join algorithm. In \emph{Proc.\ ICDT}, pages 96--106, 2014.
+\bibitem{lmdb} H.~Chu. MDB: a memory-mapped database and backend for OpenLDAP. In \emph{Proc.\ LDAPCon}, 2011.
+\bibitem{aries} C.~Mohan, D.~Haderle, B.~Lindsay, H.~Pirahesh, P.~Schwarz. ARIES: a transaction recovery method supporting fine-granularity locking and partial rollbacks using write-ahead logging. \emph{ACM TODS} 17(1):94--162, 1992.
+\bibitem{lfs} M.~Rosenblum, J.~K. Ousterhout. The design and implementation of a log-structured file system. \emph{ACM TOCS} 10(1):26--52, 1992.
+\end{thebibliography}
+
+\clearpage
+\onecolumn
+\appendix
+\input{sections/appendix}
+
+\end{document}

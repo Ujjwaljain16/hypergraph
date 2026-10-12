@@ -1,0 +1,27 @@
+\section{Results}
+\label{sec:results}
+
+\begin{figure*}[t]
+\centering
+\input{gen/fig-ratios}
+\caption{HStore's advantage over HyperGraphDB for every workload and configuration (log scale). Bars above the dashed line favour HStore. Throughput workloads divide HStore by HyperGraphDB; \wl{reopen}, \wl{recover} and the disk sizes divide HyperGraphDB by HStore.}
+\label{fig:ratios}
+\end{figure*}
+
+\Cref{fig:ratios} shows HStore's advantage on every workload in all three configurations, and \cref{tab:summary} gives the same ratios with the run-range test from \cref{sec:environment}. \Cref{tab:main} gives the absolute numbers for the S1 async configuration. The other configurations are tabulated in \cref{app:full}.
+
+\begin{table}[t]
+\centering\footnotesize
+\caption{Ratio of medians, HStore over HyperGraphDB, oriented so that values above 1 favour HStore (bold). $^\dagger$: the run ranges of the two systems overlap.}
+\label{tab:summary}
+\input{gen/summary}
+\end{table}
+
+\begin{table*}[t]
+\centering\footnotesize
+\caption{S1 async: median throughput (operations per second), times and sizes over \M{runsA} runs per system.}
+\label{tab:main}
+\input{gen/main-s1-async}
+\end{table*}
+
+\input{sections/results-text}

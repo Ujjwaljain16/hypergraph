@@ -1,0 +1,76 @@
+\subsection{Loading, updating and deleting}
+
+At scale 1 with asynchronous commits, HStore inserts nodes \M{ratioAingestnodes} and hyperedges \M{ratioAingestedges} as fast as HyperGraphDB. Both ratios carry the overlap mark: the slowest HStore runs were slower than the fastest HyperGraphDB runs, so bulk insertion should be read as roughly even with a lead for HStore. Updates differ more. Replacing node values 1,000 at a time runs \M{ratioAwriteupdate} faster in HStore (\M{hAwriteupdate} against \M{gAwriteupdate} updates per second). Deleting hyperedges is \M{ratioAchurndelete} faster and removing single members \M{ratioAchurnremove} faster, both with overlapping ranges. Building one hyperedge over all 50,000 nodes takes HStore a single bulk load, \M{ratioAlargeingest} faster than HyperGraphDB.
+
+Single-update transactions show the smallest write difference: \M{hAlatencycommit} against \M{gAlatencycommit} commits per second (\M{ratioAlatencycommit}, ranges overlapping). With asynchronous commits, neither system waits for the disk, and the cost of one commit is dominated by work in memory. \Cref{sec:latency} shows that the two medians are close and that the difference lies in the tail.
+
+\subsection{Reads}
+
+HStore's largest margins are on reads that go through incidence sets. It enumerates a node's incidence set \M{ratioAreadincidence} faster than HyperGraphDB, counts the hyperedges shared by two nodes \M{ratioAreadcomembership} faster, and computes two-hop neighbourhoods \M{ratioAreadtwohop} faster. With 8 threads, incidence lookups reach \M{hAreadincidenceparallel} per second in HStore against \M{gAreadincidenceparallel} (\M{ratioAreadincidenceparallel}). When every lookup is its own read transaction (\wl{latency.read}), the ratio is \M{ratioAlatencyread}. Enumerating the members of a hyperedge, the read where HyperGraphDB's atom cache helps most, is \M{ratioAreadmembers} faster in HStore at the median, with overlapping ranges.
+
+Two read workloads run under special conditions. Directly after a reopen, before any warm-up, HStore serves incidence lookups at \M{hAreadincidencecold} per second against \M{gAreadincidencecold} (\M{ratioAreadincidencecold}). HStore read \M{coldreadAhstore} per lookup from its files in that phase, against \M{coldreadAhgdb} for JE. After the deletes, incidence lookups are \M{ratioAreadincidencechurned} faster.
+
+\subsection{Giant hyperedges}
+
+On the hyperedge that contains all 50,000 nodes, HStore scans members \M{ratioAlargescan} faster (\M{hAlargescan} members per second against \M{gAlargescan}) and tests membership \M{ratioAlargeprobe} faster. A membership test in HStore is one descent of the edge's membership tree.
+
+\subsection{Latency}
+\label{sec:latency}
+
+\begin{figure*}[t]
+\centering
+\input{gen/fig-latency}
+\caption{Latency percentiles, median of each percentile over runs (log scale). From left: single-update commits with asynchronous and with synchronous commits, single-lookup read transactions, and commits of the open-loop writer while 7 threads read.}
+\label{fig:latency}
+\end{figure*}
+
+\begin{table*}[t]
+\centering\footnotesize
+\caption{S1 async: latency per operation, median of each percentile over runs.}
+\label{tab:latency}
+\input{gen/latency-s1-async}
+\end{table*}
+
+\Cref{fig:latency} and \cref{tab:latency} give the latency distributions. For single-update commits with asynchronous commits, the medians are close: \M{latAhstorelatencycommitmed} for HStore and \M{latAhgdblatencycommitmed} for HyperGraphDB. The tails are not. At p99, HStore needs \M{latAhstorelatencycommitptwo} and HyperGraphDB \M{latAhgdblatencycommitptwo}. At p99.9 the figures are \M{latAhstorelatencycommitpthree} and \M{latAhgdblatencycommitpthree}. Read transactions take \M{latAhstorelatencyreadmed} at the median in HStore and \M{latAhgdblatencyreadmed} in HyperGraphDB, and \M{latAhstorelatencyreadpthree} against \M{latAhgdblatencyreadpthree} at p99.9.
+
+\paragraph{Reads beside a writer.} In \wl{mixed}, the writer's median rate was 1,000 updates per second in both systems; its slowest run reached \M{mixminAhstore} updates per second in HStore and \M{mixminAhgdb} in HyperGraphDB. Meanwhile the 7 readers completed \M{hAmixedread} lookups per second in HStore and \M{gAmixedread} in HyperGraphDB (\M{ratioAmixedread}). Reader latency at p99.9 was \M{latAhstoremixedreadpthree} against \M{latAhgdbmixedreadpthree}. The writer's commits, measured from their scheduled start, took \M{latAhstoremixedwriteptwo} against \M{latAhgdbmixedwriteptwo} at p99.
+
+\paragraph{Commits during space reclamation.} In the \wl{compaction} window, the median commit latency was about the same with and without a reclamation running, for both systems. At p99, HStore's commits took \M{latAhstorecompactionptwo} during compaction against \M{latAhstorecompactionbaselineptwo} without; HyperGraphDB's took \M{latAhgdbcompactionptwo} during cleaning against \M{latAhgdbcompactionbaselineptwo} without.
+
+\subsection{Disk footprint, deletes and reclamation}
+
+\begin{figure}[t]
+\centering
+\input{gen/fig-disk}
+\caption{Bytes on disk after load, after deleting 20\% of the hyperedges, and after a full space reclamation, median over runs.}
+\label{fig:disk}
+\end{figure}
+
+After loading at scale 1, HStore's files take \M{hAdisk} and HyperGraphDB's \M{gAdisk} (\cref{fig:disk}). After the deletes the figures are \M{hAdiskchurned} and \M{gAdiskchurned}. HStore's files grow at this point. The deletes write new pages, and the old ones stay on disk while any of the 64 retained generations can reach them, until a later checkpoint releases them and compaction removes them. After a full reclamation and a clean shutdown, HStore is back to \M{hAdiskcompacted}, and HyperGraphDB is at \M{gAdiskcompacted}.
+
+\subsection{Reopen and recovery}
+
+A clean close and reopen takes \M{hAreopen} in HStore and \M{gAreopen} in HyperGraphDB (\M{ratioAreopen}). After the ingest process is killed with SIGKILL, opening the store takes \M{hArecover} and \M{gArecover} respectively. The ranges overlap, so we read recovery time as even. In every run of both systems, every node acknowledged before the kill was present after recovery.
+
+\subsection{Resources}
+\label{sec:resources}
+
+\begin{figure}[t]
+\centering
+\input{gen/fig-writes}
+\caption{Bytes written per operation, S1 async, median over runs (log scale). Writes include each system's log, data files, checkpoints and cleaning.}
+\label{fig:writes}
+\end{figure}
+
+\begin{table*}[t]
+\centering\footnotesize
+\caption{Resources per configuration, median over runs. HS: HStore, HG: HyperGraphDB. Space reclaimed is the drop in disk size across the compaction window; it is negative when the writer added more than the reclamation freed.}
+\label{tab:memory}
+\input{gen/resources}
+\end{table*}
+
+HStore writes fewer bytes per operation than HyperGraphDB in every write workload of every configuration (\cref{fig:writes} and \cref{app:full}). A single-update commit writes \M{bpoAhstorelatencycommit} in HStore and \M{bpoAhgdblatencycommit} in HyperGraphDB. A batched update writes \M{bpoAhstorewriteupdate} against \M{bpoAhgdbwriteupdate}. Over a whole run at scale 1, HStore wrote \M{totalwrittenAhstore} and HyperGraphDB \M{totalwrittenAhgdb}.
+
+\Cref{tab:memory} summarises memory and reclamation. HStore retained \M{retainedAhstore} of heap after ingest at scale 1, against \M{retainedAhgdb} for HyperGraphDB. Per-workload allocation and GC time are in \cref{app:full}. At scale 1, HStore allocates less per operation in every read workload and slightly more per inserted node and hyperedge, and it allocates more while recovering. At scale 4 it allocates more per member lookup and per two-hop query, the cache misses discussed in \cref{sec:scale4}.
+
+\input{sections/results-configs}

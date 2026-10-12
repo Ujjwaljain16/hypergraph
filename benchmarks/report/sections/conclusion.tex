@@ -1,0 +1,5 @@
+\section{Conclusion}
+
+At the storage level, HStore is faster than HyperGraphDB on the operations that hypergraph workloads repeat most: finding the hyperedges that contain a node, intersecting those sets, and updating values. It writes and stores far fewer bytes doing so. Its design gives a clear reason for each of these results, and the same design explains its main weakness. When the catalog does not fit in the node cache, member enumeration falls well behind HyperGraphDB, whose atom cache keeps links as arrays outside any byte budget. Synchronous commits are bound by the device in both systems. Crash recovery lost no acknowledged commit in either system.
+
+The numbers come from one laptop under load, and \cref{sec:validity} lists what that limits. The harness, the adapters, the raw results and the script that produced every table in this report are published with HStore, so each result can be checked or repeated on other hardware.
