@@ -4,12 +4,15 @@
 package io.hstore.engine.tree;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Spliterator;
 import java.util.Spliterators;
+import java.util.function.Consumer;
+import java.util.function.LongConsumer;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 import java.util.stream.LongStream;
@@ -190,7 +193,39 @@ public record Tree<V>(TreeSchema<V> schema, NodeSource source, Ref root) {
     }
 
     public LongStream keys() {
-        return stream().mapToLong(Entry::key);
+        TreeCursor<V> cursor = cursor();
+        return StreamSupport.longStream(new Spliterators.AbstractLongSpliterator(Long.MAX_VALUE,
+                Spliterator.ORDERED | Spliterator.DISTINCT | Spliterator.SORTED | Spliterator.NONNULL) {
+            @Override
+            public boolean tryAdvance(LongConsumer action) {
+                if (!cursor.hasNext()) {
+                    return false;
+                }
+                action.accept(cursor.key());
+                cursor.advance();
+                return true;
+            }
+
+            @Override
+            public void forEachRemaining(LongConsumer action) {
+                cursor.forEachRemainingKey(action);
+            }
+
+            @Override
+            public Comparator<? super Long> getComparator() {
+                return null;
+            }
+        }, false);
+    }
+
+    public void forEachKey(LongConsumer action) {
+        cursor().forEachRemainingKey(action);
+    }
+
+    public void forEachValue(Consumer<? super V> action) {
+        for (TreeCursor<V> cursor = cursor(); cursor.hasNext(); cursor.advance()) {
+            action.accept(cursor.value());
+        }
     }
 
     public Stream<V> values() {

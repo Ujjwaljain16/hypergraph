@@ -5,6 +5,9 @@ package io.hstore.engine.tree;
 
 final class Trees {
 
+    static final int INTERPOLATE_FROM = 16;
+    static final int INTERPOLATE_WINDOW = 8;
+
     private Trees() {
     }
 

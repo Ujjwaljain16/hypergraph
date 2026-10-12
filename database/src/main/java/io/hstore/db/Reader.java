@@ -32,6 +32,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.function.LongConsumer;
 import java.util.function.Predicate;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
@@ -201,6 +202,10 @@ public sealed class Reader permits Writer {
 
     public LongStream memberIds(long edge) {
         return edge(edge).memberIds();
+    }
+
+    public void forEachMemberId(long edge, LongConsumer action) {
+        edge(edge).forEachMemberId(action);
     }
 
     public Stream<Member> members(long edge, long validAt) {

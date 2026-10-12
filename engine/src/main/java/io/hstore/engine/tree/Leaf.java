@@ -65,6 +65,23 @@ public final class Leaf extends Node {
     }
 
     int search(long key) {
+        if (size >= Trees.INTERPOLATE_FROM) {
+            long low = keys[0];
+            long high = keys[size - 1];
+            if (key > low && key < high) {
+                int guess = Math.clamp((long) (((double) key - low) / ((double) high - low) * (size - 1)), 0, size - 1);
+                long found = keys[guess];
+                if (found == key) {
+                    return guess;
+                }
+                if (found < key) {
+                    int end = Math.min(size, guess + Trees.INTERPOLATE_WINDOW + 1);
+                    return keys[end - 1] >= key ? Arrays.binarySearch(keys, guess + 1, end, key) : Arrays.binarySearch(keys, end, size, key);
+                }
+                int start = Math.max(0, guess - Trees.INTERPOLATE_WINDOW);
+                return keys[start] <= key ? Arrays.binarySearch(keys, start, guess, key) : Arrays.binarySearch(keys, 0, start, key);
+            }
+        }
         return Arrays.binarySearch(keys, 0, size, key);
     }
 

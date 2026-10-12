@@ -3,7 +3,8 @@
 
 package io.hstore.engine.tree;
 
-import java.util.concurrent.ConcurrentHashMap;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -81,18 +82,88 @@ public final class NodeCache {
     }
 
     private static final class Shard {
-        private final ConcurrentHashMap<Long, Slot> entries = new ConcurrentHashMap<>();
+        private static final int MIN_TABLE = 64;
+        private static final Slot GONE = new Slot(0, null, 0);
+        private static final VarHandle SLOTS = MethodHandles.arrayElementVarHandle(Slot[].class);
+
         private final ReentrantLock admission = new ReentrantLock();
         private final long budget;
+        private volatile Slot[] table = new Slot[MIN_TABLE];
         private volatile long bytes;
+        private int live;
+        private int gone;
         private Slot hand;
 
         Shard(long budget) {
             this.budget = budget;
         }
 
+        private static int home(long pageId, int mask) {
+            return (int) Hashing.mix(pageId) & mask;
+        }
+
+        private Slot find(long pageId) {
+            Slot[] slots = table;
+            int mask = slots.length - 1;
+            for (int i = home(pageId, mask); ; i = (i + 1) & mask) {
+                Slot slot = (Slot) SLOTS.getAcquire(slots, i);
+                if (slot == null) {
+                    return null;
+                }
+                if (slot != GONE && slot.pageId == pageId) {
+                    return slot;
+                }
+            }
+        }
+
+        private void insert(Slot slot) {
+            if ((live + gone + 1) * 2 > table.length) {
+                rebuild(Math.max(MIN_TABLE, Integer.highestOneBit(Math.max(1, live + 1) * 4)));
+            }
+            Slot[] slots = table;
+            int mask = slots.length - 1;
+            int i = home(slot.pageId, mask);
+            while (slots[i] != null && slots[i] != GONE) {
+                i = (i + 1) & mask;
+            }
+            if (slots[i] == GONE) {
+                gone--;
+            }
+            SLOTS.setRelease(slots, i, slot);
+            live++;
+        }
+
+        private void remove(Slot slot) {
+            Slot[] slots = table;
+            int mask = slots.length - 1;
+            for (int i = home(slot.pageId, mask); slots[i] != null; i = (i + 1) & mask) {
+                if (slots[i] == slot) {
+                    SLOTS.setRelease(slots, i, GONE);
+                    live--;
+                    gone++;
+                    return;
+                }
+            }
+        }
+
+        private void rebuild(int capacity) {
+            Slot[] fresh = new Slot[capacity];
+            int mask = capacity - 1;
+            for (Slot slot : table) {
+                if (slot != null && slot != GONE) {
+                    int i = home(slot.pageId, mask);
+                    while (fresh[i] != null) {
+                        i = (i + 1) & mask;
+                    }
+                    fresh[i] = slot;
+                }
+            }
+            gone = 0;
+            table = fresh;
+        }
+
         Node get(long pageId) {
-            Slot slot = entries.get(pageId);
+            Slot slot = find(pageId);
             if (slot == null) {
                 return null;
             }
@@ -105,13 +176,13 @@ public final class NodeCache {
         void put(long pageId, Node node, int weight) {
             admission.lock();
             try {
-                Slot existing = entries.get(pageId);
+                Slot existing = find(pageId);
                 if (existing != null && existing.node == node) {
                     return;
                 }
                 if (existing != null) {
                     unlink(existing);
-                    entries.remove(pageId, existing);
+                    remove(existing);
                 }
                 if (weight > budget) {
                     return;
@@ -121,7 +192,7 @@ public final class NodeCache {
                 }
                 Slot slot = new Slot(pageId, node, weight);
                 link(slot);
-                entries.put(pageId, slot);
+                insert(slot);
             } finally {
                 admission.unlock();
             }
@@ -134,7 +205,7 @@ public final class NodeCache {
             }
             Slot victim = hand;
             unlink(victim);
-            entries.remove(victim.pageId, victim);
+            remove(victim);
         }
 
         private void link(Slot slot) {
@@ -169,7 +240,9 @@ public final class NodeCache {
         void clear() {
             admission.lock();
             try {
-                entries.clear();
+                table = new Slot[MIN_TABLE];
+                live = 0;
+                gone = 0;
                 hand = null;
                 bytes = 0;
             } finally {

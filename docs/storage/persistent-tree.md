@@ -35,7 +35,7 @@ Leaf                                   Branch
   Summary  summary   (volatile, recomputed lazily after mutation)
 ```
 
-**Routing.** `Branch.route(key)` binary-searches `separators[1..size-1]` for the last separator `<= key` and returns index 0 when there is none. `separators[0]` therefore never takes part in routing. A freshly grown root stores `Long.MIN_VALUE` there. When a branch is frozen (`Branch.frozenWith`), `separators[0]` is rewritten to the first child's `summary().min()`, so the encoded page carries its real lower bound and delta-encodes compactly.
+**Routing.** `Branch.route(key)` searches `separators[1..size-1]` for the last separator `<= key` and returns index 0 when there is none. In a branch with 16 or more children it first guesses the position from where `key` falls between the first and last separator, checks a window of 8 around the guess, and only then falls back to a binary search over what is left. Page numbers and atom ids are handed out in order, so the guess is usually right. `Leaf.search` does the same over a leaf's keys and returns exactly what `Arrays.binarySearch` would. `separators[0]` therefore never takes part in routing. A freshly grown root stores `Long.MIN_VALUE` there. When a branch is frozen (`Branch.frozenWith`), `separators[0]` is rewritten to the first child's `summary().min()`, so the encoded page carries its real lower bound and delta-encodes compactly.
 
 **Page budget.** `Layout.of(pageSize)` computes:
 
@@ -180,7 +180,9 @@ A `WriteScope` built with a `PageSink` (every `Transaction` has one) can spill c
 
 ### Cursors with summary pruning
 
-A `TreeCursor` (`TreeCursor.java`) keeps an explicit stack of up to 48 `(branch, slot)` pairs and is built with an `admit: Predicate<Summary>`. A child subtree is entered only if `admit.test(child.summary())`. Because the summary sits in the parent, a rejected subtree is skipped without I/O. Queries built on this:
+A `TreeCursor` (`TreeCursor.java`) keeps an explicit stack of `(branch, slot)` pairs, with room for four levels to start with and growing up to 48, and is built with an `admit: Predicate<Summary>`. A child subtree is entered only if `admit.test(child.summary())`. Because the summary sits in the parent, a rejected subtree is skipped without I/O. Queries built on this:
+
+`Tree.keys()`, `Tree.forEachKey` and `TreeCursor.forEachRemainingKey` walk the keys straight out of each leaf's `long[]` without building an `Entry` per key, and `Tree.forEachValue` does the same for values. Use them when only keys or only values are needed.
 
 | Query | Predicate |
 |---|---|
