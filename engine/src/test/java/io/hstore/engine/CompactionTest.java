@@ -73,7 +73,7 @@ class CompactionTest {
 
     @Test
     void retainedHistoryStaysReadableOnceItsSegmentsAreDeleted() {
-        EngineOptions options = options().withHistoryLimit(20);
+        EngineOptions options = options().withHistoryLimit(20).withCompactionLiveRatio(0.75);
         List<Long> written = Stream.iterate(500_000L, i -> i + 1).limit(2_000).toList();
         long large;
         long edge;

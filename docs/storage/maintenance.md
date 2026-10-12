@@ -268,6 +268,7 @@ History and pins are also what hold dead pages back. A page waits until every ge
 * magic, format, page identity and CRC-32C (`PageHeader.verify`);
 * the schema id against the tree being read (`NodeCodec.decode`);
 * strictly ascending keys in leaves;
+* for a packed leaf, that the header's refers-to-pages flag matches its records once all of them are decoded. Loading a packed leaf skips that comparison, because it would decode every record;
 * separators that route each child;
 * uniform height (balance);
 * every stored child summary equal to its recomputed contents;

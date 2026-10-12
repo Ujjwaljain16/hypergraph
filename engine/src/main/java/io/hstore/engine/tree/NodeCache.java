@@ -69,21 +69,23 @@ public final class NodeCache {
     private static final class Slot {
         final long pageId;
         final Node node;
-        final int bytes;
+        final int generation;
+        int bytes;
         volatile boolean referenced;
         Slot previous;
         Slot next;
 
-        Slot(long pageId, Node node, int bytes) {
+        Slot(long pageId, Node node, int bytes, int generation) {
             this.pageId = pageId;
             this.node = node;
             this.bytes = bytes;
+            this.generation = generation;
         }
     }
 
     private static final class Shard {
         private static final int MIN_TABLE = 64;
-        private static final Slot GONE = new Slot(0, null, 0);
+        private static final Slot GONE = new Slot(0, null, 0, -1);
         private static final VarHandle SLOTS = MethodHandles.arrayElementVarHandle(Slot[].class);
 
         private final ReentrantLock admission = new ReentrantLock();
@@ -92,6 +94,7 @@ public final class NodeCache {
         private volatile long bytes;
         private int live;
         private int gone;
+        private int generation;
         private Slot hand;
 
         Shard(long budget) {
@@ -190,9 +193,26 @@ public final class NodeCache {
                 while (bytes + weight > budget) {
                     evict();
                 }
-                Slot slot = new Slot(pageId, node, weight);
+                Slot slot = new Slot(pageId, node, weight, generation);
                 link(slot);
                 insert(slot);
+                node.chargeTo(grown -> charge(slot, grown));
+            } finally {
+                admission.unlock();
+            }
+        }
+
+        private void charge(Slot slot, int grown) {
+            admission.lock();
+            try {
+                if (slot.next == null || slot.generation != generation) {
+                    return;
+                }
+                slot.bytes += grown;
+                bytes += grown;
+                while (bytes > budget && hand != null) {
+                    evict();
+                }
             } finally {
                 admission.unlock();
             }
@@ -243,6 +263,7 @@ public final class NodeCache {
                 table = new Slot[MIN_TABLE];
                 live = 0;
                 gone = 0;
+                generation++;
                 hand = null;
                 bytes = 0;
             } finally {

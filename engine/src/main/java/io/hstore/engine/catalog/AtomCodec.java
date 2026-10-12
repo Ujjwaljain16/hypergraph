@@ -80,6 +80,11 @@ final class AtomCodec implements ValueCodec<AtomRecord> {
     }
 
     @Override
+    public boolean independentValues() {
+        return true;
+    }
+
+    @Override
     public boolean inlinesSmallTrees() {
         return true;
     }

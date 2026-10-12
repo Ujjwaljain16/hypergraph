@@ -406,6 +406,10 @@ class TreeTest {
         assertEquals(edge.contentHash(), inlined.contentHash());
         assertEquals(small.stream().toList(), new Tree<>(TopologySchemas.SET_MEMBERS, pages, inlined.members()).stream().toList());
         Leaf root = (Leaf) written.node(written.root());
+        int packedOnly = root.heapBytes();
+        assertEquals(inlined, root.value(0));
+        assertEquals(paged, root.value(1));
+        assertTrue(root.heapBytes() > packedOnly);
         Leaf bare = Leaf.decoded(EngineSlots.ATOM_SCHEMA, new long[]{1}, new Object[]{AtomRecord.EdgeRecord.of(2, EdgeKind.SET)}, null);
         assertTrue(root.heapBytes() >= bare.heapBytes() + ((Ref.Inline) inlined.members()).leaf().heapBytes());
     }

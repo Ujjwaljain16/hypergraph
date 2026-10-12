@@ -5,30 +5,67 @@ package io.hstore.engine.tree;
 
 import io.hstore.engine.page.ByteCursor;
 
+import java.lang.foreign.MemorySegment;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.AbstractList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.IntConsumer;
 import java.util.function.LongConsumer;
 
 public final class Leaf extends Node {
 
     private static final int ENTRY_HEAP_BYTES = 96;
+    private static final Object ABSENT = new Object();
+    private static final VarHandle UNPACKED_VALUES = MethodHandles.arrayElementVarHandle(Object[].class);
+    private static final VarHandle UNPACKED_BYTES;
+
+    static {
+        try {
+            UNPACKED_BYTES = MethodHandles.lookup().findVarHandle(Leaf.class, "unpackedBytes", int.class);
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
 
     private long[] keys;
     private Object[] values;
     private final long[] words;
+    private final MemorySegment packed;
+    private final int[] offsets;
+    private final boolean flaggedAsReferring;
     private int size;
     private int keyBytes;
     private int valueBytes;
+    private volatile boolean measured;
+    private volatile int unpackedBytes;
+    private volatile IntConsumer charge;
 
     private Leaf(TreeSchema<?> schema, Object owner, long[] keys, Object[] values, long[] words, int size, Summary summary) {
         super(schema, owner, summary);
         this.keys = keys;
         this.values = values;
         this.words = words;
+        this.packed = null;
+        this.offsets = null;
+        this.flaggedAsReferring = false;
         this.size = size;
-        remeasure();
+        if (owner != null) {
+            remeasure();
+        }
+    }
+
+    private Leaf(TreeSchema<?> schema, long[] keys, MemorySegment packed, int[] offsets, boolean flaggedAsReferring, Summary summary) {
+        super(schema, null, summary);
+        this.keys = keys;
+        this.values = new Object[keys.length];
+        this.words = null;
+        this.packed = packed;
+        this.offsets = offsets;
+        this.flaggedAsReferring = flaggedAsReferring;
+        this.size = keys.length;
     }
 
     private Leaf(TreeSchema<?> schema, Object owner, long[] keys, Object[] values, int size, Summary summary) {
@@ -47,6 +84,14 @@ public final class Leaf extends Node {
         return new Leaf(schema, null, keys, null, words, keys.length, summary);
     }
 
+    static Leaf packed(TreeSchema<?> schema, long[] keys, MemorySegment page, int[] offsets, boolean flaggedAsReferring, Summary summary) {
+        return new Leaf(schema, keys, page, offsets, flaggedAsReferring, summary);
+    }
+
+    boolean pageFlagMatches() {
+        return packed == null || flaggedAsReferring == NodeCodec.refersToPages(this);
+    }
+
     static int keyStreamBytes(long[] keys, int size) {
         if (size == 0) {
             return 0;
@@ -63,33 +108,58 @@ public final class Leaf extends Node {
     }
 
     private void remeasure() {
-        keyBytes = keyStreamBytes(keys, size);
-        valueBytes = 0;
+        int valueTotal = 0;
         for (int i = 0; i < size; i++) {
-            valueBytes += values != null ? schema.entryBytes(values[i]) : schema.impliedBytes(words[i]);
+            valueTotal += values != null ? schema.entryBytes(peek(i)) : schema.impliedBytes(words[i]);
+        }
+        keyBytes = keyStreamBytes(keys, size);
+        valueBytes = valueTotal;
+        measured = true;
+    }
+
+    private void measure() {
+        if (!measured) {
+            remeasure();
+        }
+    }
+
+    @Override
+    void chargeTo(IntConsumer charge) {
+        if (packed != null) {
+            this.charge = charge;
         }
     }
 
     @Override
     int heapBytes() {
+        if (packed != null) {
+            return NODE_HEAP_BYTES + 3 * ARRAY_HEAP_BYTES + Long.BYTES * keys.length + Integer.BYTES * (values.length + offsets.length)
+                    + Math.toIntExact(packed.byteSize()) + unpackedBytes;
+        }
         if (values == null) {
             return NODE_HEAP_BYTES + 2 * ARRAY_HEAP_BYTES + Long.BYTES * keys.length + (words == keys ? 0 : Long.BYTES * words.length);
         }
+        measure();
         int bytes = NODE_HEAP_BYTES + 2 * ARRAY_HEAP_BYTES + Long.BYTES * keys.length + Integer.BYTES * values.length
                 + ENTRY_HEAP_BYTES * size + valueBytes;
         return schema.codec().holdsRefs() ? bytes + inlineHeapBytes(schema) : bytes;
     }
 
     private <V> int inlineHeapBytes(TreeSchema<V> typed) {
+        int total = 0;
+        for (int i = 0; i < size; i++) {
+            total += inlineHeapBytes(typed, value(i));
+        }
+        return total;
+    }
+
+    private static <V> int inlineHeapBytes(TreeSchema<V> typed, Object value) {
         int[] total = new int[1];
-        ValueCodec.RefVisitor visitor = (ref, _) -> {
+        typed.codec().forEachRef(typed.cast(value), (ref, _) -> {
             if (ref instanceof Ref.Inline(Leaf inline)) {
                 total[0] += inline.heapBytes();
             }
-        };
-        for (int i = 0; i < size; i++) {
-            typed.codec().forEachRef(typed.cast(value(i)), visitor);
-        }
+        });
         return total[0];
     }
 
@@ -148,10 +218,55 @@ public final class Leaf extends Node {
 
     Object value(int index) {
         Object[] stored = values;
-        return stored != null ? stored[index] : schema.implied(words[index]);
+        if (stored == null) {
+            return schema.implied(words[index]);
+        }
+        if (packed == null) {
+            return stored[index];
+        }
+        Object unpacked = UNPACKED_VALUES.getAcquire(stored, index);
+        if (unpacked == null) {
+            unpacked = unpack(stored, index);
+        }
+        return unpacked == ABSENT ? null : unpacked;
+    }
+
+    private Object peek(int index) {
+        if (packed == null) {
+            return value(index);
+        }
+        Object unpacked = UNPACKED_VALUES.getAcquire(values, index);
+        if (unpacked == null) {
+            return decode(index);
+        }
+        return unpacked == ABSENT ? null : unpacked;
+    }
+
+    private Object decode(int index) {
+        Object[] decoded = new Object[1];
+        schema.codec().decode(ByteCursor.over(packed).position(offsets[index]), new long[]{keys[index]}, decoded);
+        return decoded[0];
+    }
+
+    private Object unpack(Object[] stored, int index) {
+        Object[] decoded = {decode(index)};
+        Object value = decoded[0] == null ? ABSENT : decoded[0];
+        Object raced = UNPACKED_VALUES.compareAndExchangeRelease(stored, index, null, value);
+        if (raced != null) {
+            return raced;
+        }
+        int grown = ENTRY_HEAP_BYTES + schema.entryBytes(decoded[0])
+                + (schema.codec().holdsRefs() ? inlineHeapBytes(schema, decoded[0]) : 0);
+        UNPACKED_BYTES.getAndAdd(this, grown);
+        IntConsumer target = charge;
+        if (target != null) {
+            target.accept(grown);
+        }
+        return value;
     }
 
     int bytes() {
+        measure();
         return keyBytes + valueBytes + schema.leafOverhead(size);
     }
 
@@ -195,17 +310,18 @@ public final class Leaf extends Node {
     }
 
     private Object[] valueArray(int capacity) {
-        if (values != null) {
+        if (values != null && packed == null) {
             return Arrays.copyOf(values, capacity);
         }
         Object[] copy = new Object[capacity];
         for (int i = 0; i < size; i++) {
-            copy[i] = value(i);
+            copy[i] = peek(i);
         }
         return copy;
     }
 
     void insert(int position, long key, Object value) {
+        measure();
         if (size == keys.length) {
             int capacity = Math.max(8, size + (size >> 1));
             keys = Arrays.copyOf(keys, capacity);
@@ -235,12 +351,14 @@ public final class Leaf extends Node {
     }
 
     void replace(int position, Object value) {
+        measure();
         valueBytes += schema.entryBytes(value) - schema.entryBytes(values[position]);
         values[position] = value;
         invalidate();
     }
 
     void remove(int position) {
+        measure();
         long key = keys[position];
         valueBytes -= schema.entryBytes(values[position]);
         System.arraycopy(keys, position + 1, keys, position, size - position - 1);

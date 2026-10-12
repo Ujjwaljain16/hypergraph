@@ -37,6 +37,10 @@ final class MemoryPages implements NodeSource {
         return tree.withRoot(materializer.materialize(tree.root(), tree.schema()));
     }
 
+    MemorySegment image(long pageId) {
+        return pages.get(pageId);
+    }
+
     @Override
     public Node load(long pageId, TreeSchema<?> schema) {
         loads++;

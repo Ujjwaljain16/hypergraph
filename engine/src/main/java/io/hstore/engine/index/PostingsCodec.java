@@ -98,6 +98,11 @@ final class PostingsCodec<P> implements ValueCodec<Postings<P>> {
     }
 
     @Override
+    public boolean independentValues() {
+        return true;
+    }
+
+    @Override
     public boolean refersToPages(Postings<P> value) {
         return value instanceof Postings.Promoted<P>(Ref root) && root instanceof Ref.Stored;
     }
