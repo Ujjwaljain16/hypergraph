@@ -49,7 +49,26 @@ class TxnIdReuseTest {
         }
     }
 
+    @Test
+    void transactionIdsAreNotReusedAfterACrash() {
+        long doomedId = crashDuringCommit(doomed -> doomed.createNode(EngineTest.NODE, "ghost"));
+
+        try (StorageEngine reopened = StorageEngine.open(directory, EngineTest.small())) {
+            Transaction next = reopened.begin();
+            long nextId = next.id();
+            next.abort();
+            assertTrue(nextId > doomedId, "transaction " + nextId + " reuses an id already in the log");
+        }
+    }
+
     private void crashDuringCommitThenCrashAgain(Consumer<Transaction> doomedWork) {
+        crashDuringCommit(doomedWork);
+        StorageEngine second = StorageEngine.open(directory, EngineTest.small());
+        second.write(txn -> txn.createNode(EngineTest.NODE, "real"));
+        second.halt();
+    }
+
+    private long crashDuringCommit(Consumer<Transaction> doomedWork) {
         AtomicBoolean armed = new AtomicBoolean(false);
         EngineOptions crashing = EngineTest.small().withFaults(reached -> {
             if (reached == CrashPoint.WAL_APPEND && armed.compareAndSet(true, false)) {
@@ -66,9 +85,6 @@ class TxnIdReuseTest {
         doomedWork.accept(doomed);
         assertThrows(CrashPoint.SimulatedCrash.class, doomed::commit);
         first.halt();
-
-        StorageEngine second = StorageEngine.open(directory, EngineTest.small());
-        second.write(txn -> txn.createNode(EngineTest.NODE, "real"));
-        second.halt();
+        return doomed.id();
     }
 }
