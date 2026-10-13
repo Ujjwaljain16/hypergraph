@@ -214,6 +214,8 @@ def latency_table(cfg, runs):
                     cells.append(fmt_us(med(v)) if v else "--")
                     if v:
                         macro(f"lat{key}{engine.replace('hypergraphdb', 'hgdb')}{workload.replace('.', '')}{PCT[p]}", fmt_us(med(v)))
+                        if p == "max":
+                            macro(f"lat{key}{engine.replace('hypergraphdb', 'hgdb')}{workload.replace('.', '')}worst", fmt_us(max(v)))
             if all(c == "--" for c in cells):
                 continue
             f.write(f"\\texttt{{{workload}}} & {label} & " + " & ".join(cells) + " \\\\\n")
