@@ -166,10 +166,10 @@ configured (see *Setup*).
 
 ## Results
 
-These results come from HStore at commit `459b8be`, on the machine described in *Setup*, with both caches set to
+These results come from HStore at commit `9291e18`, on the machine described in *Setup*, with both caches set to
 64 MiB (`CACHE_MB=64`) and `THREADS=8`. Scale 1 ran 5 times per store in each durability mode, and scale 4 ran 3
 times. Each cell is the median, with the slowest and fastest run in brackets. The machine was running other
-work: sampled before each run, the one-minute load average was between 4.4 and 16.7 on 10 cores. Where the
+work: sampled before each run, the one-minute load average was between 3.4 and 18.3 on 10 cores. Where the
 bracketed ranges of the two stores overlap, treat the ratio as a tendency rather than a measured difference.
 
 The [benchmark report](benchmark-report.pdf) has the full method, every table for all three configurations
@@ -185,59 +185,59 @@ Dataset: 50,000 nodes, 100,000 hyperedges, 362,757 incidences; durability async;
 
 | Workload | HStore | HyperGraphDB | Ratio of medians | Results agree |
 |---|---:|---:|---:|:---:|
-| `ingest.nodes`: insert nodes in transactions of 1,000 | 45,124 ops/s (32,919 to 66,106) | 24,930 ops/s (11,229 to 33,032) | **1.81×** | yes |
-| `ingest.edges`: insert hyperedges (mean cardinality 3.6) in transactions of 1,000 | 28,198 ops/s (22,543 to 37,283) | 22,500 ops/s (11,053 to 35,992) | **1.25×** | yes |
-| `read.incidence`: enumerate the incidence set of a node | 7,472,143 ops/s (3,997,182 to 7,630,311) | 739,484 ops/s (221,944 to 927,800) | **10.10×** | yes |
-| `read.members`: enumerate the members of a hyperedge | 3,694,075 ops/s (1,529,065 to 5,202,587) | 1,702,172 ops/s (482,769 to 2,220,779) | **2.17×** | yes |
-| `read.comembership`: count hyperedges containing both atoms of a pair | 447,789 ops/s (127,231 to 651,937) | 32,538 ops/s (18,486 to 54,813) | **13.76×** | yes |
-| `read.twohop`: count the distinct nodes that share a hyperedge with a node | 301,232 ops/s (240,766 to 347,622) | 74,579 ops/s (18,598 to 130,603) | **4.04×** | yes |
-| `read.incidence.parallel`: incidence sets from 8 threads, 100,000 probes each | 24,439,172 ops/s (17,134,244 to 34,798,935) | 1,691,919 ops/s (637,312 to 2,175,513) | **14.44×** | yes |
-| `latency.read`: one incidence lookup per read transaction | 2,809,235 ops/s (1,970,735 to 3,462,394) | 269,377 ops/s (106,860 to 337,642) | **10.43×** | yes |
-| `write.update`: replace a node value in transactions of 1,000 | 78,091 ops/s (53,208 to 82,882) | 5,111 ops/s (2,905 to 8,739) | **15.28×** | yes |
-| `latency.commit`: one node update per write transaction | 7,865 ops/s (5,340 to 13,622) | 5,798 ops/s (4,560 to 9,591) | **1.36×** | yes |
-| `mixed.read`: single incidence lookups from 7 readers while one writer commits 10 updates at a time, targeting 1,000 updates/s | 1,872,082 ops/s (1,782,768 to 2,529,519) | 761,958 ops/s (316,836 to 1,021,256) | **2.46×** | n/a |
-| `mixed.write`: updates committed by the writer alongside the readers | 1,000 ops/s (996 to 1,000) | 1,000 ops/s (795 to 1,000) | **1.00×** | n/a |
-| `large.ingest`: create one hyperedge with 50,000 members | 439,642 ops/s (261,929 to 480,878) | 35,654 ops/s (13,771 to 54,078) | **12.33×** | yes |
-| `large.scan`: enumerate all members of the large hyperedge (x400, after a warm-up) | 2,259,599,768 ops/s (1,700,065,878 to 3,729,893,079) | 610,672,274 ops/s (308,735,077 to 1,170,263,579) | **3.70×** | yes |
-| `large.probe`: test whether a node belongs to the large hyperedge | 15,623,882 ops/s (2,535,875 to 19,290,897) | 771,891 ops/s (251,952 to 1,073,301) | **20.24×** | yes |
-| `reopen`: close and reopen the database, including recovery | 121 ms (116 to 373) | 1,369 ms (940 to 2,088) | **11.31×** | yes |
-| `read.incidence.cold`: incidence sets immediately after reopening | 2,761,318 ops/s (277,983 to 3,026,066) | 41,898 ops/s (15,486 to 55,249) | **65.91×** | yes |
-| `disk`: bytes on disk after a clean shutdown | 91.2 MiB (91.1 to 93.2) | 432.2 MiB (374.2 to 535.2) | **4.74×** | yes |
-| `churn.delete`: delete 20,000 hyperedges (20%) in transactions of 1,000 | 16,291 ops/s (6,055 to 20,524) | 2,986 ops/s (1,565 to 6,388) | **5.46×** | yes |
-| `churn.remove`: remove one member from each of 20,000 other hyperedges, 1,000 per transaction | 24,365 ops/s (14,469 to 33,208) | 8,119 ops/s (5,676 to 15,599) | **3.00×** | yes |
-| `read.incidence.churned`: enumerate incidence sets after the deletes | 6,888,001 ops/s (2,626,571 to 7,491,198) | 1,107,018 ops/s (785,085 to 2,403,497) | **6.22×** | yes |
-| `disk.churned`: bytes on disk after the deletes and a clean shutdown | 119.8 MiB (115.9 to 129.7) | 293.3 MiB (261.2 to 348.9) | **2.45×** | yes |
-| `disk.compacted`: bytes on disk after a full compaction and a clean shutdown | 90.8 MiB (90.8 to 90.8) | 273.5 MiB (204.0 to 290.7) | **3.01×** | yes |
-| `recover`: open the store after killing the ingest process with SIGKILL | 128 ms (107 to 356) | 132 ms (82 to 157) | **1.03×** | n/a |
+| `ingest.nodes`: insert nodes in transactions of 1,000 | 67,741 ops/s (51,067 to 72,960) | 37,664 ops/s (32,804 to 40,002) | **1.80×** | yes |
+| `ingest.edges`: insert hyperedges (mean cardinality 3.6) in transactions of 1,000 | 50,042 ops/s (42,339 to 54,792) | 34,971 ops/s (33,281 to 39,454) | **1.43×** | yes |
+| `read.incidence`: enumerate the incidence set of a node | 6,263,882 ops/s (3,838,956 to 8,193,140) | 1,489,214 ops/s (1,399,430 to 1,585,233) | **4.21×** | yes |
+| `read.members`: enumerate the members of a hyperedge | 6,114,743 ops/s (2,146,691 to 6,408,134) | 2,663,119 ops/s (1,620,982 to 3,486,067) | **2.30×** | yes |
+| `read.comembership`: count hyperedges containing both atoms of a pair | 610,291 ops/s (560,312 to 788,357) | 53,899 ops/s (2,236 to 76,650) | **11.32×** | yes |
+| `read.twohop`: count the distinct nodes that share a hyperedge with a node | 543,317 ops/s (335,820 to 574,014) | 98,274 ops/s (71,007 to 148,759) | **5.53×** | yes |
+| `read.incidence.parallel`: incidence sets from 8 threads, 100,000 probes each | 36,557,085 ops/s (20,950,132 to 40,593,168) | 2,246,677 ops/s (1,947,200 to 2,675,350) | **16.27×** | yes |
+| `latency.read`: one incidence lookup per read transaction | 3,833,633 ops/s (2,414,108 to 4,720,358) | 456,998 ops/s (372,257 to 558,321) | **8.39×** | yes |
+| `write.update`: replace a node value in transactions of 1,000 | 69,879 ops/s (50,256 to 108,002) | 12,986 ops/s (10,565 to 19,117) | **5.38×** | yes |
+| `latency.commit`: one node update per write transaction | 12,387 ops/s (10,410 to 14,893) | 14,088 ops/s (7,229 to 24,612) | **0.88×** | yes |
+| `mixed.read`: single incidence lookups from 7 readers while one writer commits 10 updates at a time, targeting 1,000 updates/s | 2,457,466 ops/s (2,368,477 to 2,542,025) | 1,131,996 ops/s (1,059,891 to 1,199,589) | **2.17×** | n/a |
+| `mixed.write`: updates committed by the writer alongside the readers | 1,000 ops/s (1,000 to 1,000) | 1,000 ops/s (999 to 1,000) | **1.00×** | n/a |
+| `large.ingest`: create one hyperedge with 50,000 members | 610,120 ops/s (286,715 to 755,104) | 116,290 ops/s (83,926 to 136,066) | **5.25×** | yes |
+| `large.scan`: enumerate all members of the large hyperedge (x400, after a warm-up) | 4,048,958,385 ops/s (3,507,028,260 to 4,912,948,690) | 1,122,938,397 ops/s (590,299,171 to 1,296,824,104) | **3.61×** | yes |
+| `large.probe`: test whether a node belongs to the large hyperedge | 17,214,296 ops/s (9,625,064 to 19,639,451) | 1,824,713 ops/s (865,555 to 2,056,360) | **9.43×** | yes |
+| `reopen`: close and reopen the database, including recovery | 111 ms (107 to 131) | 924 ms (674 to 1,361) | **8.29×** | yes |
+| `read.incidence.cold`: incidence sets immediately after reopening | 4,044,844 ops/s (3,458,866 to 4,142,345) | 95,895 ops/s (89,040 to 136,966) | **42.18×** | yes |
+| `disk`: bytes on disk after a clean shutdown | 92.4 MiB (90.4 to 92.6) | 346.4 MiB (289.6 to 371.8) | **3.75×** | yes |
+| `churn.delete`: delete 20,000 hyperedges (20%) in transactions of 1,000 | 24,490 ops/s (20,169 to 29,917) | 7,904 ops/s (5,925 to 9,130) | **3.10×** | yes |
+| `churn.remove`: remove one member from each of 20,000 other hyperedges, 1,000 per transaction | 43,155 ops/s (39,001 to 49,663) | 17,477 ops/s (16,078 to 19,754) | **2.47×** | yes |
+| `read.incidence.churned`: enumerate incidence sets after the deletes | 8,398,538 ops/s (7,852,427 to 9,263,154) | 2,104,833 ops/s (932,051 to 2,516,987) | **3.99×** | yes |
+| `disk.churned`: bytes on disk after the deletes and a clean shutdown | 117.1 MiB (114.1 to 117.9) | 219.8 MiB (203.2 to 302.1) | **1.88×** | yes |
+| `disk.compacted`: bytes on disk after a full compaction and a clean shutdown | 91.2 MiB (91.2 to 91.2) | 198.1 MiB (188.1 to 265.7) | **2.17×** | yes |
+| `recover`: open the store after killing the ingest process with SIGKILL | 128 ms (106 to 153) | 76 ms (61 to 88) | **0.59×** | n/a |
 
 Latency of single operations, median of each percentile across runs:
 
 | Workload | Percentile | HStore | HyperGraphDB | Ratio |
 |---|---|---:|---:|---:|
-| `latency.read` | p50 | 0.3 µs | 1.6 µs | **4.76×** |
-| `latency.read` | p99 | 1.2 µs | 26.3 µs | **22.53×** |
-| `latency.read` | p99.9 | 5.2 µs | 207.0 µs | **40.05×** |
-| `latency.read` | max | 57.8 µs | 7.29 ms | **126.09×** |
-| `latency.commit` | p50 | 85.1 µs | 91.5 µs | **1.07×** |
-| `latency.commit` | p99 | 429.6 µs | 1.08 ms | **2.52×** |
-| `latency.commit` | p99.9 | 1.62 ms | 5.02 ms | **3.09×** |
-| `latency.commit` | max | 8.79 ms | 25.56 ms | **2.91×** |
-| `mixed.read` | p50 | 1.6 µs | 2.9 µs | **1.77×** |
-| `mixed.read` | p99 | 12.7 µs | 73.6 µs | **5.81×** |
-| `mixed.read` | p99.9 | 57.4 µs | 1.03 ms | **17.93×** |
-| `mixed.read` | max | 51.62 ms | 87.42 ms | **1.69×** |
-| `mixed.write` | p50 | 3.09 ms | 4.85 ms | **1.57×** |
-| `mixed.write` | p99 | 16.70 ms | 80.12 ms | **4.80×** |
-| `mixed.write` | p99.9 | 46.96 ms | 110.43 ms | **2.35×** |
-| `mixed.write` | max | 46.96 ms | 110.43 ms | **2.35×** |
-| `compaction.baseline` | p50 | 5.06 ms | 4.87 ms | **0.96×** |
-| `compaction.baseline` | p99 | 9.63 ms | 27.99 ms | **2.91×** |
-| `compaction.baseline` | p99.9 | 10.60 ms | 52.86 ms | **4.99×** |
-| `compaction.baseline` | max | 10.60 ms | 52.86 ms | **4.99×** |
-| `compaction` | p50 | 5.15 ms | 5.11 ms | **0.99×** |
-| `compaction` | p99 | 9.39 ms | 13.32 ms | **1.42×** |
-| `compaction` | p99.9 | 16.03 ms | 33.70 ms | **2.10×** |
-| `compaction` | max | 16.03 ms | 33.70 ms | **2.10×** |
+| `latency.read` | p50 | 0.2 µs | 0.9 µs | **4.39×** |
+| `latency.read` | p99 | 0.5 µs | 12.7 µs | **25.33×** |
+| `latency.read` | p99.9 | 1.5 µs | 22.6 µs | **15.06×** |
+| `latency.read` | max | 44.0 µs | 1.06 ms | **24.16×** |
+| `latency.commit` | p50 | 52.0 µs | 45.5 µs | **0.87×** |
+| `latency.commit` | p99 | 295.7 µs | 465.5 µs | **1.57×** |
+| `latency.commit` | p99.9 | 441.0 µs | 936.1 µs | **2.12×** |
+| `latency.commit` | max | 1.85 ms | 7.36 ms | **3.98×** |
+| `mixed.read` | p50 | 1.8 µs | 3.3 µs | **1.86×** |
+| `mixed.read` | p99 | 10.5 µs | 54.5 µs | **5.21×** |
+| `mixed.read` | p99.9 | 25.7 µs | 305.5 µs | **11.90×** |
+| `mixed.read` | max | 28.51 ms | 28.50 ms | **1.00×** |
+| `mixed.write` | p50 | 2.33 ms | 2.90 ms | **1.25×** |
+| `mixed.write` | p99 | 9.65 ms | 16.94 ms | **1.75×** |
+| `mixed.write` | p99.9 | 22.02 ms | 34.41 ms | **1.56×** |
+| `mixed.write` | max | 22.02 ms | 34.41 ms | **1.56×** |
+| `compaction.baseline` | p50 | 3.31 ms | 3.36 ms | **1.02×** |
+| `compaction.baseline` | p99 | 5.43 ms | 7.50 ms | **1.38×** |
+| `compaction.baseline` | p99.9 | 8.80 ms | 10.52 ms | **1.20×** |
+| `compaction.baseline` | max | 8.80 ms | 10.52 ms | **1.20×** |
+| `compaction` | p50 | 3.36 ms | 3.24 ms | **0.97×** |
+| `compaction` | p99 | 5.44 ms | 11.59 ms | **2.13×** |
+| `compaction` | p99.9 | 6.17 ms | 84.26 ms | **13.66×** |
+| `compaction` | max | 6.17 ms | 84.26 ms | **13.66×** |
 
 ### Scale 1, `sync` durability
 
@@ -245,30 +245,30 @@ Dataset: 50,000 nodes, 100,000 hyperedges, 362,757 incidences; durability sync; 
 
 | Workload | HStore | HyperGraphDB | Ratio of medians | Results agree |
 |---|---:|---:|---:|:---:|
-| `ingest.nodes`: insert nodes in transactions of 1,000 | 29,660 ops/s (22,199 to 31,465) | 12,627 ops/s (9,260 to 15,596) | **2.35×** | yes |
-| `ingest.edges`: insert hyperedges (mean cardinality 3.6) in transactions of 1,000 | 19,884 ops/s (5,121 to 25,199) | 16,377 ops/s (11,336 to 19,379) | **1.21×** | yes |
-| `read.incidence`: enumerate the incidence set of a node | 3,662,400 ops/s (722,841 to 4,402,272) | 384,637 ops/s (202,508 to 541,974) | **9.52×** | yes |
-| `read.members`: enumerate the members of a hyperedge | 2,553,373 ops/s (1,283,576 to 2,708,706) | 1,176,098 ops/s (605,219 to 1,606,077) | **2.17×** | yes |
-| `read.comembership`: count hyperedges containing both atoms of a pair | 268,955 ops/s (73,128 to 359,769) | 9,264 ops/s (6,602 to 22,363) | **29.03×** | yes |
-| `read.twohop`: count the distinct nodes that share a hyperedge with a node | 174,383 ops/s (112,165 to 239,400) | 38,159 ops/s (14,753 to 62,344) | **4.57×** | yes |
-| `read.incidence.parallel`: incidence sets from 8 threads, 100,000 probes each | 7,889,212 ops/s (3,865,167 to 17,032,178) | 942,062 ops/s (626,685 to 1,698,089) | **8.37×** | yes |
-| `latency.read`: one incidence lookup per read transaction | 1,807,100 ops/s (601,842 to 2,270,977) | 222,231 ops/s (170,393 to 251,137) | **8.13×** | yes |
-| `write.update`: replace a node value in transactions of 1,000 | 40,288 ops/s (6,028 to 50,806) | 3,600 ops/s (2,741 to 4,556) | **11.19×** | yes |
-| `latency.commit`: one node update per write transaction | 250 ops/s (238 to 255) | 203 ops/s (160 to 216) | **1.23×** | yes |
-| `mixed.read`: single incidence lookups from 7 readers while one writer commits 10 updates at a time, targeting 1,000 updates/s | 1,583,174 ops/s (1,248,493 to 1,633,918) | 623,680 ops/s (528,806 to 731,169) | **2.54×** | n/a |
-| `mixed.write`: updates committed by the writer alongside the readers | 1,000 ops/s (999 to 1,000) | 973 ops/s (937 to 1,000) | **1.03×** | n/a |
-| `large.ingest`: create one hyperedge with 50,000 members | 264,836 ops/s (100,131 to 348,720) | 28,912 ops/s (18,611 to 59,305) | **9.16×** | yes |
-| `large.scan`: enumerate all members of the large hyperedge (x400, after a warm-up) | 1,793,205,884 ops/s (1,362,030,591 to 2,533,074,993) | 401,183,491 ops/s (209,074,988 to 495,719,770) | **4.47×** | yes |
-| `large.probe`: test whether a node belongs to the large hyperedge | 9,596,123 ops/s (7,711,041 to 10,334,359) | 867,374 ops/s (123,150 to 1,185,144) | **11.06×** | yes |
-| `reopen`: close and reopen the database, including recovery | 165 ms (146 to 166) | 1,274 ms (1,016 to 2,417) | **7.73×** | yes |
-| `read.incidence.cold`: incidence sets immediately after reopening | 1,920,287 ops/s (1,498,046 to 2,097,403) | 35,738 ops/s (19,627 to 47,057) | **53.73×** | yes |
-| `disk`: bytes on disk after a clean shutdown | 91.2 MiB (90.7 to 92.7) | 350.9 MiB (341.1 to 429.2) | **3.85×** | yes |
-| `churn.delete`: delete 20,000 hyperedges (20%) in transactions of 1,000 | 10,529 ops/s (7,705 to 14,811) | 2,326 ops/s (2,045 to 3,494) | **4.53×** | yes |
-| `churn.remove`: remove one member from each of 20,000 other hyperedges, 1,000 per transaction | 21,722 ops/s (7,640 to 26,595) | 6,392 ops/s (4,632 to 8,894) | **3.40×** | yes |
-| `read.incidence.churned`: enumerate incidence sets after the deletes | 4,178,629 ops/s (3,906,256 to 4,731,898) | 832,358 ops/s (239,476 to 1,283,097) | **5.02×** | yes |
-| `disk.churned`: bytes on disk after the deletes and a clean shutdown | 123.6 MiB (121.6 to 128.4) | 278.1 MiB (259.0 to 359.5) | **2.25×** | yes |
-| `disk.compacted`: bytes on disk after a full compaction and a clean shutdown | 90.8 MiB (90.8 to 90.8) | 235.4 MiB (230.3 to 268.1) | **2.59×** | yes |
-| `recover`: open the store after killing the ingest process with SIGKILL | 191 ms (156 to 1,646) | 139 ms (123 to 171) | **0.73×** | n/a |
+| `ingest.nodes`: insert nodes in transactions of 1,000 | 55,831 ops/s (25,612 to 60,845) | 30,898 ops/s (25,247 to 33,003) | **1.81×** | yes |
+| `ingest.edges`: insert hyperedges (mean cardinality 3.6) in transactions of 1,000 | 37,061 ops/s (16,880 to 43,465) | 29,575 ops/s (13,674 to 32,075) | **1.25×** | yes |
+| `read.incidence`: enumerate the incidence set of a node | 6,914,354 ops/s (2,181,969 to 8,485,453) | 997,154 ops/s (455,024 to 1,403,695) | **6.93×** | yes |
+| `read.members`: enumerate the members of a hyperedge | 5,423,092 ops/s (2,346,275 to 6,910,830) | 2,378,494 ops/s (1,139,475 to 3,352,302) | **2.28×** | yes |
+| `read.comembership`: count hyperedges containing both atoms of a pair | 623,412 ops/s (225,960 to 750,270) | 40,468 ops/s (28,205 to 76,472) | **15.41×** | yes |
+| `read.twohop`: count the distinct nodes that share a hyperedge with a node | 349,091 ops/s (212,259 to 575,284) | 104,597 ops/s (68,930 to 118,502) | **3.34×** | yes |
+| `read.incidence.parallel`: incidence sets from 8 threads, 100,000 probes each | 26,820,024 ops/s (8,343,759 to 41,000,847) | 1,959,562 ops/s (1,354,823 to 2,040,085) | **13.69×** | yes |
+| `latency.read`: one incidence lookup per read transaction | 3,592,293 ops/s (1,615,246 to 4,602,083) | 437,799 ops/s (274,315 to 695,056) | **8.21×** | yes |
+| `write.update`: replace a node value in transactions of 1,000 | 64,088 ops/s (42,466 to 77,527) | 8,736 ops/s (3,640 to 10,551) | **7.34×** | yes |
+| `latency.commit`: one node update per write transaction | 258 ops/s (244 to 260) | 236 ops/s (229 to 237) | **1.09×** | yes |
+| `mixed.read`: single incidence lookups from 7 readers while one writer commits 10 updates at a time, targeting 1,000 updates/s | 2,283,312 ops/s (1,936,304 to 2,346,786) | 1,048,371 ops/s (885,124 to 1,088,745) | **2.18×** | n/a |
+| `mixed.write`: updates committed by the writer alongside the readers | 1,000 ops/s (1,000 to 1,000) | 1,000 ops/s (1,000 to 1,000) | **1.00×** | n/a |
+| `large.ingest`: create one hyperedge with 50,000 members | 611,622 ops/s (330,705 to 701,290) | 68,501 ops/s (44,204 to 124,867) | **8.93×** | yes |
+| `large.scan`: enumerate all members of the large hyperedge (x400, after a warm-up) | 3,856,784,479 ops/s (1,065,939,440 to 4,213,853,042) | 921,639,492 ops/s (673,177,777 to 1,080,788,976) | **4.18×** | yes |
+| `large.probe`: test whether a node belongs to the large hyperedge | 11,861,283 ops/s (8,958,098 to 17,241,257) | 1,229,677 ops/s (819,877 to 1,814,296) | **9.65×** | yes |
+| `reopen`: close and reopen the database, including recovery | 128 ms (119 to 148) | 1,077 ms (858 to 1,245) | **8.44×** | yes |
+| `read.incidence.cold`: incidence sets immediately after reopening | 2,929,216 ops/s (2,168,586 to 4,181,768) | 104,708 ops/s (94,852 to 142,580) | **27.98×** | yes |
+| `disk`: bytes on disk after a clean shutdown | 93.3 MiB (91.8 to 93.7) | 321.7 MiB (305.6 to 350.8) | **3.45×** | yes |
+| `churn.delete`: delete 20,000 hyperedges (20%) in transactions of 1,000 | 26,928 ops/s (10,040 to 28,095) | 5,485 ops/s (4,237 to 8,294) | **4.91×** | yes |
+| `churn.remove`: remove one member from each of 20,000 other hyperedges, 1,000 per transaction | 36,834 ops/s (21,182 to 40,925) | 11,888 ops/s (9,157 to 14,220) | **3.10×** | yes |
+| `read.incidence.churned`: enumerate incidence sets after the deletes | 8,441,520 ops/s (6,577,667 to 9,027,409) | 1,129,728 ops/s (982,393 to 1,799,620) | **7.47×** | yes |
+| `disk.churned`: bytes on disk after the deletes and a clean shutdown | 118.5 MiB (117.1 to 127.5) | 256.5 MiB (195.4 to 276.1) | **2.17×** | yes |
+| `disk.compacted`: bytes on disk after a full compaction and a clean shutdown | 91.2 MiB (91.2 to 91.2) | 190.4 MiB (182.5 to 277.1) | **2.09×** | yes |
+| `recover`: open the store after killing the ingest process with SIGKILL | 113 ms (107 to 184) | 78 ms (54 to 78) | **0.69×** | n/a |
 
 ### Scale 4, `async` durability
 
@@ -276,80 +276,109 @@ Dataset: 200,000 nodes, 400,000 hyperedges, 1,453,427 incidences; durability asy
 
 | Workload | HStore | HyperGraphDB | Ratio of medians | Results agree |
 |---|---:|---:|---:|:---:|
-| `ingest.nodes`: insert nodes in transactions of 1,000 | 27,056 ops/s (23,106 to 54,381) | 21,380 ops/s (18,088 to 39,804) | **1.27×** | yes |
-| `ingest.edges`: insert hyperedges (mean cardinality 3.6) in transactions of 1,000 | 11,696 ops/s (8,388 to 29,131) | 1,903 ops/s (1,370 to 2,876) | **6.15×** | yes |
-| `read.incidence`: enumerate the incidence set of a node | 2,658,726 ops/s (721,371 to 3,508,844) | 1,005,595 ops/s (466,163 to 1,020,410) | **2.64×** | yes |
-| `read.members`: enumerate the members of a hyperedge | 218,369 ops/s (164,400 to 441,827) | 1,719,353 ops/s (1,087,218 to 2,715,851) | **0.13×** | yes |
-| `read.comembership`: count hyperedges containing both atoms of a pair | 390,285 ops/s (245,706 to 685,369) | 45,277 ops/s (2,502 to 64,982) | **8.62×** | yes |
-| `read.twohop`: count the distinct nodes that share a hyperedge with a node | 15,008 ops/s (8,947 to 22,517) | 78,094 ops/s (21,417 to 98,666) | **0.19×** | yes |
-| `read.incidence.parallel`: incidence sets from 8 threads, 100,000 probes each | 5,180,283 ops/s (4,054,032 to 24,383,863) | 1,784,381 ops/s (1,044,917 to 1,855,868) | **2.90×** | yes |
-| `latency.read`: one incidence lookup per read transaction | 1,151,517 ops/s (1,025,897 to 2,794,408) | 364,075 ops/s (120,193 to 368,730) | **3.16×** | yes |
-| `write.update`: replace a node value in transactions of 1,000 | 20,793 ops/s (11,713 to 64,932) | 1,240 ops/s (1,046 to 2,486) | **16.77×** | yes |
-| `latency.commit`: one node update per write transaction | 5,210 ops/s (1,503 to 12,178) | 2,017 ops/s (1,384 to 2,540) | **2.58×** | yes |
-| `mixed.read`: single incidence lookups from 7 readers while one writer commits 10 updates at a time, targeting 1,000 updates/s | 1,762,368 ops/s (1,350,450 to 2,098,567) | 883,741 ops/s (535,366 to 1,019,176) | **1.99×** | n/a |
-| `mixed.write`: updates committed by the writer alongside the readers | 1,000 ops/s (1,000 to 1,000) | 1,000 ops/s (897 to 1,000) | **1.00×** | n/a |
-| `large.ingest`: create one hyperedge with 200,000 members | 212,654 ops/s (148,736 to 632,034) | 12,629 ops/s (7,597 to 13,984) | **16.84×** | yes |
-| `large.scan`: enumerate all members of the large hyperedge (x400, after a warm-up) | 1,598,891,425 ops/s (933,830,793 to 2,831,060,900) | 564,337,071 ops/s (89,028,350 to 642,985,381) | **2.83×** | yes |
-| `large.probe`: test whether a node belongs to the large hyperedge | 6,819,112 ops/s (2,350,931 to 17,020,914) | 991,137 ops/s (952,611 to 1,137,921) | **6.88×** | yes |
-| `reopen`: close and reopen the database, including recovery | 238 ms (127 to 313) | 1,210 ms (914 to 1,569) | **5.09×** | yes |
-| `read.incidence.cold`: incidence sets immediately after reopening | 346,015 ops/s (286,676 to 1,825,463) | 11,832 ops/s (6,048 to 15,298) | **29.24×** | yes |
-| `disk`: bytes on disk after a clean shutdown | 165.1 MiB (163.2 to 165.2) | 2366.0 MiB (2233.5 to 2377.7) | **14.33×** | yes |
-| `churn.delete`: delete 80,000 hyperedges (20%) in transactions of 1,000 | 2,090 ops/s (1,534 to 5,016) | 1,487 ops/s (885 to 1,857) | **1.41×** | yes |
-| `churn.remove`: remove one member from each of 20,000 other hyperedges, 1,000 per transaction | 2,828 ops/s (2,449 to 7,564) | 2,684 ops/s (1,730 to 3,572) | **1.05×** | yes |
-| `read.incidence.churned`: enumerate incidence sets after the deletes | 3,450,581 ops/s (2,866,935 to 6,637,792) | 777,091 ops/s (767,716 to 1,148,418) | **4.44×** | yes |
-| `disk.churned`: bytes on disk after the deletes and a clean shutdown | 1140.8 MiB (1140.8 to 1142.8) | 1875.4 MiB (1869.6 to 1945.4) | **1.64×** | yes |
-| `disk.compacted`: bytes on disk after a full compaction and a clean shutdown | 162.6 MiB (162.6 to 162.7) | 1177.7 MiB (1168.7 to 1216.8) | **7.24×** | yes |
-| `recover`: open the store after killing the ingest process with SIGKILL | 203 ms (177 to 403) | 545 ms (362 to 1,214) | **2.69×** | n/a |
+| `ingest.nodes`: insert nodes in transactions of 1,000 | 40,009 ops/s (33,982 to 57,601) | 28,712 ops/s (26,707 to 38,938) | **1.39×** | yes |
+| `ingest.edges`: insert hyperedges (mean cardinality 3.6) in transactions of 1,000 | 21,132 ops/s (19,987 to 27,311) | 2,050 ops/s (1,725 to 2,736) | **10.31×** | yes |
+| `read.incidence`: enumerate the incidence set of a node | 6,567,839 ops/s (6,370,914 to 7,065,286) | 574,929 ops/s (549,276 to 1,290,467) | **11.42×** | yes |
+| `read.members`: enumerate the members of a hyperedge | 5,575,872 ops/s (4,558,084 to 5,931,873) | 1,731,668 ops/s (1,449,441 to 1,834,122) | **3.22×** | yes |
+| `read.comembership`: count hyperedges containing both atoms of a pair | 357,920 ops/s (306,442 to 380,508) | 18,128 ops/s (17,264 to 53,840) | **19.74×** | yes |
+| `read.twohop`: count the distinct nodes that share a hyperedge with a node | 311,293 ops/s (226,920 to 397,015) | 71,578 ops/s (46,798 to 96,728) | **4.35×** | yes |
+| `read.incidence.parallel`: incidence sets from 8 threads, 100,000 probes each | 14,848,396 ops/s (9,710,034 to 17,930,486) | 1,459,037 ops/s (1,355,328 to 1,835,461) | **10.18×** | yes |
+| `latency.read`: one incidence lookup per read transaction | 2,358,391 ops/s (1,510,230 to 2,532,733) | 350,668 ops/s (205,075 to 361,613) | **6.73×** | yes |
+| `write.update`: replace a node value in transactions of 1,000 | 51,937 ops/s (21,950 to 67,587) | 1,569 ops/s (1,434 to 2,282) | **33.10×** | yes |
+| `latency.commit`: one node update per write transaction | 12,193 ops/s (8,383 to 16,763) | 2,261 ops/s (1,783 to 2,547) | **5.39×** | yes |
+| `mixed.read`: single incidence lookups from 7 readers while one writer commits 10 updates at a time, targeting 1,000 updates/s | 1,984,771 ops/s (1,929,424 to 2,177,523) | 855,896 ops/s (840,015 to 1,007,499) | **2.32×** | n/a |
+| `mixed.write`: updates committed by the writer alongside the readers | 1,000 ops/s (1,000 to 1,000) | 1,000 ops/s (994 to 1,000) | **1.00×** | n/a |
+| `large.ingest`: create one hyperedge with 200,000 members | 489,256 ops/s (357,717 to 530,352) | 12,076 ops/s (11,960 to 12,329) | **40.51×** | yes |
+| `large.scan`: enumerate all members of the large hyperedge (x400, after a warm-up) | 3,638,203,410 ops/s (2,471,360,485 to 3,728,075,827) | 431,469,984 ops/s (151,006,446 to 452,912,545) | **8.43×** | yes |
+| `large.probe`: test whether a node belongs to the large hyperedge | 11,711,888 ops/s (6,814,155 to 15,438,751) | 707,036 ops/s (363,080 to 1,115,133) | **16.56×** | yes |
+| `reopen`: close and reopen the database, including recovery | 206 ms (130 to 242) | 1,157 ms (1,028 to 1,270) | **5.61×** | yes |
+| `read.incidence.cold`: incidence sets immediately after reopening | 1,163,030 ops/s (984,567 to 2,006,144) | 13,081 ops/s (12,526 to 13,314) | **88.91×** | yes |
+| `disk`: bytes on disk after a clean shutdown | 165.7 MiB (164.9 to 166.4) | 2294.8 MiB (2211.7 to 2367.2) | **13.85×** | yes |
+| `churn.delete`: delete 80,000 hyperedges (20%) in transactions of 1,000 | 3,388 ops/s (2,225 to 4,295) | 1,426 ops/s (1,308 to 1,459) | **2.38×** | yes |
+| `churn.remove`: remove one member from each of 20,000 other hyperedges, 1,000 per transaction | 5,771 ops/s (3,508 to 6,005) | 1,919 ops/s (1,677 to 2,722) | **3.01×** | yes |
+| `read.incidence.churned`: enumerate incidence sets after the deletes | 5,677,396 ops/s (3,467,056 to 6,307,954) | 1,015,417 ops/s (531,391 to 1,302,526) | **5.59×** | yes |
+| `disk.churned`: bytes on disk after the deletes and a clean shutdown | 1238.9 MiB (1225.2 to 1239.6) | 1879.4 MiB (1846.6 to 1966.1) | **1.52×** | yes |
+| `disk.compacted`: bytes on disk after a full compaction and a clean shutdown | 164.5 MiB (164.5 to 164.5) | 1159.1 MiB (1119.0 to 1176.9) | **7.05×** | yes |
+| `recover`: open the store after killing the ingest process with SIGKILL | 219 ms (189 to 257) | 455 ms (327 to 527) | **2.08×** | n/a |
 
 ## Analysis
 
 **Where HStore leads, and why.**
 
-* **Incidence enumeration (2.6–10×), co-membership (8.6–29×) and cold reads after a reopen (29–66×).** An
+* **Incidence enumeration (4.2–11×), co-membership (11–20×) and cold reads after a reopen (28–89×).** An
   atom's incidence set is one entry of the reverse index: a short list stored inline for most atoms, and a
   counted B+tree for hubs. Enumeration hands each hyperedge id to the caller without allocating, and
   co-membership is a leapfrog intersection that skips whole subtrees by their summaries
   ([persistent-tree.md](storage/persistent-tree.md)). HyperGraphDB opens a JE cursor on a duplicate set for
   each lookup, and its `hg.and` query plans a general join.
-* **Updates (11–17×) and bytes written.** A commit logs only the keys it changed, a few hundred bytes, and a
+* **Updates (5.4–33×) and bytes written.** A commit logs only the keys it changed, a few hundred bytes, and a
   checkpoint writes each changed node once for all the commits since the previous one
   ([wal-and-recovery.md](transactions/wal-and-recovery.md)). A JE commit appends a new version of every changed
-  record and of the B+tree nodes above it. With `async` durability, a single-update commit writes 649 B in HStore against about 9 KiB in
-  HyperGraphDB.
-* **Giant hyperedges (ingest 9–17×, probes 6.9–20×).** Large edges are bulk-built bottom-up, and a membership
+  record and of the B+tree nodes above it. With `async` durability, a single-update commit writes 659 B in
+  HStore against 6.9 KiB in HyperGraphDB.
+* **Member enumeration at scale 4 (3.2×) and two-hop queries (3.3–5.5×).** A catalog leaf in the node cache
+  keeps its page bytes and decodes a record only when it is read
+  ([persistent-tree.md](storage/persistent-tree.md)), so the catalog stays within a 64 MiB cache: at scale 4
+  a member lookup read nothing from the segment files and allocated nothing. At scale 1 HStore is also ahead
+  (2.3×), with overlapping ranges.
+* **Giant hyperedges (ingest 5.3–41×, probes 9.4–17×).** Large edges are bulk-built bottom-up, and a membership
   probe is one descent of the edge's membership tree.
-* **Disk (3.9–14× smaller after load).** Ids are 8-byte varint gaps instead of 16-byte handles, node images are
+* **Disk (3.5–14× smaller after load).** Ids are 8-byte varint gaps instead of 16-byte handles, node images are
   packed into 64-byte units, small member trees and incidence sets live inside their parent record, and the WAL
   is truncated at every checkpoint.
-* **Tail latency.** HStore's p99 and p99.9 are lower in every latency workload. Readers pin an immutable
-  generation and never wait for writers, checkpoints or compaction.
+* **Tail latency.** HStore's p99 and p99.9 are lower in every latency workload, by 1.1–35×. Readers pin an
+  immutable generation and never wait for writers, checkpoints or compaction.
 
 **Where HyperGraphDB leads, and why.**
 
-* **Member enumeration once the data outgrows the cache (`read.members` 0.13× and `read.twohop` 0.19× at
-  scale 4).** HyperGraphDB's atom cache keeps each link's targets as a Java array, and that cache isn't limited
-  by `CACHE_MB`. HStore reads a hyperedge's members from its catalog record, and at scale 4 the catalog no longer
-  fits in a 64 MiB node cache: each lookup reads about 780 bytes from the segment files and allocates about
-  9 KiB decoding pages, against 50 bytes for HyperGraphDB. At scale 1 HStore is ahead (2.2×, ranges
-  overlapping).
+* **Opening a crashed store at scale 1 (0.59× with `async`, 0.69× with `sync`).** HyperGraphDB opened the
+  crashed store in 76 ms against HStore's 128 ms, and the ranges don't overlap. HStore's time is close to its
+  clean reopen of the full dataset (111 ms), and it allocates 121 MiB while opening, against 78 MiB for
+  HyperGraphDB. At scale 4 the order reverses: 219 ms for HStore against 455 ms.
 
 **Where the two are close.**
 
-* **Single-update commits under `sync` durability (1.2×).** Both stores pay about 4 ms for the forced write
-  of each commit on this machine. HStore's p99.9 is 4× lower. JE reports about 210 KiB written per commit
-  in this mode, against 9 KiB with `async`; the extra bytes come with the log flush the adapter adds (see
-  *Setup*), and we haven't established what JE writes, so don't read the `sync` bytes-written figures for
-  single commits as a comparison.
-* **Bulk ingest at scale 1 (1.2–2.4×)** and **deletes at scale 4 (1.05–1.4×)**. All but one of these ratios
-  have overlapping ranges.
-* **Crash recovery.** Neither store lost an acknowledged commit in any run. Recovery times overlap in every
-  configuration.
+* **Single-update commits at scale 1.** With `async` durability HyperGraphDB is slightly ahead at the median
+  (0.88×, 52 µs against 45 µs, ranges overlapping), and HStore is ahead at p99 and above. With `sync`
+  durability (1.09×) both stores pay about 4 ms for the forced write of each commit on this machine, and
+  HStore's p99.9 is 1.5× lower. JE reports 497 KiB written per commit in `sync` mode, against 6.9 KiB with
+  `async`; the extra bytes come with the log flush the adapter adds (see *Setup*), and we haven't established
+  what JE writes, so don't read the `sync` bytes-written figures for single commits as a comparison.
+* **Bulk node and hyperedge ingest at scale 1 with `sync` (1.81× and 1.25×), and node ingest at scale 4
+  (1.39×).** The ranges overlap in all three.
+* **Crash safety.** Neither store lost an acknowledged commit in any run.
 
-**What HStore spends.** It retains more heap after ingest (189 MiB against 119 MiB at scale 1), because the
-retained heap includes up to `write_buffer_mb` of nodes no checkpoint has written yet. After a large delete, its
-files grow until the retained history stops referencing the replaced pages: at scale 4 they reached 1.1 GiB
-before compaction brought them back to 163 MiB. Its slowest single commit at scale 4 was slower than
-HyperGraphDB's, even though its p99 and p99.9 were lower.
+**What HStore spends.** It retains more heap after ingest (190 MiB against 118 MiB at scale 1, 430 MiB against
+299 MiB at scale 4), because the retained heap includes up to `write_buffer_mb` of nodes no checkpoint has
+written yet. After a large delete, its files grow until the retained history stops referencing the replaced
+pages: at scale 4 they reached 1.21 GiB before compaction brought them back to 164.5 MiB. At scale 4 its
+single-update commits are faster at every percentile, but the slowest single commit across all runs was
+HStore's: 30.5 ms against 18.8 ms.
+
+### Decoding leaf records on demand
+
+Storage format 8 writes each record of a catalog or incidence index leaf with its length in front, and a leaf
+loaded from a page keeps the page bytes and decodes a record the first time it is read
+([pages.md](storage/pages.md), [persistent-tree.md](storage/persistent-tree.md)). Before, a cache miss decoded
+every record of the leaf, about 80 of them with their inline member lists, to return one. A fully decoded
+catalog leaf took about 11 times the heap of its page image, and at scale 4 only about half the catalog fit in
+the 64 MiB node cache.
+
+The table compares HStore at scale 4 (`async`, `CACHE_MB=64`, three runs each) at commit `459b8be`, which
+decoded whole leaves, and at commit `9291e18`. The two sets of runs were made at different times with
+different machine load, so treat the throughput columns as indicative. Allocation and bytes read per
+operation are steady from run to run.
+
+| Workload | Before | After | Allocated per op | Read from storage per op |
+|---|---:|---:|---:|---:|
+| `read.members` | 218,369 ops/s | 5,575,872 ops/s | 9,038 B → 0 B | 778 B → 0 B |
+| `read.twohop` | 15,008 ops/s | 311,293 ops/s | 133,848 B → 1,183 B | 12,464 B → 278 B |
+| `read.incidence.cold` | 346,015 ops/s | 1,163,030 ops/s | 1,024 B → 595 B | 110 B → 113 B |
+
+The length in front of each record costs about one byte, so the files grow slightly: 165.1 MiB against
+165.7 MiB at scale 4, and 91.3 MiB against 92.2 MiB at scale 1. At scale 1, three alternated runs of each
+build moved no workload by more than the spread between runs, apart from incidence reads from 8 threads,
+which were 1.28× faster.
 
 ### Inline member trees
 
