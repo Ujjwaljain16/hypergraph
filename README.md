@@ -51,15 +51,17 @@ hyperedges) with `async` durability. Each figure is the median of 5 runs on one 
 
 | Workload | HStore | HyperGraphDB | |
 |---|---:|---:|---:|
-| Incidence set of a node | 7.47 M/s | 740 k/s | 10.1× faster |
-| Hyperedges shared by two nodes | 448 k/s | 32.5 k/s | 13.8× faster |
-| Value updates, 1,000 per transaction | 78.1 k/s | 5.1 k/s | 15.3× faster |
-| Bytes written per single-update commit | 649 B | 9.1 KiB | 14× fewer |
-| Commit latency, p99 | 430 µs | 1.08 ms | 2.5× lower |
-| Disk after loading | 91 MiB | 432 MiB | 4.7× smaller |
+| Incidence set of a node | 6.26 M/s | 1.49 M/s | 4.2× faster |
+| Hyperedges shared by two nodes | 610 k/s | 53.9 k/s | 11.3× faster |
+| Value updates, 1,000 per transaction | 69.9 k/s | 13.0 k/s | 5.4× faster |
+| Bytes written per single-update commit | 659 B | 6.9 KiB | 10.7× fewer |
+| Commit latency, p99 | 296 µs | 466 µs | 1.6× lower |
+| Disk after loading | 92 MiB | 346 MiB | 3.7× smaller |
 
-HyperGraphDB is faster at listing a hyperedge's members once the data no longer fits in HStore's node cache:
-0.13× at scale 4. With `sync` durability, single commits in both are bound by the cost of a forced write. The
+At scale 4 (200,000 nodes, 400,000 hyperedges), where the files of both stores outgrow their caches, the
+leads widen: incidence sets 11.4×, value updates 33×, and listing a hyperedge's members 3.2× faster.
+HyperGraphDB opens a store after a crash faster at scale 1, 76 ms against 128 ms. With `sync` durability,
+single commits in both are bound by the cost of a forced write. The
 [benchmark report](docs/benchmark-report.pdf) (PDF) covers every workload, configuration and caveat, and
 [docs/benchmarks.md](docs/benchmarks.md) explains how to rerun it.
 
