@@ -1,8 +1,8 @@
 \begin{itemize}
-\item \textbf{Incidence-based reads} are faster in HStore in every configuration: \M{sumCreadincidence} to \M{sumAreadincidence} for incidence sets, \M{sumCreadcomembership} to \M{sumBreadcomembership} for co-membership counts, and \M{sumCreadincidencecold} to \M{sumAreadincidencecold} directly after a reopen.
-\item \textbf{Writes} cost HStore far fewer bytes. Single-update commits write \M{bpoAhstorelatencycommit} against \M{bpoAhgdblatencycommit}, and batched updates run \M{sumBwriteupdate} to \M{sumCwriteupdate} faster. Bulk insertion is closer: between \M{sumBingestedges} and \M{sumCingestedges} for hyperedges.
-\item \textbf{Member enumeration} is HStore's weakness once the data outgrows its node cache: \M{sumCreadmembers} at scale 4, and \M{sumCreadtwohop} for two-hop neighbourhoods, which depend on it.
-\item \textbf{Tail latency.} HStore's p99 and p99.9 latencies are lower than HyperGraphDB's in every latency workload and configuration, by 1.3 to 69 times. The single slowest commit at scale 4 was HStore's.
+\item \textbf{Incidence-based reads} are faster in HStore in every configuration: \M{sumAreadincidence} to \M{sumCreadincidence} for incidence sets, \M{sumAreadcomembership} to \M{sumCreadcomembership} for co-membership counts, and \M{sumBreadincidencecold} to \M{sumCreadincidencecold} directly after a reopen.
+\item \textbf{Writes} cost HStore far fewer bytes. Single-update commits write \M{bpoAhstorelatencycommit} against \M{bpoAhgdblatencycommit}, and batched updates run \M{sumAwriteupdate} to \M{sumCwriteupdate} faster. Bulk insertion of hyperedges is close at scale 1 (\M{sumBingestedges} to \M{sumAingestedges}) and \M{sumCingestedges} faster at scale 4.
+\item \textbf{Member enumeration} is \M{sumCreadmembers} faster in HStore at scale 4, where HStore's catalog stays in its node cache because cached leaves decode only the records that are read. At scale 1 the ranges overlap. Two-hop neighbourhoods are \M{sumBreadtwohop} to \M{sumAreadtwohop} faster.
+\item \textbf{Tail latency.} HStore's p99 and p99.9 latencies are lower than HyperGraphDB's in every latency workload and configuration, by 1.1 to 35 times.
 \item \textbf{Disk.} HStore's files are \M{sumBdisk} to \M{sumCdisk} smaller after loading. After deletes they first grow while retained history still references the replaced pages.
-\item \textbf{Recovery.} Neither system lost an acknowledged commit after SIGKILL. Recovery times overlap.
+\item \textbf{Recovery.} Neither system lost an acknowledged commit after SIGKILL. HyperGraphDB opens a crashed store faster at scale 1, and HStore at scale 4.
 \end{itemize}

@@ -95,6 +95,6 @@ All runs used one machine: an Apple M5 with 4 performance and 6 efficiency cores
 \begin{itemize}
 \item \textbf{S1 async}: scale 1, asynchronous commits, \M{runsA} runs per system;
 \item \textbf{S1 sync}: scale 1, synchronous commits, \M{runsB} runs per system;
-\item \textbf{S4 async}: scale 4, asynchronous commits, \M{runsC} runs per system. With 64\,MiB caches, the working set is several times larger than either cache.
+\item \textbf{S4 async}: scale 4, asynchronous commits, \M{runsC} runs per system. With 64\,MiB caches, the files of both systems are larger than their caches.
 \end{itemize}
 Each table reports the median over runs. Ratios are taken between medians and oriented so that values above 1 favour HStore: throughput divides HStore by HyperGraphDB, while times, latencies and sizes divide HyperGraphDB by HStore. Where the ranges of the two systems' runs overlap, the ratio is marked with $\dagger$, and the difference should not be read as significant. \Cref{app:variability} gives every run and the coefficient of variation of each workload.

@@ -7,7 +7,7 @@
 
 \paragraph{Memory fits in RAM.} At both scales the files fit in the operating system's page cache. Reads that miss a system's own 64\,MiB cache are served from memory, not from the SSD. The cold-read numbers therefore measure decoding and cache admission, not device latency.
 
-\paragraph{Cache budgets.} HStore counts its 64\,MiB node cache against an estimate of the heap each decoded node takes, which runs 10 to 40\% below the true size. JE's 64\,MiB budget is exact, but HyperGraphDB's atom and incidence caches are not capped in bytes. Neither side therefore holds exactly 64\,MiB. The retained heap in \cref{tab:memory} shows what each kept after ingest.
+\paragraph{Cache budgets.} HStore counts its 64\,MiB node cache against an estimate of the heap each cached node takes, not a measured size. JE's 64\,MiB budget is exact, but HyperGraphDB's atom and incidence caches are not capped in bytes. Neither side therefore holds exactly 64\,MiB. The retained heap in \cref{tab:memory} shows what each kept after ingest.
 
 \paragraph{Workload coverage.} The dataset is synthetic. It uses set hyperedges without roles, properties or ordered members, and node values of a few bytes. Queries are single storage operations, not HQL or HyperGraphDB queries, so query planning is not measured. Workloads run in a fixed order within one process, so each one starts from the state the previous one left: cache contents, garbage, and for HStore, unwritten nodes waiting for a checkpoint.
 

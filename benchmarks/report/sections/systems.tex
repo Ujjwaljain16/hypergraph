@@ -15,7 +15,7 @@ Both systems are embedded Java libraries. Each runs in its own JVM process, and 
 \end{itemize}
 Enumerating an incidence set is a cursor walk over one inline list or one small tree. Counting the hyperedges that contain two given atoms is a leapfrog intersection~\cite{leapfrog} of their two incidence trees. The intersection skips whole subtrees whose key range cannot contain a match.
 
-\paragraph{Pages and files.} A tree node is written as a self-describing image: an 80-byte header with a CRC32C checksum, followed by the payload. Images are packed into append-only segment files of 256\,MiB, aligned to 64-byte units. A page directory maps each page number to the image's current address, so compaction can move an image without rewriting the trees that refer to it. Reads go through a memory map of each segment. Decoded nodes are kept in a node cache whose budget is set in bytes.
+\paragraph{Pages and files.} A tree node is written as a self-describing image: an 80-byte header with a CRC32C checksum, followed by the payload. Images are packed into append-only segment files of 256\,MiB, aligned to 64-byte units. A page directory maps each page number to the image's current address, so compaction can move an image without rewriting the trees that refer to it. Reads go through a memory map of each segment. Decoded nodes are kept in a node cache whose budget is set in bytes. In catalog and incidence index leaves, each record is preceded by its length. A leaf read from a page keeps the page bytes and the offset of every record, and decodes a record the first time it is read. A decoded record is then kept in the leaf and charged to the node cache, so a lookup that misses the cache decodes only the record it needs.
 
 \paragraph{Generations and readers.} A committed state is a \emph{generation}: an immutable vector of tree roots. A reader pins a generation and reads it without locks. Writers never modify a node that a published generation can reach, as in other copy-on-write B+tree stores~\cite{lmdb}. The last 64 generations are retained for time travel.
 
@@ -80,7 +80,7 @@ HyperGraphDB 1.4 begins every JE transaction with an explicit \texttt{WRITE\_NO\
 \toprule
 & \hstore & \hgdb \\
 \midrule
-Version & 0.1.0, commit \texttt{459b8be}, storage format 7 & 1.4, commit \texttt{99485a1}; JE 5.0.73 \\
+Version & 0.1.0, commit \texttt{9291e18}, storage format 8 & 1.4, commit \texttt{99485a1}; JE 5.0.73 \\
 Cache & node cache, 64\,MiB & JE cache 64\,MiB, plus atom cache \\
 Async commits & no fsync, ordered publication & JE \texttt{WRITE\_NO\_SYNC} (default) \\
 Sync commits & fsync per commit group & JE log forced after each commit (\cref{sec:durability}) \\
