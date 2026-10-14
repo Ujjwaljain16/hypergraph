@@ -142,12 +142,26 @@ public record Tree<V>(TreeSchema<V> schema, NodeSource source, Ref root) {
     }
 
     public Optional<Entry<V>> first() {
-        TreeCursor<V> cursor = cursor();
-        return cursor.hasNext() ? Optional.of(cursor.next()) : Optional.empty();
+        return edge(false);
     }
 
     public Optional<Entry<V>> last() {
-        TreeCursor<V> cursor = new TreeCursor<>(this, _ -> true, true);
+        return edge(true);
+    }
+
+    private Optional<Entry<V>> edge(boolean last) {
+        if (isEmpty()) {
+            return Optional.empty();
+        }
+        Node node = node(root);
+        while (node instanceof Branch branch && branch.size() > 0) {
+            node = node(branch.child(last ? branch.size() - 1 : 0));
+        }
+        if (node instanceof Leaf leaf && leaf.size() > 0) {
+            int position = last ? leaf.size() - 1 : 0;
+            return Optional.of(new Entry<>(leaf.key(position), schema.cast(leaf.value(position))));
+        }
+        TreeCursor<V> cursor = new TreeCursor<>(this, _ -> true, last);
         return cursor.hasNext() ? Optional.of(cursor.next()) : Optional.empty();
     }
 
