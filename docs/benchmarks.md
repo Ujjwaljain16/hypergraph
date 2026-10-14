@@ -116,9 +116,9 @@ then forces a checkpoint so the cleaned files are deleted. The latency table com
 *Resources* table adds the compaction time and the space reclaimed. Disk is measured at a reopen just before the
 window and again at a reopen just after it, so segments that HStore only deletes once older readers are gone are
 counted too. That figure can be negative when compaction frees less than the writer adds. The two windows run at a
-fixed rate, so they are left out of the main table, where their ratio would always be about 1. HStore's default segments are 256 MiB, so
-at scale 1 most data shares one or two segments. `--pages-per-segment` (`PAGES_PER_SEGMENT`) and
-`--compaction-live-ratio` (`COMPACTION_LIVE_RATIO`) change HStore's settings for a run.
+fixed rate, so they are left out of the main table, where their ratio would always be about 1. HStore's segments start at 8 MiB and grow
+to 256 MiB as the store grows. `--pages-per-segment` (`PAGES_PER_SEGMENT`) sets the largest segment for a run, and
+`--compaction-live-ratio` (`COMPACTION_LIVE_RATIO`) the compaction threshold.
 
 **Crash recovery.** `reopen` closes the store cleanly first. `recover` doesn't:
 1. The run starts a second JVM (`Comparison crash`) with the same flags and classpath. It ingests nodes into a

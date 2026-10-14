@@ -252,7 +252,7 @@ semantic/state                           53 B  persisted HNSW index state (datab
 | `LOCK` | `StorageEngine.open` | An exclusive OS file lock. A second process gets `database ... is opened by another process`. |
 | `catalog/generations/%016x.cat` | `CatalogStore.publish` | `int magic 0x54414348`, `int crc32c(payload)`, `long length`, then the `CatalogImage` payload. Written to `*.tmp`, fsynced, atomically renamed, and the directory fsynced. The three newest files are kept. |
 | `catalog/manifest` | `CatalogStore` | The file name of the latest `.cat`, written durably the same way. |
-| `data/segments/%08x.seg` | `PageStore` / `SegmentFile` | Append-only extents of node images packed at 64-byte alignment, up to 256 MiB per segment by default (1 GiB maximum); see [pages.md](../storage/pages.md). |
+| `data/segments/%08x.seg` | `PageStore` / `SegmentFile` | Append-only extents of node images packed at 64-byte alignment, from 8 MiB per segment, doubling as the store grows, up to 256 MiB by default (1 GiB maximum); see [pages.md](../storage/pages.md). |
 | `data/segments/pages.dir` | `PageDirectory` | 64-byte header, then one `i64` address (segment, offset, units) per page number, memory-mapped in 8 MiB chunks; see [pages.md](../storage/pages.md#page-numbers-and-the-page-directory). |
 | `data/segments/pages.ref`, `pages.ref.journal` | `ReferenceCounts`, `ReferenceJournal` | One `i64` reference count per page number in the same layout, changed only at checkpoints through the journal; see [pages.md](../storage/pages.md#reference-counts). |
 | `wal/segments/%016x.wal` | `WriteAheadLog` | Each segment is named by its starting LSN; see [wal-and-recovery.md](../transactions/wal-and-recovery.md). |
