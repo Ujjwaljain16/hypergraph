@@ -1,10 +1,15 @@
 # Logging
 
-HStore logs through `System.Logger`. The server binds it to `java.util.logging` and installs a
-PostgreSQL-style formatter
-([`Logging.java`](../../server/src/main/java/io/hstore/server/Logging.java)). Logs always go to **stderr**, so
-`docker logs` and `journalctl` capture them with no further configuration. Optionally they are also written to
-size-rotated files.
+HStore logs through `System.Logger`. The server module provides its own `System.LoggerFinder`
+([`Logging.java`](../../server/src/main/java/io/hstore/server/Logging.java)) that hands every record to a
+console handler and, optionally, a rotating file handler, both using a PostgreSQL-style formatter. Logs always
+go to **stderr**, so `docker logs` and `journalctl` capture them with no further configuration.
+
+The handlers are owned by the server, not attached to `java.util.logging` loggers. On the JVM, `LogManager`
+registers a shutdown hook that closes every handler attached to a JUL logger, and it runs at the same time as
+the server's own shutdown hook. Keeping the handlers outside JUL means the shutdown lines (`received shutdown
+request`, the final checkpoint, `shut down cleanly`) are always written. The server closes its handlers as the
+last step of shutdown, which also removes the `hstore-0.log.lck` lock file.
 
 ## Line format
 
