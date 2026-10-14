@@ -32,6 +32,7 @@ public final class PageStore implements AutoCloseable {
     private final Path directory;
     private final int pageSize;
     private final int segmentUnits;
+    private final FilePool pool;
     private final Map<Integer, SegmentFile> files = new ConcurrentHashMap<>();
     private final ConcurrentSkipListMap<Integer, SegmentInfo> segments = new ConcurrentSkipListMap<>();
     private final Map<Integer, AtomicLong> live = new ConcurrentHashMap<>();
@@ -48,18 +49,20 @@ public final class PageStore implements AutoCloseable {
     private int activeSegment;
     private int nextUnit;
 
-    private PageStore(Path directory, int pageSize, int pagesPerSegment) {
+    private PageStore(Path directory, int pageSize, int pagesPerSegment, int openFiles) {
         this.directory = directory;
         this.pageSize = pageSize;
         this.segmentUnits = (int) Math.min(PageAddress.MAX_OFFSET + 1L, (long) pagesPerSegment * pageSize / PageId.UNIT_BYTES);
+        this.pool = new FilePool(openFiles);
     }
 
-    public static PageStore open(Path directory, int pageSize, int pagesPerSegment, Collection<SegmentInfo> known) {
-        return open(directory, pageSize, pagesPerSegment, known, -1);
+    public static PageStore open(Path directory, int pageSize, int pagesPerSegment, int openFiles, Collection<SegmentInfo> known) {
+        return open(directory, pageSize, pagesPerSegment, openFiles, known, -1);
     }
 
-    public static PageStore open(Path directory, int pageSize, int pagesPerSegment, Collection<SegmentInfo> known, long checkpointLsn) {
-        PageStore store = new PageStore(directory, pageSize, pagesPerSegment);
+    public static PageStore open(Path directory, int pageSize, int pagesPerSegment, int openFiles, Collection<SegmentInfo> known,
+                                 long checkpointLsn) {
+        PageStore store = new PageStore(directory, pageSize, pagesPerSegment, openFiles);
         store.restore(known, checkpointLsn);
         return store;
     }
@@ -80,7 +83,7 @@ public final class PageStore implements AutoCloseable {
             try (Stream<Path> listing = Files.list(directory)) {
                 for (Path file : listing.filter(p -> p.getFileName().toString().endsWith(".seg")).toList()) {
                     int id = SegmentFile.idOf(file);
-                    SegmentFile segment = SegmentFile.open(id, file);
+                    SegmentFile segment = SegmentFile.open(id, file, pool);
                     files.put(id, segment);
                     long units = segment.unitsOnDisk();
                     SegmentInfo info = byId.getOrDefault(id, new SegmentInfo(id, SegmentState.SEALED, units, units, 0));
@@ -251,7 +254,7 @@ public final class PageStore implements AutoCloseable {
             }
         }
         int id = segments.isEmpty() ? 1 : segments.lastKey() + 1;
-        files.put(id, SegmentFile.open(id, SegmentFile.pathFor(directory, id)));
+        files.put(id, SegmentFile.create(id, SegmentFile.pathFor(directory, id), pool));
         segments.put(id, new SegmentInfo(id, SegmentState.ACTIVE, 0, 0, 0));
         activeSegment = id;
         nextUnit = 0;
@@ -286,7 +289,7 @@ public final class PageStore implements AutoCloseable {
         int offset = PageAddress.offsetOf(address);
         SegmentFile file = files.computeIfAbsent(segment, id -> {
             segments.putIfAbsent(id, new SegmentInfo(id, SegmentState.SEALED, 0, 0, 0));
-            return SegmentFile.open(id, SegmentFile.pathFor(directory, id));
+            return SegmentFile.open(id, SegmentFile.pathFor(directory, id), pool);
         });
         file.write((long) offset * PageId.UNIT_BYTES, image);
         long end = offset + (long) PageId.unitsFor(image.byteSize());
@@ -413,7 +416,19 @@ public final class PageStore implements AutoCloseable {
     }
 
     public void sync() {
-        files.values().forEach(SegmentFile::force);
+        pool.sync();
+    }
+
+    int openFiles() {
+        return pool.open();
+    }
+
+    int unsyncedFiles() {
+        return pool.unsynced();
+    }
+
+    long segmentForces() {
+        return pool.forces();
     }
 
     public void checkpoint() {
