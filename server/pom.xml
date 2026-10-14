@@ -94,6 +94,7 @@
                                 <buildArg>-H:+SharedArenaSupport</buildArg>
                                 <buildArg>--enable-url-protocols=http,https</buildArg>
                                 <buildArg>-march=compatibility</buildArg>
+                                <buildArg>--initialize-at-build-time=io.hstore.server.Logging$Finder,io.hstore.server.Logging$Sink</buildArg>
                             </buildArgs>
                         </configuration>
                     </plugin>

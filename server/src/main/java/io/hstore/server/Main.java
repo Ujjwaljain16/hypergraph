@@ -121,7 +121,13 @@ public final class Main {
     public static void main(String[] args) {
         try {
             Arguments arguments = Arguments.parse(args);
-            System.exit(run(command(arguments), arguments));
+            int status;
+            try {
+                status = run(command(arguments), arguments);
+            } finally {
+                Logging.close();
+            }
+            System.exit(status);
         } catch (IllegalArgumentException | HStoreException failure) {
             IO.println("hstore: " + failure.getMessage());
             System.exit(2);
@@ -302,13 +308,23 @@ public final class Main {
                 Duration.ofMinutes(config.integer(Setting.STUDIO_SESSION_MINUTES)),
                 Optional.of(config.string(Setting.STUDIO_ASSETS)).filter(value -> !value.isBlank()).map(Path::of), tls))) : Optional.empty();
         studio.ifPresent(Studio::start);
-        Runtime.getRuntime().addShutdownHook(Thread.ofPlatform().unstarted(() -> {
+        Thread shutdown = Thread.ofPlatform().name("hstore-shutdown").unstarted(() -> {
             log.log(System.Logger.Level.INFO, "received shutdown request; closing connections and checkpointing");
-            studio.ifPresent(Studio::close);
-            server.close();
-            database.close();
-        }));
+            try {
+                studio.ifPresent(Studio::close);
+                server.close();
+                database.close();
+            } finally {
+                Logging.close();
+            }
+        });
+        Runtime.getRuntime().addShutdownHook(shutdown);
         server.serve();
+        try {
+            shutdown.join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
         return 0;
     }
 

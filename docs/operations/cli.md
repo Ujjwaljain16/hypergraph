@@ -54,6 +54,7 @@ Use `connect` to talk to a running server.
 | `0` | Success. |
 | `1` | `exec`: at least one statement failed (an output line starts with `error`). |
 | `2` | Error printed as `hstore: <message>`: unknown command, missing argument, invalid setting value, a directory that is already initialised, failed authentication, a database locked by another process, an incompatible `FORMAT`. I/O failures print `hstore: <message>: <cause>`, for example `hstore: cannot connect to /127.0.0.1:1: Connection refused`. `ping` also returns `2` when no server answers. |
+| `143` | `serve` stopped by SIGTERM (128 + 15). The JVM and the native binary both report it after the clean shutdown has finished. |
 
 ## Commands
 

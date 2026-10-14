@@ -9,6 +9,8 @@ import io.hstore.db.query.Session;
 import io.hstore.engine.EngineOptions;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.BufferedReader;
@@ -27,6 +29,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 import javax.net.ssl.SSLContext;
 
@@ -84,6 +87,33 @@ class ServerTest {
                 }
             }
             acceptor.join();
+        }
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    void sigtermCheckpointsAndLogsTheCleanShutdown() throws Exception {
+        String modules = System.getProperty("jdk.module.path");
+        List<String> command = new ArrayList<>(List.of(ProcessHandle.current().info().command().orElseThrow()));
+        command.addAll(modules == null ? List.of("-cp", System.getProperty("java.class.path"), Main.class.getName())
+                : List.of("-p", modules, "-m", "io.hstore.server/" + Main.class.getName()));
+        command.addAll(List.of("serve", directory.resolve("data").toString(), "--port", "0", "--studio", "off"));
+        Path log = directory.resolve("serve.log");
+        Process server = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        try {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+            while (!Files.readString(log).contains("listening on") && System.nanoTime() < deadline && server.isAlive()) {
+                Thread.sleep(50);
+            }
+            assertTrue(Files.readString(log).contains("listening on"), Files.readString(log));
+            server.destroy();
+            assertTrue(server.waitFor(60, TimeUnit.SECONDS));
+            String output = Files.readString(log);
+            assertTrue(output.contains("received shutdown request"), output);
+            assertTrue(output.contains("checkpoint complete"), output);
+            assertTrue(output.contains("shut down cleanly"), output);
+        } finally {
+            server.destroyForcibly();
         }
     }
 
