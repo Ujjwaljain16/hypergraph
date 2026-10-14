@@ -230,6 +230,58 @@ class TreeTest {
         assertTrue(pages.loads < 40, "diff visited " + pages.loads + " pages");
     }
 
+    @ParameterizedTest
+    @ValueSource(longs = {1, 2, 3, 4, 5})
+    void diffMatchesAnOracleAcrossRandomEdits(long seed) {
+        RandomGenerator random = random(seed);
+        MemoryPages pages = new MemoryPages(1024);
+        TreeMap<Long, Long> first = new TreeMap<>();
+        for (int i = random.nextInt(3000); i > 0; i--) {
+            long key = random.nextLong(5000);
+            first.put(key, key);
+        }
+        Tree<Long> before = Tree.empty(LONGS, pages);
+        WriteScope scope = new WriteScope();
+        for (Map.Entry<Long, Long> entry : first.entrySet()) {
+            before = before.put(scope, entry.getKey(), entry.getValue());
+        }
+        before = pages.persist(before);
+        TreeMap<Long, Long> second = new TreeMap<>(first);
+        Tree<Long> after = before;
+        WriteScope edits = new WriteScope();
+        for (int i = random.nextInt(400); i > 0; i--) {
+            long key = random.nextLong(6000);
+            if (random.nextBoolean() && !second.isEmpty()) {
+                long existing = second.ceilingKey(key) != null ? second.ceilingKey(key) : second.firstKey();
+                second.remove(existing);
+                after = after.remove(edits, existing);
+            } else {
+                long value = random.nextLong(3);
+                second.put(key, value);
+                after = after.put(edits, key, value);
+            }
+        }
+        List<TreeDiff.Delta<Long>> expected = new ArrayList<>();
+        TreeSet<Long> keys = new TreeSet<>(first.keySet());
+        keys.addAll(second.keySet());
+        for (long key : keys) {
+            Long was = first.get(key);
+            Long now = second.get(key);
+            if (was == null) {
+                expected.add(new TreeDiff.Delta.Added<>(key, now));
+            } else if (now == null) {
+                expected.add(new TreeDiff.Delta.Removed<>(key, was));
+            } else if (!was.equals(now)) {
+                expected.add(new TreeDiff.Delta.Changed<>(key, was, now));
+            }
+        }
+        assertEquals(expected, TreeDiff.diff(before, after).toList());
+        assertEquals(expected.size(), TreeDiff.diff(after, before).count());
+        assertEquals(List.of(), TreeDiff.diff(after, after).toList());
+        assertEquals(second.size(), TreeDiff.diff(Tree.empty(LONGS, pages), after).count());
+        assertEquals(second.size(), TreeDiff.diff(after, Tree.empty(LONGS, pages)).count());
+    }
+
     @Test
     void keysetPaginationIsStable() {
         MemoryPages pages = new MemoryPages(1024);
