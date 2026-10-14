@@ -190,6 +190,7 @@ MATCH EDGE c:Claim WHERE c CONTAINS ($alice, $bob) RETURN c.amount, card(c);
 | 5 `symbols` (#11) | primary | symbol id | `Symbol.Name` / `Symbol.Group` | `Dictionary.intern` (system transaction) |
 | 6 `symbol-lookup` (#12/#13, inline 8) | derived | `symbol.hash()` | symbol ids | `SYMBOL_LOOKUP` |
 | 7 `requests` (#14) | primary | `Hashing.of(requestId)` | `RequestRecord(requestId, txnId, generation)` | idempotent commits (`TxnOptions.requestId`) |
+| 8 `settings` (#15) | primary | setting number (1 = checkpoint threshold) | the value as a varint | `StorageEngine.checkpointAt` (system transaction on main) |
 
 Hash-keyed indexes (`canonical`, `symbol-lookup`, `requests`) store the full original value in the posting and compare it on lookup (`Views.resolve`, `Dictionary.find`, `priorRequest`). A 64-bit collision is therefore detected and never confused with a match.
 

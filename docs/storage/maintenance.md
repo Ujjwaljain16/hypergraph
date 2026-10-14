@@ -15,7 +15,7 @@ Sources are under `engine/src/main/java/io/hstore/engine/maintenance/`, plus `St
 | Trigger | Action | Code |
 |---|---|---|
 | Engine open, after recovery | checkpoint, then reclaim | `StorageEngine` constructor |
-| `hstore-maintenance` virtual thread, every `maintenanceInterval` (default 500 ms) or when a commit wakes it because the write buffer is full (skipped when the `maintenance` lock is busy) | checkpoint if the write buffer holds more than half of `write_buffer_mb`, more than `checkpointWalBytes` of WAL or of pages were written since the last one, or more than 1 048 576 counts changed; compact one segment if any is below `compaction_live_ratio`, sealing the active one first if it is at least a quarter full and that far below (followed by a checkpoint); then reclaim | `StorageEngine.maintain` |
+| `hstore-maintenance` virtual thread, every `maintenanceInterval` (default 500 ms) or when a commit wakes it because the write buffer is full or the checkpoint threshold was passed (skipped when the `maintenance` lock is busy) | checkpoint if the write buffer holds more than half of `write_buffer_mb`, more than the checkpoint threshold of WAL or of pages were written since the last one, or more than 1 048 576 counts changed; compact one segment if any is below `compaction_live_ratio`, sealing the active one first if it is at least a quarter full and that far below (followed by a checkpoint); then reclaim | `StorageEngine.maintain` |
 | `CHECKPOINT;` (HQL), `StorageEngine.checkpoint()` | checkpoint | `timedCheckpoint` |
 | `COMPACT;` (HQL), `StorageEngine.compact()` | checkpoint, compact, checkpoint, reclaim | `StorageEngine.compact` |
 | Every checkpoint | count references between the previous checkpointed generation and the new one | `ReferenceCounter.checkpointed` |
@@ -51,7 +51,25 @@ An ordinary commit doesn't write tree pages. It logs the keys it changed ([wal-a
 
 If a step after the catalog is published fails and the engine keeps running, the journal on disk still belongs to the published catalog. The next checkpoint applies that journal before it writes its own, so the file never falls more than one checkpoint behind the catalog. If publishing the catalog itself fails, it isn't known whether the new catalog reached the disk, so `pages.ref` is marked for rebuilding and the next open recounts. The full ordering, and what a crash at each step leaves behind, is in [wal-and-recovery.md](../transactions/wal-and-recovery.md#9-checkpoints).
 
-**Trigger threshold.** `walSinceCheckpoint() = wal.end() − lastLsn` is compared with `checkpoint_wal_mb` (default 256 MiB, `EngineOptions.checkpointWalBytes`), and so is the volume of pages written since the last checkpoint. A commit logs its changed keys rather than its pages, so the threshold corresponds to a lot of committed work, and replay after a crash stays short.
+**Trigger threshold.** `walSinceCheckpoint() = wal.end() − lastLsn` is compared with the checkpoint threshold, and so is the volume of pages written since the last checkpoint. `StorageEngine.checkpointThreshold()` resolves the threshold on every maintenance pass ([`CheckpointThreshold`](../../engine/src/main/java/io/hstore/engine/CheckpointThreshold.java)):
+
+1. a value stored with `CHECKPOINT AT <size>` (`StorageEngine.checkpointAt`) wins;
+2. otherwise a fixed `checkpoint_wal_mb` (`EngineOptions.checkpointWalBytes`);
+3. otherwise, with `checkpoint_wal_mb = auto` (the default, `EngineOptions.AUTOMATIC_CHECKPOINTS`), a quarter of the live bytes in the data segments, held between 2 MiB and 256 MiB.
+
+| Live data | Automatic threshold |
+|---|---|
+| up to 8 MiB | 2 MiB |
+| 12 MiB | 3 MiB |
+| 64 MiB | 16 MiB |
+| 512 MiB | 128 MiB |
+| 1 GiB and more | 256 MiB |
+
+The rule weighs what recovery has to redo against what a checkpoint costs. Recovery replays every commit logged since the last checkpoint and then writes every page those commits changed, so the replayed log should stay small next to the store. A checkpoint writes the pages changed since the previous one, which is at most the whole store (the write buffer trigger also starts one once unwritten nodes pass half of `write_buffer_mb`). Checkpointing once the log reaches a quarter of the live data keeps replay to a quarter of the store's size, and keeps page writes from checkpoints to at most about four bytes per byte of log even when every checkpoint rewrites the whole store. The 2 MiB floor keeps a nearly empty store from paying the fixed cost of a checkpoint (a catalog image, a reference journal and several fsyncs) every few hundred kilobytes of log, while a store being loaded from empty still checkpoints within its first few megabytes. The ceiling is the fixed 256 MiB threshold used before.
+
+**Waking on commit.** The maintenance thread also looks at the threshold right after a commit passes it, not only every `maintenanceInterval`. At the end of each maintenance pass `StorageEngine.armWake` turns the threshold into two marks: the WAL byte count and the page byte count at which it will be passed. `TransactionManager` runs `StorageEngine.wakeIfDue` after every commit, which compares `wal.bytesAppended()` and `pages.bytesWritten()` with the marks and unparks the maintenance thread when either is passed. The checkpoint still runs on the maintenance thread. The first commit to pass a mark sets a flag that the next maintenance pass clears, so the commits that follow while that checkpoint is pending or running don't wake the thread again.
+
+The stored value lives in the engine slot `settings` (slot 8, key 1), written by a system transaction on main like interned symbols, so it is logged, checkpointed and replayed with everything else. The slot has no root until a value is stored, so a store that never ran `CHECKPOINT AT` is unchanged on disk. A build from before the slot existed cannot open a store that has a stored value: it fails with `no slot registered with id 8`. `CHECKPOINT AT AUTO` deletes the key.
 
 **What recovery gains.** Recovery loads the newest valid catalog image and replays only the commits logged after `checkpointLsn` ([wal-and-recovery.md](../transactions/wal-and-recovery.md)). Its segment table restores the allocator position (`units`) and the compaction state machine. History is not in the image, so time travel after a restart reaches only the generations recovery rebuilt ([catalog-and-generations.md](catalog-and-generations.md#history-retention-and-time-travel)).
 
@@ -149,7 +167,7 @@ transaction that a crash cut short are found on the next open (see below).
 not touched. A checkpoint journals them and then applies them (steps 6 and 11 above), so a crash at any point leaves
 the file as of one checkpoint or the next, never a mix. The background thread checkpoints early when more than
 1 048 576 counts have changed, which keeps that map to a few tens of megabytes. It also checkpoints after every
-`checkpoint_wal_mb` of pages written, because a bulk load writes many pages for little WAL and its dead pages would
+checkpoint threshold's worth of pages written, because a bulk load writes many pages for little WAL and its dead pages would
 otherwise wait a long time to be released.
 
 **On open**, `PageStore.open` applies `pages.ref.journal` if it was written by the checkpoint the catalog points at
@@ -309,7 +327,7 @@ A failure names the page, for example `HStoreException.corrupt(pageId, "checksum
 
 | Setting | Default | Effect |
 |---|---|---|
-| `checkpoint_wal_mb` | 256 | WAL or page volume since the last checkpoint that triggers a background checkpoint |
+| `checkpoint_wal_mb` | auto | WAL or page volume since the last checkpoint that triggers a background checkpoint. `auto` is a quarter of the live data, between 2 MiB and 256 MiB; `CHECKPOINT AT` overrides it |
 | `write_buffer_mb` | 64 | Heap held by nodes no checkpoint has written yet. A background checkpoint starts above half of it; commits wait while it is over the limit |
 | `history_limit` | 64 | Generations kept for time travel (more while pinned) |
 | `compaction_live_ratio` | 0.5 | A sealed segment is compacted when fewer than this fraction of its images are live |

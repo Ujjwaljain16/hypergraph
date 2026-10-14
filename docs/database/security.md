@@ -17,7 +17,7 @@ enum Role { ADMIN, WRITER, READER }
 | read atoms of its tenant | yes | yes | yes |
 | insert, update, delete atoms, members, properties, embeddings, evidence, state, signals | yes | yes | no |
 | DDL (`CREATE … TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`) | yes | no | no |
-| branches (`CREATE/DROP/MERGE BRANCH`, `SAMPLE`, `DIFF`), `HISTORY`, `STATS`, `CHECKPOINT`, `COMPACT` | yes | no | no |
+| branches (`CREATE/DROP/MERGE BRANCH`, `SAMPLE`, `DIFF`), `HISTORY`, `STATS`, `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT` | yes | no | no |
 | tenants and users | yes | no | no |
 | create, refresh and read materialized views (`SHOW VIEWS` lists names for every role) | yes | no | no |
 | switch tenant (`USE TENANT`, `Principal.inTenant`) | yes | no | no |

@@ -28,6 +28,7 @@ A **root vector** (`catalog/RootVector.java`) is an immutable `Map<Integer, Ref>
 | 5 | `symbols` | primary | #11 | symbol id → role name or role set |
 | 6 | `symbol-lookup` | derived | #12 / #13 | `symbol.hash()` → symbol id |
 | 7 | `requests` | primary | #14 | `hash(requestId)` → `RequestRecord` (idempotent commit keys) |
+| 8 | `settings` | primary | #15 | setting number → value; key 1 is the threshold stored by `CHECKPOINT AT` ([maintenance.md](maintenance.md#checkpoints)) |
 
 Tree schema ids 2–4 are the nested topology schemas (`set-members`, `ordered-members`, `order-index`). They never appear as slot roots; they are reached only through edge records.
 
