@@ -18,6 +18,62 @@ disk_shape <- function(x, y, w, h, label, size = 6.6) {
   label(label, x + w / 2, y - e / 4, size = size)
 }
 
+spoke <- function(x1, y1, x2, y2, text = NULL, at = 0.5, col = hs, lwd = 0.7, lty = "solid") {
+  grid.lines(mm(c(x1, x2)), mm(c(y1, y2)), gp = gpar(col = col, lwd = lwd, lty = lty))
+  if (!is.null(text)) {
+    lx <- x1 + (x2 - x1) * at
+    ly <- y1 + (y2 - y1) * at
+    w <- 1.2 + 1.05 * nchar(text)
+    grid.roundrect(mm(lx), mm(ly), mm(w), mm(3.2), r = unit(0.8, "mm"), gp = gpar(fill = "white", col = NA))
+    label(text, lx, ly, size = 5.4, col = hs, face = "italic")
+  }
+}
+
+atom <- function(x, y, type, name, w = 21, size = 6) {
+  box(x, y, w, 7.4, NULL, fill = "white", col = rule, lwd = 0.5)
+  label(type, x, y + 1.7, size = 4.9, col = rule)
+  label(name, x, y - 1.3, size = size, family = mono)
+}
+
+hub <- function(x, y, title, detail = NULL, w = 22, h = 9) {
+  box(x, y, w, h, NULL, fill = hs_light, col = hs, lwd = 0.7, r = 2)
+  if (is.null(detail)) label(title, x, y, size = 6.6, face = "bold", col = hs)
+  else {
+    label(title, x, y + 1.6, size = 6.6, face = "bold", col = hs)
+    label(detail, x, y - 1.9, size = 5.3, col = ink)
+  }
+}
+
+hypergraph_figure <- function() {
+  label("(a) A set hyperedge with roles", 30, 51, size = 7, face = "bold")
+  spoke(30, 26, 13, 41, "patient")
+  spoke(30, 26, 47, 41, "provider, weight 0.88")
+  spoke(30, 26, 30, 8, "pharmacy")
+  hub(30, 26, "Claim", "amount 9,281.80")
+  atom(13, 41, "Patient", "kavya-iyer")
+  atom(47, 41, "Provider", "dr-ben-osei")
+  atom(30, 8, "Pharmacy", "lakeview-drugs", w = 24)
+
+  label("(b) An ordered hyperedge", 90, 51, size = 7, face = "bold")
+  xs <- c(67.5, 82.5, 97.5, 112.5)
+  people <- list(c("Patient", "pedro-alvarez"), c("Provider", "dr-femi-ade"), c("Provider", "dr-gil-moran"), c("Provider", "dr-ben-osei"))
+  for (i in seq_along(xs)) spoke(90, 34, xs[i], 13, as.character(i), at = 0.55)
+  hub(90, 34, "CarePathway", "chronic back pain", w = 26)
+  for (i in seq_along(xs)) atom(xs[i], 13, people[[i]][1], people[[i]][2], w = 14.6, size = 5.1)
+  arrow_line(c(xs[1] - 5, xs[4] + 5), c(6.2, 6.2), col = rule, lwd = 0.45, length = 1.1)
+  label("members keep their order", 90, 3, size = 5.2, col = rule)
+
+  label("(c) A hyperedge over hyperedges", 149, 51, size = 7, face = "bold")
+  claims <- c(40, 26, 12)
+  for (j in seq_along(claims)) spoke(152, 26, 130, claims[j], if (j == 2) NULL else "subject", at = 0.42)
+  spoke(152, 26, 165, 41, "investigator", at = 0.5)
+  spoke(152, 26, 164, 11, "witness", at = 0.5)
+  hub(152, 26, "Investigation", "duplicate billing", w = 24)
+  for (j in seq_along(claims)) hub(130, claims[j], "Claim", c("claim 0", "claim 6", "claim 9")[j], w = 15, h = 8)
+  atom(165, 41, "Provider", "dr-clara-voss", w = 21)
+  atom(164, 11, "Pharmacy", "central-apothecary", w = 26)
+}
+
 overview <- function() {
   W <- textwidth * 25.4
   grid.lines(mm(c(12, W - 2)), mm(c(22.5, 22.5)), gp = gpar(col = rule, lwd = 0.5, lty = "22"))
@@ -92,7 +148,8 @@ overview <- function() {
   label("stored page", rx - 4, 27.4, size = 5.6, hjust = 0)
 }
 
-save_grid(file.path(out, "overview.pdf"), textwidth, 70 / 25.4, overview)
+save_figure("overview", textwidth, 70 / 25.4, overview)
+save_figure("hypergraph", textwidth, 55 / 25.4, hypergraph_figure)
 
 cell <- function(x, y, w, h, text, fill = "white", size = 5.6, family = sans, col = rule) {
   rect(x, y, w, h, fill = fill, col = col, lwd = 0.4)
@@ -154,7 +211,7 @@ layout_figure <- function() {
   label("summaries count the postings\nunder any range of atoms", ox, 13.5, size = 5.4, col = rule, hjust = 0)
 }
 
-save_grid(file.path(out, "layout.pdf"), textwidth, 57 / 25.4, layout_figure)
+save_figure("layout", textwidth, 57 / 25.4, layout_figure)
 
 compaction_figure <- function() {
   live <- hs_light
@@ -199,7 +256,7 @@ compaction_figure <- function() {
   label("released", 74.2, 32.2, size = 5.2, hjust = 0)
 }
 
-save_grid(file.path(out, "compaction.pdf"), column, 55 / 25.4, compaction_figure)
+save_figure("compaction", column, 55 / 25.4, compaction_figure)
 
 wal_figure <- function() {
   y <- 17
@@ -253,4 +310,4 @@ wal_figure <- function() {
         x0, 3.2, size = 5.4, hjust = 0, col = rule)
 }
 
-save_grid(file.path(out, "wal.pdf"), textwidth, 40 / 25.4, wal_figure)
+save_figure("wal", textwidth, 40 / 25.4, wal_figure)

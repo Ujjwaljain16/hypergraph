@@ -192,7 +192,11 @@ ratio_plot <- ggplot(plotted, aes(x = ratio, y = label, colour = Configuration))
   labs(x = "HStore advantage (log scale; above 1 favours HStore)", y = NULL) +
   theme_paper(7) +
   theme(strip.text.y = element_text(angle = 0, hjust = 0), panel.spacing = unit(1.2, "mm"))
-ggsave(file.path(figures, "ratios.pdf"), ratio_plot, device = cairo_pdf, width = column, height = 4.6)
+save_plot("ratios", ratio_plot, column, 4.6, readme = FALSE)
+if (nzchar(readme_images)) {
+  wide <- ratio_plot + facet_wrap(~ group, ncol = 2, scales = "free_y") + theme(legend.position = "top")
+  ggsave(file.path(readme_images, "ratios-wide.svg"), wide, device = svg, width = textwidth, height = 3.6, bg = "white")
+}
 
 lat_workloads <- c(latency.read = "single lookup txn", mixed.read = "reads during writes",
                    latency.commit = "single-update commit", mixed.write = "writer during reads")
@@ -211,7 +215,7 @@ latency_plot <- ggplot(lat_med, aes(x = percentile, y = micros, colour = engine,
   facet_grid(config ~ workload) +
   labs(x = NULL, y = "latency (log scale)") +
   theme_paper(7)
-ggsave(file.path(figures, "latency.pdf"), latency_plot, device = cairo_pdf, width = textwidth, height = 2.9)
+save_plot("latency", latency_plot, textwidth, 2.9, readme = FALSE)
 
 write_workloads <- c(ingest.nodes = "ingest nodes", ingest.edges = "ingest hyperedges", write.update = "update (1,000 per txn)",
                      latency.commit = "single-update commit", churn.delete = "delete hyperedge", churn.remove = "remove member")
@@ -260,7 +264,7 @@ disk_plot <- ggplot(dk_med, aes(x = step, y = checksum / 2^20, colour = engine, 
   theme_paper(7) + theme(plot.title = element_text(size = 7.5, face = "bold"), legend.position = "none")
 
 resources <- written_plot / alloc_plot / disk_plot + plot_layout(heights = c(1.15, 1, 0.9))
-ggsave(file.path(figures, "resources.pdf"), resources, device = cairo_pdf, width = textwidth, height = 5.2)
+save_plot("resources", resources, textwidth, 5.2)
 
 combined_rows <- sapply(workload_order, function(w) {
   get <- function(cfg) cells[cells$config == cfg & cells$workload == w, ]
@@ -341,7 +345,7 @@ if (!is.null(abl)) {
     labs(x = "with the change / without it (log scale; above 1 is better)", y = NULL) +
     theme_paper(7) +
     theme(strip.text.y = element_text(angle = 0, hjust = 0), panel.spacing = unit(1.2, "mm"))
-  ggsave(file.path(figures, "ablation.pdf"), ablation_plot, device = cairo_pdf, width = column, height = 2.6)
+  save_plot("ablation", ablation_plot, column, 2.6, readme = FALSE)
 } else {
   writeLines(character(), file.path(generated, "ablation.tex"))
 }

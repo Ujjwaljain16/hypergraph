@@ -22,8 +22,15 @@ disk <- "#e3ecf3"
 column <- 3.33
 textwidth <- 7.0
 
+readme_images <- Sys.getenv("PAPER_README_IMAGES", "")
+
+open_device <- function(file, width, height) {
+  if (grepl("\\.svg$", file)) svg(file, width = width, height = height, family = sans, bg = "white")
+  else cairo_pdf(file, width = width, height = height, family = sans)
+}
+
 save_grid <- function(file, width, height, draw) {
-  cairo_pdf(file, width = width, height = height, family = sans)
+  open_device(file, width, height)
   on.exit(dev.off())
   grid.newpage()
   pushViewport(viewport(xscale = c(0, width * 25.4), yscale = c(0, height * 25.4)))
@@ -84,3 +91,15 @@ theme_paper <- function(size = 7.5) {
 }
 
 engine_colours <- c(HStore = hs, HyperGraphDB = hg)
+
+save_figure <- function(name, width, height, draw) {
+  save_grid(file.path(Sys.getenv("PAPER_FIGURES", "figures"), paste0(name, ".pdf")), width, height, draw)
+  if (nzchar(readme_images)) save_grid(file.path(readme_images, paste0(name, ".svg")), width, height, draw)
+}
+
+save_plot <- function(name, plot, width, height, readme = TRUE) {
+  ggsave(file.path(Sys.getenv("PAPER_FIGURES", "figures"), paste0(name, ".pdf")), plot, device = cairo_pdf,
+         width = width, height = height)
+  if (readme && nzchar(readme_images)) ggsave(file.path(readme_images, paste0(name, ".svg")), plot, device = svg,
+                                    width = width, height = height, bg = "white")
+}

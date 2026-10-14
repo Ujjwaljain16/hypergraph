@@ -42,9 +42,10 @@ export PAPER_FIGURES=$here/figures
 export PAPER_RESULTS=$here/results
 export PAPER_ABLATION=$here/ablation
 export PAPER_GENERATED=$here/generated
+export PAPER_README_IMAGES=$here/../docs/images
 
 cd "$here"
-mkdir -p generated
+mkdir -p generated "$PAPER_README_IMAGES"
 for script in diagrams results; do
   [ -f "R/$script.R" ] && Rscript "R/$script.R"
 done
