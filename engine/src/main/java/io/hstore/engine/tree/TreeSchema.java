@@ -3,6 +3,8 @@
 
 package io.hstore.engine.tree;
 
+import io.hstore.engine.page.ByteCursor;
+
 import java.util.List;
 
 public record TreeSchema<V>(int id, String name, FingerprintMode fingerprint, ValueCodec<V> codec, EntryMeasure<V> measure) {
@@ -21,7 +23,8 @@ public record TreeSchema<V>(int id, String name, FingerprintMode fingerprint, Va
     }
 
     int entryBytes(Object value) {
-        return codec.maxSize(cast(value));
+        int size = codec.maxSize(cast(value));
+        return codec.independentValues() ? size + ByteCursor.varLongSize(size) : size;
     }
 
     Object implied(long word) {

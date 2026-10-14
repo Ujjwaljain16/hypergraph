@@ -9,6 +9,8 @@ import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageType;
 
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
+import java.util.Collections;
 import java.util.List;
 
 public final class NodeCodec {
@@ -72,8 +74,49 @@ public final class NodeCodec {
             return Leaf.implied(schema, keys, words, summary);
         }
         Object[] values = new Object[keys.length];
-        schema.codec().decode(in, keys, values);
+        if (schema.codec().independentValues()) {
+            decodeFramed(in, schema, keys, values);
+        } else {
+            schema.codec().decode(in, keys, values);
+        }
         return Leaf.decoded(schema, keys, values, summary);
+    }
+
+    private static int[] offsets(ByteCursor in, int count, PageHeader header, long pageId) {
+        int[] offsets = new int[count];
+        long end = PageHeader.SIZE + (long) header.payloadLength();
+        for (int i = 0; i < count; i++) {
+            long length = in.getVarLong();
+            offsets[i] = Math.toIntExact(in.position());
+            if (length < 0 || in.position() + length > end) {
+                throw HStoreException.corrupt(pageId, "value " + i + " runs past the end of the page");
+            }
+            in.skip(length);
+        }
+        if (in.position() != end) {
+            throw HStoreException.corrupt(pageId, "values end at byte " + in.position() + ", not at the end of the payload " + end);
+        }
+        return offsets;
+    }
+
+    private static MemorySegment owned(MemorySegment page) {
+        return page.isNative() ? MemorySegment.ofArray(page.toArray(ValueLayout.JAVA_BYTE)) : page;
+    }
+
+    private static void decodeFramed(ByteCursor in, TreeSchema<?> schema, long[] keys, Object[] into) {
+        long[] key = new long[1];
+        Object[] value = new Object[1];
+        for (int i = 0; i < keys.length; i++) {
+            long length = in.getVarLong();
+            long end = in.position() + length;
+            key[0] = keys[i];
+            schema.codec().decode(in, key, value);
+            if (in.position() != end) {
+                throw new IllegalStateException("value " + i + " of a " + schema + " leaf is " + length + " bytes long but decoded from "
+                        + (in.position() - end + length) + " bytes");
+            }
+            into[i] = value[0];
+        }
     }
 
     private static long[] decodeKeys(ByteCursor in, int count) {
@@ -93,10 +136,22 @@ public final class NodeCodec {
         }
         @SuppressWarnings("unchecked")
         List<V> values = (List<V>) leaf.valueList();
-        schema.codec().encode(out, keys, values);
+        if (!schema.codec().independentValues()) {
+            schema.codec().encode(out, keys, values);
+            return;
+        }
+        ByteCursor value = ByteCursor.growable(256);
+        long[] key = new long[1];
+        for (int i = 0; i < keys.length; i++) {
+            value.position(0);
+            key[0] = keys[i];
+            schema.codec().encode(value, key, Collections.singletonList(values.get(i)));
+            MemorySegment written = value.written();
+            out.putVarLong(written.byteSize()).putSegment(written);
+        }
     }
 
-    private static boolean refersToPages(Leaf leaf) {
+    static boolean refersToPages(Leaf leaf) {
         return leaf.schema.codec().holdsRefs() && refersToPages(leaf.schema, leaf.valueList());
     }
 
@@ -137,6 +192,9 @@ public final class NodeCodec {
         long[] keys = decodeKeys(in, count);
         return switch (header.type()) {
             case LEAF -> {
+                if (schema.codec().independentValues()) {
+                    yield Leaf.packed(schema, keys, owned(page), offsets(in, count, header, pageId), header.refersToPages(), summary);
+                }
                 Leaf leaf = decodeLeaf(in, schema, keys, summary);
                 if (header.refersToPages() != refersToPages(leaf)) {
                     throw HStoreException.corrupt(pageId, "page header and contents disagree on whether it refers to other pages");

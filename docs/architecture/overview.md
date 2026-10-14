@@ -154,7 +154,7 @@ sequenceDiagram
 
 Notes:
 
-* Nodes are decoded once and then shared by every reader through `NodeCache`. It has 16 shards, each an open-addressing table keyed by page number plus a CLOCK (second-chance) ring, with a total byte budget of `node_cache_mb`, each node counted at an estimate of its heap size (`Node.heapBytes`). Lookups are lock-free; only admission takes a per-shard lock. Decoded nodes are immutable (`owner == null`), so sharing them needs no copying. See [pages.md](../storage/pages.md#caching-and-io-accounting).
+* Nodes are decoded once and then shared by every reader through `NodeCache`. Catalog and posting-list leaves are kept packed and decode each record the first time it is read. It has 16 shards, each an open-addressing table keyed by page number plus a CLOCK (second-chance) ring, with a total byte budget of `node_cache_mb`, each node counted at an estimate of its heap size (`Node.heapBytes`). Lookups are lock-free; only admission takes a per-shard lock. Decoded nodes are immutable (`owner == null`), so sharing them needs no copying. See [pages.md](../storage/pages.md#caching-and-io-accounting).
 * `IoTrace` is bound with `ScopedValue.where(...)` around a query. `recordRead` throws `HStoreException.limit` once page reads plus cache hits exceed the query's page budget (`query_page_budget`).
 * A tree changed since the last checkpoint starts with in-memory nodes (`Ref.Pending`). A read follows those directly and goes through `PagedNodeSource` only once it reaches a stored reference.
 * Historical reads use `TransactionManager.snapshotAt(generation, branch)`. It looks the generation up in the retained `history` map; see [catalog-and-generations.md](../storage/catalog-and-generations.md#history-retention-and-time-travel).
@@ -248,7 +248,7 @@ semantic/state                           53 B  persisted HNSW index state (datab
 
 | Path | Owner | Format |
 |---|---|---|
-| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=7` (commits logged as key changes and tree pages written at checkpoints, page numbers resolved through a page directory, reference counts per page, small member trees inline in their edge record) and `page-size` (the maximum node size). Opening a directory written in an older format, or opening with a different page size, fails. |
+| `FORMAT` | `StorageEngine.verifyFormat` | `Properties` with `format=8` (leaf records framed by length, commits logged as key changes and tree pages written at checkpoints, page numbers resolved through a page directory, reference counts per page, small member trees inline in their edge record) and `page-size` (the maximum node size). Opening a directory written in an older format, or opening with a different page size, fails. |
 | `LOCK` | `StorageEngine.open` | An exclusive OS file lock. A second process gets `database ... is opened by another process`. |
 | `catalog/generations/%016x.cat` | `CatalogStore.publish` | `int magic 0x54414348`, `int crc32c(payload)`, `long length`, then the `CatalogImage` payload. Written to `*.tmp`, fsynced, atomically renamed, and the directory fsynced. The three newest files are kept. |
 | `catalog/manifest` | `CatalogStore` | The file name of the latest `.cat`, written durably the same way. |
