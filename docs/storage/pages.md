@@ -281,7 +281,7 @@ sequenceDiagram
 * Allocation is serialized by a `ReentrantLock`, and only the counter and directory updates run under it.
 * Rolling a segment marks the previous one `SEALED`, creates the next id, forces the `data/segments` directory so the new file's entry is durable before any page in it is, and resets `nextUnit` to 0.
 * `PageStore.write(pageId, image)` looks the number up in the directory and performs a positional `FileChannel.write` at `offset × 64`, then marks the file dirty. It refuses an image longer than the units allocated for it. A checkpoint writes each image as soon as it has allocated it. For the pages a commit writes, the write happens later, inside `TransactionManager.append`, after the WAL records have been appended (see [wal-and-recovery.md](../transactions/wal-and-recovery.md)).
-* `PageStore.sync()` calls `FileChannel.force(false)` on every dirty segment. The group committer calls it once per batch in `PAGE_REFERENCES` WAL mode, before the WAL sync, if a commit in the batch wrote pages. `PageStore.checkpoint()` does the same and then forces the page directory; only `Checkpointer` calls it.
+* `PageStore.sync()` calls `FileChannel.force(false)` on every segment written since the last sync, and leaves every other segment alone, open or not. The group committer calls it once per batch in `PAGE_REFERENCES` WAL mode, before the WAL sync, if a commit in the batch wrote pages. `PageStore.checkpoint()` does the same and then forces the page directory; only `Checkpointer` calls it.
 
 Compared with fixed page slots, packing removes almost all internal fragmentation for the many small nodes a hypergraph produces. A member tree stored as a page is still an image of at least 128 bytes (two units), even for two members. That is why small member trees are not stored as pages at all, but inline in their edge record ([persistent-tree.md](persistent-tree.md#inline-trees)).
 
@@ -325,6 +325,26 @@ ever appended to or deleted, never truncated, so a map can't end up pointing pas
 
 A short read at the end of the file returns what it got, and the header check rejects it. Both paths return
 read-only memory, so nothing can write into a stored image through a read.
+
+### Open files (`FilePool`)
+
+A store does not keep a file open per segment. `PageStore` owns a `FilePool` of at most `max_open_segment_files`
+(`EngineOptions.maxOpenSegmentFiles`, default 256) open `FileHandle`s, and every write, `pread`, map and sync on a
+segment borrows its handle from the pool for the length of that one call:
+
+* Opening the store only lists the segment files and reads their sizes with `stat`. A file is opened the first
+  time a call needs it, and rolling to a new segment opens (and creates) the new file straight away.
+* A handle in use by a call is never closed. When the pool is full, the handle that has gone unused the longest is
+  closed to make room. If every handle is in use, the caller waits until one is returned.
+* A file closed to make room is forced first if it has writes no sync has covered yet. A failed force puts the file
+  back in the unsynced set and fails the call that needed the room.
+* Each write marks its file unsynced. `sync()` forces only the unsynced files and takes them out of the set.
+* Deleting or closing a segment closes its handle once no call is using it. A deleted segment's entry refuses to
+  open again, so a late sync can't recreate the file.
+
+A memory map does not need its file to stay open, so a sealed segment that is mapped is read without a handle at
+all. Its handle is closed like any other once it is the least recently used. The map is only replaced when the
+segment grows past it, which takes a handle again for the `map` call.
 
 ### Interrupted threads
 
