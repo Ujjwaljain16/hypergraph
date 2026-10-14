@@ -14,6 +14,7 @@ import io.hstore.db.security.Principal;
 import io.hstore.db.security.Role;
 import io.hstore.db.security.Security;
 import io.hstore.db.value.Json;
+import io.hstore.engine.CheckpointThreshold;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.EngineStats;
 import io.hstore.engine.HStoreException;
@@ -441,6 +442,7 @@ public final class Studio implements AutoCloseable {
         TransactionManager.Statistics transactions = database.engine().transactions().statistics();
         Recovery.Outcome recovery = database.engine().recovery();
         EngineOptions configured = database.engine().options();
+        CheckpointThreshold checkpoint = database.engine().checkpointThreshold();
         return Response.json(JsonFields.object()
                 .put("sampledAt", System.currentTimeMillis())
                 .put("startedAt", startedAt)
@@ -481,7 +483,8 @@ public final class Studio implements AutoCloseable {
                         .put("walMode", configured.walMode().name())
                         .put("nodeCacheBytes", configured.nodeCacheBytes())
                         .put("historyLimit", configured.historyLimit())
-                        .put("checkpointWalBytes", configured.checkpointWalBytes())
+                        .put("checkpointWalBytes", checkpoint.bytes())
+                        .put("checkpointSource", checkpoint.source().name().toLowerCase())
                         .build())
                 .put("semanticGeneration", database.semantic().indexedGeneration())
                 .put("studioSessions", sessions.size())

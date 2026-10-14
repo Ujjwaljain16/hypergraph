@@ -115,6 +115,17 @@ final class ServerConfig {
         return (int) value;
     }
 
+    private long checkpointWalBytes() {
+        String value = string(Setting.CHECKPOINT_WAL_MB);
+        if (value.equalsIgnoreCase("auto")) {
+            return EngineOptions.AUTOMATIC_CHECKPOINTS;
+        }
+        if (!value.matches("-?[0-9]+")) {
+            throw new IllegalArgumentException("checkpoint_wal_mb must be auto or a number of megabytes, not " + value);
+        }
+        return megabytes(Setting.CHECKPOINT_WAL_MB);
+    }
+
     boolean flag(Setting setting) {
         return switch (values.get(setting).toLowerCase()) {
             case "on", "true", "yes", "1" -> true;
@@ -134,7 +145,7 @@ final class ServerConfig {
                 .withWalMode(string(Setting.WAL_MODE).equalsIgnoreCase("images") ? WalMode.PAGE_IMAGES : WalMode.PAGE_REFERENCES)
                 .withNodeCacheBytes(megabytes(Setting.NODE_CACHE_MB))
                 .withMaxOpenSegmentFiles(positive(Setting.MAX_OPEN_SEGMENT_FILES))
-                .withCheckpointWalBytes(number(Setting.CHECKPOINT_WAL_MB) << 20)
+                .withCheckpointWalBytes(checkpointWalBytes())
                 .withWriteBufferBytes(megabytes(Setting.WRITE_BUFFER_MB))
                 .withHistoryLimit(integer(Setting.HISTORY_LIMIT))
                 .withCompactionLiveRatio(Double.parseDouble(string(Setting.COMPACTION_LIVE_RATIO)))
