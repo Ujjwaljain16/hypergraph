@@ -83,7 +83,7 @@ public final class StorageEngine implements AutoCloseable {
         CatalogImage checkpoint = Recovery.discover(catalog);
         this.pages = PageStore.open(directory.resolve("data").resolve("segments"), options.pageSize(), options.pagesPerSegment(),
                 options.maxOpenSegmentFiles(), checkpoint.segments(), checkpoint.checkpointLsn());
-        this.wal = WriteAheadLog.open(directory.resolve("wal").resolve("segments"), options.walSegmentBytes());
+        this.wal = WriteAheadLog.open(directory.resolve("wal").resolve("segments"), options.walSegmentBytes(), options.faults());
         this.slots = new SlotRegistry(options.slots());
         FeedCodec codec = new FeedCodec(slots);
         this.feed = ChangeFeed.open(directory.resolve("feed"), codec, options.walSegmentBytes());

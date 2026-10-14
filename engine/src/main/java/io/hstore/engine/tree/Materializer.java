@@ -7,6 +7,8 @@ import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageId;
 
 import java.lang.foreign.MemorySegment;
+import java.util.IdentityHashMap;
+import java.util.Map;
 import java.util.function.Consumer;
 
 public final class Materializer {
@@ -203,45 +205,65 @@ public final class Materializer {
         return total[0];
     }
 
-    public static Ref rebound(Ref ref, TreeSchema<?> schema, Epoch epoch) {
-        if (!(ref instanceof Ref.Pending(Node node))) {
-            return ref;
+    public static final class Rebinding {
+
+        private final Epoch epoch;
+        private final Map<Node, Ref> visited = new IdentityHashMap<>();
+
+        public Rebinding(Epoch epoch) {
+            this.epoch = epoch;
         }
-        Ref written = node.writtenIn(epoch);
-        if (written != null) {
-            return written;
+
+        public Ref rebound(Ref ref, TreeSchema<?> schema) {
+            if (!(ref instanceof Ref.Pending(Node node))) {
+                return ref;
+            }
+            Ref written = node.writtenIn(epoch);
+            if (written != null) {
+                return written;
+            }
+            Ref known = visited.get(node);
+            if (known != null) {
+                return known instanceof Ref.Pending(Node same) && same == node ? ref : known;
+            }
+            Ref result = switch (node) {
+                case Leaf leaf -> rebound(ref, leaf);
+                case Branch branch -> rebound(ref, branch);
+            };
+            visited.put(node, result);
+            return result;
         }
-        return switch (node) {
-            case Leaf leaf -> {
-                if (!leaf.schema.codec().holdsRefs()) {
-                    yield ref;
-                }
-                Object[] values = leaf.valueList().toArray();
-                boolean changed = false;
-                for (int i = 0; i < values.length; i++) {
-                    boolean[] moved = {false};
-                    Object mapped = mapRefs(leaf.schema, values[i], (nested, nestedSchema) -> {
-                        Ref rebound = rebound(nested, nestedSchema, epoch);
-                        moved[0] |= rebound != nested;
-                        return rebound;
-                    });
-                    if (moved[0]) {
-                        values[i] = mapped;
-                        changed = true;
-                    }
-                }
-                yield changed ? new Ref.Pending(leaf.frozenWith(values)) : ref;
+
+        private Ref rebound(Ref ref, Leaf leaf) {
+            if (!leaf.schema.codec().holdsRefs()) {
+                return ref;
             }
-            case Branch branch -> {
-                Ref[] children = branch.childArray();
-                boolean changed = false;
-                for (int i = 0; i < children.length; i++) {
-                    Ref rebound = rebound(children[i], branch.schema, epoch);
-                    changed |= rebound != children[i];
-                    children[i] = rebound;
+            Object[] values = leaf.valueList().toArray();
+            boolean changed = false;
+            for (int i = 0; i < values.length; i++) {
+                boolean[] moved = {false};
+                Object mapped = mapRefs(leaf.schema, values[i], (nested, nestedSchema) -> {
+                    Ref rebound = rebound(nested, nestedSchema);
+                    moved[0] |= rebound != nested;
+                    return rebound;
+                });
+                if (moved[0]) {
+                    values[i] = mapped;
+                    changed = true;
                 }
-                yield changed ? new Ref.Pending(branch.frozenWith(children)) : ref;
             }
-        };
+            return changed ? new Ref.Pending(leaf.frozenWith(values)) : ref;
+        }
+
+        private Ref rebound(Ref ref, Branch branch) {
+            Ref[] children = branch.childArray();
+            boolean changed = false;
+            for (int i = 0; i < children.length; i++) {
+                Ref rebound = rebound(children[i], branch.schema);
+                changed |= rebound != children[i];
+                children[i] = rebound;
+            }
+            return changed ? new Ref.Pending(branch.frozenWith(children)) : ref;
+        }
     }
 }

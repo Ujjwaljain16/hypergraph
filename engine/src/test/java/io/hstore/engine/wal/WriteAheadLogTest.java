@@ -3,6 +3,8 @@
 
 package io.hstore.engine.wal;
 
+import io.hstore.engine.txn.CrashPoint;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -14,6 +16,8 @@ import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.random.RandomGenerator;
 import java.util.random.RandomGeneratorFactory;
 import java.util.stream.Stream;
@@ -103,6 +107,33 @@ class WriteAheadLogTest {
             written.forEach(wal::append);
         }
         try (WriteAheadLog wal = WriteAheadLog.open(directory, 1 << 20)) {
+            assertEquals(written.stream().map(WriteAheadLogTest::describe).toList(), replay(wal));
+        }
+    }
+
+    @Test
+    void aSyncWhoseSegmentRollsAwayDuringTheForceSucceeds() {
+        List<WalRecord> written = new ArrayList<>(records(40, 17));
+        AtomicReference<WriteAheadLog> opened = new AtomicReference<>();
+        AtomicBoolean armed = new AtomicBoolean();
+        WalRecord large = new WalRecord.Feed(99, new byte[(int) SEGMENT_BYTES]);
+        long end;
+        try (WriteAheadLog wal = WriteAheadLog.open(directory, SEGMENT_BYTES, point -> {
+            if (point == CrashPoint.WAL_FORCE && armed.compareAndSet(true, false)) {
+                opened.get().append(large);
+            }
+        })) {
+            opened.set(wal);
+            written.forEach(wal::append);
+            int segments = wal.segmentCount();
+            armed.set(true);
+            wal.sync();
+            written.add(large);
+            assertEquals(segments + 1, wal.segmentCount());
+            end = wal.end();
+        }
+        try (WriteAheadLog wal = WriteAheadLog.open(directory, SEGMENT_BYTES)) {
+            assertEquals(end, wal.end());
             assertEquals(written.stream().map(WriteAheadLogTest::describe).toList(), replay(wal));
         }
     }
