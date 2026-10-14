@@ -1,0 +1,12 @@
+\section{Introduction}
+
+Many datasets record facts that involve more than two things at once. An insurance claim joins a patient, a provider, a drug and a pharmacy. A paper joins its authors, and a meeting joins its participants. A hypergraph stores each such fact as one hyperedge over all of its participants. A property graph has to break the same fact into a new node and one edge per participant, and a relational schema into a join table. Queries then ask hypergraph questions: which facts involve this entity, which facts involve both of these entities, and what lies two hops away.
+
+HyperGraphDB~\cite{hgdb} is the established open-source hypergraph database for the JVM. It stores atoms and links in Berkeley DB Java Edition (JE), a general-purpose log-structured key-value store. HStore is a newer engine built for this data model. Its incidence sets and hyperedge memberships are counted B+trees, and its storage, transaction and recovery design is described in \cref{sec:systems}.
+
+This report compares the two systems at the storage level, on the same machine and data, with the same cache budget. We measure what an embedded application sees: throughput of loads, updates, deletes and reads; per-operation latency, including tail latency while another thread writes; behaviour of giant hyperedges; disk footprint before and after deletes and space reclamation; time to recover after a crash; and the bytes written, heap allocated and GC time behind each result. Every read result is cross-checked between the two systems.
+
+\Cref{sec:method} describes the dataset, workloads and measurement method. \Cref{sec:results} presents the results, and \cref{sec:discussion} explains them in terms of each system's design. \Cref{sec:validity} lists the limits of this study. Full tables, per-run values and the steps to reproduce every number are in the appendices.
+
+\paragraph{Summary of findings.}
+\input{sections/findings}

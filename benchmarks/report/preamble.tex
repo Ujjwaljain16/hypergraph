@@ -1,0 +1,49 @@
+\usepackage[letterpaper,margin=0.75in,columnsep=0.25in]{geometry}
+\usepackage{libertinus}
+\usepackage{microtype}
+\usepackage{titlesec}
+\titlespacing*{\paragraph}{0pt}{5pt plus 2pt minus 1pt}{0.6em}
+\titleformat{\paragraph}[runin]{\normalfont\bfseries}{}{0pt}{}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{amsmath}
+\usepackage{pgfplots}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,calc}
+\pgfplotsset{compat=1.18}
+\usepackage[hidelinks]{hyperref}
+\usepackage{cleveref}
+
+\definecolor{hs}{HTML}{1F4E79}
+\definecolor{hg}{HTML}{B4B4B4}
+\definecolor{rule}{HTML}{555555}
+
+\captionsetup{font=small,labelfont=bf,skip=4pt}
+\setlist{nosep,leftmargin=1.2em}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.08}
+\frenchspacing
+
+\newcommand{\wl}[1]{\texttt{#1}}
+\newcommand{\M}[1]{\csname #1\endcsname}
+\newcommand{\hstore}{HStore}
+\newcommand{\hgdb}{HyperGraphDB}
+
+\pgfplotsset{
+  report/.style={
+    font=\footnotesize,
+    tick label style={font=\scriptsize},
+    label style={font=\footnotesize},
+    legend style={font=\scriptsize,draw=none,fill=none},
+    axis line style={rule},
+    tick style={rule},
+    major grid style={gray!25},
+  },
+}

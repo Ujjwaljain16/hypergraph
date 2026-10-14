@@ -6,9 +6,10 @@ other hyperedges. HStore stores this structure directly instead of reifying it i
 relational join tables.
 
 The engine implements the design of *Native Persistent Hypergraph Storage Engine* together with its
-higher-order extension. Membership and incidence are copy-on-write counted B+trees with monoid summaries.
-Commits are atomic root swaps. The database layer adds a query language (HQL), hypergraph relational operators,
-a semantic plane, multi-tenancy and a web console.
+higher-order extension. Membership and incidence are copy-on-write counted B+trees with monoid summaries. A
+commit logs only the keys it changed and publishes a new immutable generation; a background checkpoint later
+writes the changed tree nodes to pages, once for all the commits since the last one. The database layer adds a
+query language (HQL), hypergraph relational operators, a semantic plane, multi-tenancy and a web console.
 
 It is written in Java 25 and ships as one GraalVM native executable, `hstore`.
 
@@ -21,6 +22,11 @@ It is written in Java 25 and ships as one GraalVM native executable, `hstore`.
 * **Transactions.** Snapshot isolation by default and `SERIALIZABLE` on request. Optimistic concurrency with
   commutative rebase of set operations. Group commit. Two WAL modes (page references or page images). Crash
   recovery that never exposes a partial commit.
+* **Small commits.** A commit writes a log record of the keys it changed, a few hundred bytes, instead of new
+  pages. Checkpoints write each changed node once, and `write_buffer_mb` caps the memory held by nodes that
+  haven't been written yet.
+* **Space reclamation.** Pages carry reference counts. Compaction moves the live pages out of mostly dead
+  segments without rewriting the trees that point at them, while readers keep running.
 * **Leapfrog incidence intersection.** Co-membership queries intersect sorted incidence trees and skip with
   subtree summaries.
 * **Branches.** `CREATE BRANCH`, isolated what-if writes, `DIFF`, three-way `MERGE … ON CONFLICT`.
@@ -37,6 +43,27 @@ It is written in Java 25 and ships as one GraalVM native executable, `hstore`.
 * **HStore Studio.** A built-in web console with an HQL editor, a native hypergraph visualiser (hubs, role
   spokes, hulls, ordered chains, time-travel slider), a schema browser, a live engine dashboard and access
   management.
+
+## Performance
+
+HStore against HyperGraphDB 1.4 on Berkeley DB JE, both with 64 MiB caches, at scale 1 (50,000 nodes, 100,000
+hyperedges) with `async` durability. Each figure is the median of 5 runs on one laptop:
+
+| Workload | HStore | HyperGraphDB | |
+|---|---:|---:|---:|
+| Incidence set of a node | 6.26 M/s | 1.49 M/s | 4.2× faster |
+| Hyperedges shared by two nodes | 610 k/s | 53.9 k/s | 11.3× faster |
+| Value updates, 1,000 per transaction | 69.9 k/s | 13.0 k/s | 5.4× faster |
+| Bytes written per single-update commit | 659 B | 6.9 KiB | 10.7× fewer |
+| Commit latency, p99 | 296 µs | 466 µs | 1.6× lower |
+| Disk after loading | 92 MiB | 346 MiB | 3.7× smaller |
+
+At scale 4 (200,000 nodes, 400,000 hyperedges), where the files of both stores outgrow their caches, the
+leads widen: incidence sets 11.4×, value updates 33×, and listing a hyperedge's members 3.2× faster.
+HyperGraphDB opens a store after a crash faster at scale 1, 76 ms against 128 ms. With `sync` durability,
+single commits in both are bound by the cost of a forced write. The
+[benchmark report](docs/benchmark-report.pdf) (PDF) covers every workload, configuration and caveat, and
+[docs/benchmarks.md](docs/benchmarks.md) explains how to rerun it.
 
 ## Quick start with Docker
 
@@ -173,6 +200,7 @@ The full index is [docs/README.md](docs/README.md).
 | Wire protocol | [docs/operations/wire-protocol.md](docs/operations/wire-protocol.md) |
 | HStore Studio | [docs/operations/studio.md](docs/operations/studio.md) |
 | Benchmarks against HyperGraphDB | [docs/benchmarks.md](docs/benchmarks.md) |
+| Benchmark report (PDF) | [docs/benchmark-report.pdf](docs/benchmark-report.pdf) |
 | Development | [docs/development.md](docs/development.md) |
 
 ## Contributing

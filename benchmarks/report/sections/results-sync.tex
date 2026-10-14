@@ -1,0 +1,10 @@
+\subsection{Synchronous commits}
+\label{sec:sync}
+
+With synchronous commits, every acknowledged commit has been forced to stable storage. On this machine a forced write costs about 4\,ms, and it dominates single-update transactions in both systems. HStore commits \M{hBlatencycommit} of them per second and HyperGraphDB \M{gBlatencycommit} (\M{sumBlatencycommit}). The medians are \M{latBhstorelatencycommitmed} and \M{latBhgdblatencycommitmed}, one forced write each, and HStore's lead comes from the tail: \M{latBhstorelatencycommitpthree} against \M{latBhgdblatencycommitpthree} at p99.9.
+
+Batched work spreads the forced write over 1,000 operations. HStore inserts nodes \M{sumBingestnodes} as fast as HyperGraphDB and hyperedges \M{sumBingestedges} as fast (ranges overlapping), and updates values \M{sumBwriteupdate} as fast. The open-loop writer of \wl{mixed} commits 10 updates every 10\,ms. Both systems held that schedule in every run. Measured from their scheduled start, HStore's commits took \M{latBhstoremixedwritemed} at the median and \M{latBhstoremixedwriteptwo} at p99, and HyperGraphDB's \M{latBhgdbmixedwritemed} and \M{latBhgdbmixedwriteptwo}.
+
+Under synchronous commits, JE reports \M{bpoBhgdblatencycommit} written per single-update commit, against \M{bpoAhgdblatencycommit} with asynchronous commits. The extra bytes come with the log flush that the adapter adds (\cref{sec:durability}). We have not established what JE writes in that flush, so the bytes-written figures for synchronous single commits in \cref{app:full} should not be read as a comparison.
+
+Reads do not commit, and HStore leads every read workload in this configuration as well at the median, with overlapping ranges for member enumeration and giant-edge scans (\cref{tab:summary}). Recovery after SIGKILL takes \M{hBrecover} in HStore and \M{gBrecover} in HyperGraphDB at the median, and the ranges do not overlap. As in every other configuration, no run of either system lost an acknowledged commit.

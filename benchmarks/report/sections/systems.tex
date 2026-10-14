@@ -1,0 +1,92 @@
+\section{Systems under test}
+\label{sec:systems}
+
+Both systems are embedded Java libraries. Each runs in its own JVM process, and the benchmark harness calls its API directly. Neither is accessed over a network.
+
+\subsection{HStore}
+
+\paragraph{Data model.} Every stored object is an \emph{atom} with a 64-bit identifier. An atom is a node or a hyperedge. A hyperedge has any number of members, and a member can itself be a hyperedge. Hyperedges are either \emph{set} edges, keyed by member, or \emph{ordered} edges, keyed by position. Each membership carries a role set, a weight, a validity interval and a qualifier. The benchmark uses set edges and plain memberships.
+
+\paragraph{Layout.} All persistent state is held in copy-on-write counted B+trees. Every child reference stores a summary of its subtree: the entry count, the key range and an order-independent fingerprint. Three trees matter here:
+\begin{itemize}
+\item The \emph{catalog} maps an atom id to its record. A hyperedge record holds a reference to that edge's \emph{membership tree}, keyed by member id. If the membership tree is one leaf of at most 32 entries that fits in about 100 bytes, it is stored inside the record itself and needs no page of its own.
+\item The \emph{reverse incidence index} maps an atom id to the set of hyperedges that contain it. Sets of up to 48 entries are stored inline in the index leaf. Larger sets are promoted to a tree of their own.
+\item Secondary indexes on node keys and properties, which the benchmark touches only through node insertion and updates.
+\end{itemize}
+Enumerating an incidence set is a cursor walk over one inline list or one small tree. Counting the hyperedges that contain two given atoms is a leapfrog intersection~\cite{leapfrog} of their two incidence trees. The intersection skips whole subtrees whose key range cannot contain a match.
+
+\paragraph{Pages and files.} A tree node is written as a self-describing image: an 80-byte header with a CRC32C checksum, followed by the payload. Images are packed into append-only segment files of 256\,MiB, aligned to 64-byte units. A page directory maps each page number to the image's current address, so compaction can move an image without rewriting the trees that refer to it. Reads go through a memory map of each segment. Decoded nodes are kept in a node cache whose budget is set in bytes. In catalog and incidence index leaves, each record is preceded by its length. A leaf read from a page keeps the page bytes and the offset of every record, and decodes a record the first time it is read. A decoded record is then kept in the leaf and charged to the node cache, so a lookup that misses the cache decodes only the record it needs.
+
+\paragraph{Generations and readers.} A committed state is a \emph{generation}: an immutable vector of tree roots. A reader pins a generation and reads it without locks. Writers never modify a node that a published generation can reach, as in other copy-on-write B+tree stores~\cite{lmdb}. The last 64 generations are retained for time travel.
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  font=\footnotesize,
+  box/.style={draw=rule,rounded corners=2pt,minimum height=9mm,minimum width=25mm,inner sep=3pt,align=center,fill=white},
+  disk/.style={box,fill=hs!9},
+  arr/.style={-{Stealth[length=2mm]},rule,semithick},
+  lab/.style={font=\scriptsize,align=center,text=black!75}]
+\node[box] (txn) at (0,0) {Transaction\\private workspace};
+\node[box] (commit) at (4.4,0) {Commit\\(holds commit lock)};
+\node[box,minimum width=36mm] (gen) at (9.8,0) {Published generation $g$\\changed nodes still in memory};
+\node[box] (read) at (15.1,0) {Readers\\pin $g$, no locks};
+\node[disk] (wal) at (4.4,-2.3) {Write-ahead log\\changed keys per tree};
+\node[box,minimum width=36mm] (ckpt) at (9.8,-2.3) {Checkpoint\\(background thread)};
+\node[disk] (seg) at (15.1,-2.3) {Segment files\\and page directory};
+\node[disk,minimum width=36mm] (cat) at (9.8,-4.3) {Catalog image\\and page reference counts};
+\draw[arr] (txn) -- (commit);
+\draw[arr] (commit) -- node[lab,above]{(2) publish\\new roots} (gen);
+\draw[arr] (read) -- (gen);
+\draw[arr] (commit) -- node[lab,left]{(1) append, then\\one fsync per group} (wal);
+\draw[arr] (gen) -- node[lab,left]{(3) nodes no\\checkpoint wrote} (ckpt);
+\draw[arr] (ckpt) -- node[lab,below]{(4) write each\\node once, sync} (seg);
+\draw[arr] (ckpt) -- node[lab,right]{(5) count, publish} (cat);
+\draw[arr] (ckpt) -- node[lab,above]{(7) truncate} (wal);
+\draw[arr,dashed] (ckpt.north east) to[out=40,in=-40] node[lab,right]{(6) swap in\\stored references} (gen.south east);
+\end{tikzpicture}
+\caption{HStore's write path. (1, 2) A commit logs only the keys it changed and publishes new roots whose changed nodes are still in memory. (3--7) A background checkpoint writes those nodes to pages, once for all the commits since the previous checkpoint, then swaps the stored references into the current generation and truncates the log. Only step 6 takes the commit lock.}
+\label{fig:writepath}
+\end{figure*}
+
+\paragraph{Commits and checkpoints.} \Cref{fig:writepath} shows the write path. A transaction collects its changes in a private workspace. At commit it applies them to new copies of the affected tree paths, appends one write-ahead log record listing the keys it changed in each tree, and publishes the new generation. The new tree nodes stay in memory, reachable from the published roots. A background checkpoint later writes every node that no earlier checkpoint wrote, syncs the files, updates page reference counts, and publishes a catalog image. It then swaps the stored references into the current generation and truncates the log. Only the swap holds the commit lock. Memory held by unwritten nodes is capped at 64\,MiB. A commit that finds the cap reached waits for a checkpoint.
+
+Two exceptions write pages before the checkpoint. A large bulk load spills finished subtrees to pages while it runs, and a tree that changed in more than 4,096 places is written to pages at commit and logged by reference. Under \emph{synchronous} durability, a commit returns after its log record is fsynced; concurrent commits share one fsync (group commit). Under \emph{asynchronous} durability the fsync is skipped, but commits are still published strictly in order.
+
+\paragraph{Recovery.} On open, HStore loads the newest catalog image and replays the logged key changes of every commit after it, in commit order. A commit's changes are applied only if its commit record reached the log, so recovery always yields a prefix of the commit order.
+
+\paragraph{Space reclamation.} Every page has a reference count, which changes only at checkpoints. A page no generation can reach is released once no pinned reader can see it. A segment whose live bytes fall below half of the bytes written to it is compacted: its live images are copied to the active segment, the page directory is updated, and the old file is deleted once no reader can still be using it. A background maintenance pass, run every 500\,ms, compacts one such segment at a time. An explicit compaction request compacts all of them.
+
+\subsection{HyperGraphDB}
+
+HyperGraphDB~\cite{hgdb} is a general hypergraph database for Java. Its atoms are identified by persistent handles (UUIDs). A link stores the ordered array of its target handles. The benchmark uses \texttt{HGPlainLink} for hyperedges and \texttt{String} atoms for nodes. The incidence set of an atom, the links pointing to it, is maintained by HyperGraphDB in a separate index. The atom cache keeps recently used atoms and incidence sets in memory as Java objects.
+
+We use the Berkeley DB Java Edition storage implementation (\texttt{bdb-je}), the default for HyperGraphDB~1.4. JE is a log-structured B+tree store~\cite{je,lfs}: every update appends a new version of the changed records and internal nodes to the log. A background cleaner copies the live entries out of underused log files and deletes them. A checkpointer bounds recovery time. Incidence sets are stored as sorted duplicate sets in a JE database. A lookup opens a cursor at the atom's handle.
+
+\subsection{Synchronous commits in HyperGraphDB}
+\label{sec:durability}
+
+HyperGraphDB 1.4 begins every JE transaction with an explicit \texttt{WRITE\_NO\_SYNC} durability. That setting overrides the environment-wide \texttt{COMMIT\_SYNC}, so configuring the environment alone leaves commits unsynced: in a first run of the synchronous configuration, HyperGraphDB committed single updates in about 0.1\,ms, while one forced write on this machine takes about 3.8\,ms. For the synchronous configuration the HyperGraphDB adapter therefore calls \texttt{Environment.flushLog(true)} after every commit. This writes and forces JE's log, which is what \texttt{COMMIT\_SYNC} would do at commit time. The asynchronous configuration is unaffected.
+
+\subsection{Versions and configuration}
+
+\Cref{tab:config} lists the configuration of both systems. The two caches are given the same 64\,MiB budget. HStore's budget covers decoded nodes. JE's budget covers its B+tree nodes and records, and HyperGraphDB's atom cache comes on top of it. That cache is sized by HyperGraphDB itself and cannot be capped in bytes. The retained-heap figure in \cref{sec:resources} shows what each store actually kept.
+
+\begin{table*}[t]
+\centering\footnotesize
+\caption{System configuration. Both systems use their defaults except where stated.}
+\label{tab:config}
+\begin{tabularx}{0.82\textwidth}{@{}lXX@{}}
+\toprule
+& \hstore & \hgdb \\
+\midrule
+Version & 0.1.0, commit \texttt{9291e18}, storage format 8 & 1.4, commit \texttt{99485a1}; JE 5.0.73 \\
+Cache & node cache, 64\,MiB & JE cache 64\,MiB, plus atom cache \\
+Async commits & no fsync, ordered publication & JE \texttt{WRITE\_NO\_SYNC} (default) \\
+Sync commits & fsync per commit group & JE log forced after each commit (\cref{sec:durability}) \\
+Page / node size & 16\,KiB pages & JE defaults \\
+Space reclamation & compact segments below 50\% live & cleaner, 50\% minimum utilisation \\
+History & 64 generations & none \\
+\bottomrule
+\end{tabularx}
+\end{table*}

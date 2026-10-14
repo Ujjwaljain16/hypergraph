@@ -15,3 +15,5 @@ benchmarks/results/
 Thumbs.db
 
 .mvn/wrapper/maven-wrapper.jar
+benchmarks/report/gen/
+benchmarks/report/report.pdf

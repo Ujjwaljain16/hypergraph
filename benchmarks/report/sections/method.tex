@@ -1,0 +1,100 @@
+\section{Benchmark design}
+\label{sec:method}
+
+\subsection{Dataset}
+
+The dataset is generated from a fixed seed (20260904), so both systems load exactly the same graph. At scale $s$ it has $50{,}000\,s$ nodes and $100{,}000\,s$ hyperedges. The cardinality of a hyperedge follows a geometric tail: it starts at 2 and each further member is added with probability 0.62, up to 32, for a mean of 3.6. Members are drawn as $\lfloor n\,u^{2.2}\rfloor$ for uniform $u\in[0,1)$ over $n$ nodes. Low-numbered nodes therefore become hubs with large incidence sets, as in co-authorship, claims or citation data. Hyperedges never repeat a member.
+
+\begin{table}[t]
+\centering\footnotesize
+\caption{Dataset statistics, computed from the generator. An incidence set is the set of hyperedges that contain a node.}
+\label{tab:dataset}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+& Scale 1 & Scale 4 \\
+\midrule
+Nodes & 50{,}000 & 200{,}000 \\
+Hyperedges & 100{,}000 & 400{,}000 \\
+Incidences & 362{,}757 & 1{,}453{,}427 \\
+\midrule
+Hyperedge cardinality, mean / p99 / max & 3.63 / 11 / 30 & 3.63 / 11 / 30 \\
+Incidence set size, mean & 7.26 & 7.27 \\
+Incidence set size, p50 / p90 / p99 & 5 / 12 / 41 & 5 / 13 / 42 \\
+Incidence set size, p99.9 / max & 145 / 2{,}645 & 142 / 5{,}714 \\
+Nodes in no hyperedge & 575 & 2{,}319 \\
+Incidence sets above 48 entries & 370 & 1{,}521 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\Cref{tab:dataset} gives the sizes and the skew. The largest incidence set at scale 1 holds 2,645 hyperedges, while half of all nodes are in 5 or fewer. Only 370 incidence sets exceed the 48 entries that HStore stores inline. Probe sets drawn from the same seed hold 100,000 random nodes and hyperedges, 20,000 node pairs taken from a common hyperedge (so that co-membership counts are non-zero), and 20,000 node updates. A separate churn set, drawn after everything else, selects 20\% of the hyperedges for deletion and 20,000 other hyperedges, each with at least three members, that lose one member.
+
+\subsection{Workloads}
+
+\Cref{tab:workloads} defines the workloads. They run in the order listed, in one process per system and run, against one database directory. The table also names the API call each system uses. Each adapter uses the plain storage calls of its system and its own identifier type: \texttt{long} ids for HStore and persistent handles for HyperGraphDB. Higher-level traversal frameworks, such as HyperGraphDB's breadth-first traversal, are not used, so the numbers reflect the storage layer.
+
+\begin{table*}[t]
+\centering\footnotesize
+\caption{Workloads, in execution order. ``txn'' is a transaction. All read workloads except \wl{read.incidence.cold} run after a warm-up (\cref{sec:measurement}).}
+\label{tab:workloads}
+\begin{tabularx}{\textwidth}{@{}lXll@{}}
+\toprule
+Workload & Operation & \hstore{} call & \hgdb{} call \\
+\midrule
+\wl{ingest.nodes} & insert all nodes, 1,000 per txn & \texttt{Writer.node} & \texttt{graph.add(String)} \\
+\wl{ingest.edges} & insert all hyperedges, 1,000 per txn & \texttt{Writer.edge}, \texttt{Writer.load} & \texttt{graph.add(HGPlainLink)} \\
+\wl{read.incidence} & enumerate a node's incidence set; 100,000 probes, 1,000 per read txn & \texttt{forEachIncidentEdge} & \texttt{getIncidenceSet} \\
+\wl{read.members} & enumerate a hyperedge's members; 100,000 probes & \texttt{forEachMemberId} & \texttt{getTargetAt} \\
+\wl{read.comembership} & count hyperedges containing both nodes of a pair; 20,000 pairs & leapfrog intersection & \texttt{hg.and(hg.incident, hg.incident)} \\
+\wl{read.twohop} & count distinct nodes sharing a hyperedge with a node; 10,000 probes & incidence, then members & incidence, then targets \\
+\wl{read.incidence.parallel} & \wl{read.incidence} from 8 threads, 100,000 probes each & as above & as above \\
+\wl{latency.read} & one incidence lookup per read txn, each timed; 100,000 txns & as above & as above \\
+\wl{write.update} & replace a node's value; 20,000 updates, 1,000 per txn & \texttt{Writer.set} & \texttt{graph.replace} \\
+\wl{latency.commit} & one update per write txn, each timed; 5,000 txns & \texttt{Writer.set} & \texttt{graph.replace} \\
+\wl{mixed.read} & single incidence lookups from 7 threads for 10\,s, beside \wl{mixed.write} & as \wl{latency.read} & as \wl{latency.read} \\
+\wl{mixed.write} & one thread committing 10 updates per txn on a fixed schedule of 1,000 updates/s & \texttt{Writer.set} & \texttt{graph.replace} \\
+\wl{large.ingest} & create one hyperedge containing every node & \texttt{Writer.load} & one \texttt{HGPlainLink} \\
+\wl{large.scan} & enumerate the large hyperedge 400 times & \texttt{forEachMemberId} & \texttt{getTargetAt} \\
+\wl{large.probe} & test whether a node belongs to the large hyperedge; 100,000 probes & membership-tree lookup & \texttt{getIncidenceSet(n).contains(e)} \\
+\wl{reopen} & close cleanly and open again & \texttt{HypergraphDatabase.open} & \texttt{HGEnvironment.get} \\
+\wl{read.incidence.cold} & \wl{read.incidence} immediately after the reopen, no warm-up & & \\
+\wl{disk} & bytes on disk after a clean shutdown & & \\
+\wl{churn.delete} & delete 20\% of the hyperedges, 1,000 per txn & \texttt{Writer.delete} & \texttt{graph.remove} \\
+\wl{churn.remove} & remove one member from each of 20,000 other hyperedges, 1,000 per txn & \texttt{Writer.remove} & \texttt{graph.replace} with a new link \\
+\wl{read.incidence.churned} & \wl{read.incidence} after the deletes & & \\
+\wl{disk.churned} & bytes on disk after the deletes and a clean shutdown & & \\
+\wl{compaction.baseline} & single-update commits at 50/s for 10\,s, each timed & \texttt{Writer.set} & \texttt{graph.replace} \\
+\wl{compaction} & the same commits while a full space reclamation runs, starting 1\,s in & \texttt{StorageEngine.compact} & \texttt{cleanLog} until idle, then checkpoint \\
+\wl{disk.compacted} & bytes on disk after the reclamation and a clean shutdown & & \\
+\wl{recover} & open a store whose ingest process was killed with SIGKILL & \texttt{HypergraphDatabase.open} & \texttt{HGEnvironment.get} \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+HyperGraphDB links are immutable, so \wl{churn.remove} replaces each link with a new one that lacks the removed member. \wl{read.twohop} runs before \wl{large.ingest}, because once a hyperedge containing every node exists, every node is two hops from all others. \wl{recover} runs in a child JVM with the same flags. The child ingests nodes in transactions of 1,000 into a fresh directory and prints the count after each acknowledged commit. The parent kills it with SIGKILL once half the nodes are acknowledged, then times opening the directory and counts the surviving nodes.
+
+\subsection{Measurement}
+\label{sec:measurement}
+
+\paragraph{Throughput.} Each workload is timed with \texttt{System.nanoTime()} around its whole operation set. Throughput is operations divided by elapsed time. Each write workload ends with a flush outside the timed section: an HStore checkpoint, or \texttt{Environment.sync()} for JE. Bytes still in buffers are therefore counted against the workload that produced them.
+
+\paragraph{Warm-up.} Before every timed read workload except \wl{read.incidence.cold}, the same workload runs untimed for at least 2\,s. Both systems get the same warm-up. The numbers describe a process whose JIT has compiled the read path. A short warm-up mostly measures how fast each system's code gets compiled: in our trials, a warm-up over 10\% of the probes left \wl{read.members} about three times below its steady rate.
+
+\paragraph{Latency.} \wl{latency.read} and \wl{latency.commit} time every transaction separately and report p50, p99, p99.9 and the maximum. In \wl{mixed} and \wl{compaction}, the writer runs on a fixed schedule (open loop), and each commit's latency is measured from the time it was \emph{scheduled} to start. A stall therefore shows up in the latency of every commit queued behind it, instead of silently slowing the writer down. The readers in \wl{mixed.read} run in a closed loop and keep a uniform sample of 200,000 latencies each, plus the exact maximum.
+
+\paragraph{Bytes written and read.} Both systems count their own I/O. For HStore this is the log bytes plus the page bytes written, including pages moved by compaction. For HyperGraphDB it is JE's sequential plus random write bytes, including the cleaner. Reads count the bytes each system reads from its files: HStore's segment reads, and JE's sequential plus random read bytes. A read served from the system's own cache counts as zero. A read that reaches a file counts even when the operating system's page cache serves it. Write amplification divides bytes written by an estimate of the logical bytes: 8 bytes per id plus the value, 24 bytes per updated value, $(c+1)\times 8$ bytes for a new or deleted hyperedge of cardinality $c$, and 16 bytes per removed member.
+
+\paragraph{Memory.} For every workload the harness records the bytes allocated, from \texttt{ThreadMXBean} (the whole process for write workloads, the reading thread alone for single-threaded reads), and the stop-the-world GC time from \texttt{GarbageCollectorMXBean}. After ingest it forces a full GC and records the heap in use, minus a baseline taken before the store opened. This is the \emph{retained heap}.
+
+\paragraph{Correctness cross-check.} Every read and delete workload returns a checksum: the number of ids visited, intersected or found. Both systems must return the same checksum in every run, or the result is flagged. All checksums agreed in every run reported here. Workloads whose result depends on timing (\wl{mixed}, \wl{compaction}, \wl{recover}) are not checked.
+
+\subsection{Environment and statistics}
+\label{sec:environment}
+
+All runs used one machine: an Apple M5 with 4 performance and 6 efficiency cores, 24\,GiB of memory, and a 1\,TB Apple SSD formatted with APFS, running macOS~26.5.1. The JVM was Oracle GraalVM for JDK~25.0.4 with the HotSpot JIT, a fixed 4\,GiB heap (\texttt{-Xms4g -Xmx4g}) and the Parallel collector. Each system ran in its own JVM, and runs alternated between the two systems so that slow periods affect both. We ran three configurations:
+\begin{itemize}
+\item \textbf{S1 async}: scale 1, asynchronous commits, \M{runsA} runs per system;
+\item \textbf{S1 sync}: scale 1, synchronous commits, \M{runsB} runs per system;
+\item \textbf{S4 async}: scale 4, asynchronous commits, \M{runsC} runs per system. With 64\,MiB caches, the files of both systems are larger than their caches.
+\end{itemize}
+Each table reports the median over runs. Ratios are taken between medians and oriented so that values above 1 favour HStore: throughput divides HStore by HyperGraphDB, while times, latencies and sizes divide HyperGraphDB by HStore. Where the ranges of the two systems' runs overlap, the ratio is marked with $\dagger$, and the difference should not be read as significant. \Cref{app:variability} gives every run and the coefficient of variation of each workload.

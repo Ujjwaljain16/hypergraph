@@ -1,0 +1,105 @@
+\section{Full results}
+\label{app:full}
+
+Each cell is the median over runs. Throughput is in operations per second (k $=10^3$, M $=10^6$, G $=10^9$). Ratios above 1 favour HStore. ``Agree'' is \emph{yes} when both systems returned the same checksum in every run.
+
+\subsection{Scale 1, asynchronous commits}
+
+\begin{center}\footnotesize\input{gen/main-s1-async}\end{center}
+
+\begin{center}\footnotesize Latency (median of each percentile over runs)\\[2pt]\input{gen/latency-s1-async}\end{center}
+
+\begin{center}\footnotesize\input{gen/writes-s1-async}\end{center}
+
+\begin{center}\footnotesize\input{gen/memory-s1-async}\end{center}
+
+\subsection{Scale 1, synchronous commits}
+
+\begin{center}\footnotesize\input{gen/main-s1-sync}\end{center}
+
+\begin{center}\footnotesize Latency (median of each percentile over runs)\\[2pt]\input{gen/latency-s1-sync}\end{center}
+
+\begin{center}\footnotesize\input{gen/writes-s1-sync}\end{center}
+
+\begin{center}\footnotesize\input{gen/memory-s1-sync}\end{center}
+
+\subsection{Scale 4, asynchronous commits}
+
+\begin{center}\footnotesize\input{gen/main-s4-async}\end{center}
+
+\begin{center}\footnotesize Latency (median of each percentile over runs)\\[2pt]\input{gen/latency-s4-async}\end{center}
+
+\begin{center}\footnotesize\input{gen/writes-s4-async}\end{center}
+
+\begin{center}\footnotesize\input{gen/memory-s4-async}\end{center}
+
+\clearpage
+\section{Run-to-run variability}
+\label{app:variability}
+
+The tables below give the minimum and maximum over runs and the coefficient of variation (standard deviation over mean) of every throughput workload, followed by the value of every run.
+
+\subsection{Scale 1, asynchronous commits}
+\begin{center}\footnotesize\input{gen/ranges-s1-async}\end{center}
+{\footnotesize\input{gen/runs-s1-async}}
+
+\subsection{Scale 1, synchronous commits}
+\begin{center}\footnotesize\input{gen/ranges-s1-sync}\end{center}
+{\footnotesize\input{gen/runs-s1-sync}}
+
+\subsection{Scale 4, asynchronous commits}
+\begin{center}\footnotesize\input{gen/ranges-s4-async}\end{center}
+{\footnotesize\input{gen/runs-s4-async}}
+
+\clearpage
+\section{Reproducing the results}
+\label{app:repro}
+
+The harness is the \texttt{benchmarks} module of the HStore repository. HyperGraphDB and JE are built from source at the commits named in \cref{tab:config}.
+
+\begin{verbatim}
+benchmarks/install-hypergraphdb.sh      # builds HyperGraphDB 99485a1 and JE 5.0.73
+SCALE=1 DURABILITY=async CACHE_MB=64 RUNS=5 THREADS=8 benchmarks/run.sh
+SCALE=1 DURABILITY=sync  CACHE_MB=64 RUNS=5 THREADS=8 benchmarks/run.sh
+SCALE=4 DURABILITY=async CACHE_MB=64 RUNS=3 THREADS=8 benchmarks/run.sh
+\end{verbatim}
+
+\texttt{run.sh} builds the module, then runs each system \texttt{RUNS} times in alternation, one JVM per run, with these flags:
+
+\begin{verbatim}
+java -Xms4g -Xmx4g -XX:+UseParallelGC \
+     --add-opens java.base/java.lang=ALL-UNNAMED \
+     --add-opens java.base/java.lang.ref=ALL-UNNAMED \
+     --add-opens java.base/java.util=ALL-UNNAMED \
+     io.hstore.bench.Comparison run --store <hstore|hypergraphdb> \
+     --scale <s> --durability <async|sync> --threads 8 --history 64 --cache-mb 64
+\end{verbatim}
+
+Each run writes one JSON file with every measurement in this report. \texttt{Comparison report} turns a set of them into Markdown tables. The tables, figures and quoted numbers in this report were generated from the same files by \texttt{benchmarks/report/gen.py}, without manual transcription. The dataset statistics in \cref{tab:dataset} are printed by \texttt{io.hstore.bench.DatasetStats}, run with the same classpath. The raw files are in \texttt{benchmarks/report/results}, and the report is rebuilt with:
+
+\begin{verbatim}
+cd benchmarks/report
+python3 gen.py results gen
+tectonic report.tex
+\end{verbatim}
+
+\section{HStore settings}
+\label{app:settings}
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}llr@{}}
+\toprule
+Setting & Meaning & Value \\
+\midrule
+\texttt{page\_size} & tree node page size & 16\,KiB \\
+segment size & pages per segment file & 16,384 (256\,MiB) \\
+\texttt{node\_cache\_mb} & decoded node cache & 64\,MiB (set) \\
+\texttt{write\_buffer\_mb} & cap on unwritten tree nodes & 64\,MiB \\
+\texttt{checkpoint\_wal\_mb} & log or page bytes that trigger a checkpoint & 256\,MiB \\
+\texttt{compaction\_live\_ratio} & compact segments below this live fraction & 0.5 \\
+\texttt{history\_limit} & generations kept for time travel & 64 \\
+\texttt{wal\_mode} & log page references, not page images & references \\
+maintenance interval & background checkpoint and compaction pass & 500\,ms \\
+\bottomrule
+\end{tabular}
+\end{center}

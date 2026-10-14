@@ -1,0 +1,52 @@
+s1-async hstore run 1 start 04:40:47 load { 3.41 8.19 7.72 }
+s1-async hstore run 1 exit 0 took 55s
+s1-async hypergraphdb run 1 start 04:41:42 load { 5.33 8.06 7.71 }
+s1-async hypergraphdb run 1 exit 0 took 77s
+s1-async hstore run 2 start 04:42:59 load { 7.56 8.29 7.83 }
+s1-async hstore run 2 exit 0 took 53s
+s1-async hypergraphdb run 2 start 04:43:52 load { 7.07 8.17 7.82 }
+s1-async hypergraphdb run 2 exit 0 took 68s
+s1-async hstore run 3 start 04:45:00 load { 6.00 7.86 7.74 }
+s1-async hstore run 3 exit 0 took 54s
+s1-async hypergraphdb run 3 start 04:45:54 load { 5.68 7.55 7.64 }
+s1-async hypergraphdb run 3 exit 0 took 68s
+s1-async hstore run 4 start 04:47:02 load { 7.54 7.80 7.73 }
+s1-async hstore run 4 exit 0 took 54s
+s1-async hypergraphdb run 4 start 04:47:56 load { 5.59 7.23 7.52 }
+s1-async hypergraphdb run 4 exit 0 took 70s
+s1-async hstore run 5 start 04:49:06 load { 6.98 7.49 7.60 }
+s1-async hstore run 5 exit 0 took 53s
+s1-async hypergraphdb run 5 start 04:49:59 load { 5.41 7.01 7.42 }
+s1-async hypergraphdb run 5 exit 0 took 80s
+s1-sync hstore run 1 start 04:51:19 load { 6.04 6.81 7.30 }
+s1-sync hstore run 1 exit 0 took 74s
+s1-sync hypergraphdb run 1 start 04:52:33 load { 4.49 6.15 7.00 }
+s1-sync hypergraphdb run 1 exit 0 took 90s
+s1-sync hstore run 2 start 04:54:03 load { 5.99 6.46 7.05 }
+s1-sync hstore run 2 exit 0 took 73s
+s1-sync hypergraphdb run 2 start 04:55:16 load { 4.63 5.95 6.81 }
+s1-sync hypergraphdb run 2 exit 0 took 92s
+s1-sync hstore run 3 start 04:56:48 load { 5.95 6.22 6.83 }
+s1-sync hstore run 3 exit 0 took 74s
+s1-sync hypergraphdb run 3 start 04:58:02 load { 5.38 6.06 6.72 }
+s1-sync hypergraphdb run 3 exit 0 took 92s
+s1-sync hstore run 4 start 04:59:34 load { 6.11 6.33 6.77 }
+s1-sync hstore run 4 exit 0 took 77s
+s1-sync hypergraphdb run 4 start 05:00:51 load { 6.02 6.33 6.73 }
+s1-sync hypergraphdb run 4 exit 0 took 99s
+s1-sync hstore run 5 start 05:02:30 load { 8.15 7.06 6.97 }
+s1-sync hstore run 5 exit 0 took 81s
+s1-sync hypergraphdb run 5 start 05:03:51 load { 9.65 8.32 7.49 }
+s1-sync hypergraphdb run 5 exit 0 took 102s
+s4-async hstore run 1 start 05:05:33 load { 9.27 8.98 7.87 }
+s4-async hstore run 1 exit 0 took 106s
+s4-async hypergraphdb run 1 start 05:07:19 load { 7.57 8.94 8.01 }
+s4-async hypergraphdb run 1 exit 0 took 1361s
+s4-async hstore run 2 start 05:30:00 load { 10.90 9.07 9.32 }
+s4-async hstore run 2 exit 0 took 92s
+s4-async hypergraphdb run 2 start 05:31:32 load { 5.57 7.90 8.85 }
+s4-async hypergraphdb run 2 exit 0 took 1893s
+s4-async hstore run 3 start 06:03:05 load { 18.27 17.17 15.83 }
+s4-async hstore run 3 exit 0 took 125s
+s4-async hypergraphdb run 3 start 06:05:10 load { 15.86 16.83 15.90 }
+s4-async hypergraphdb run 3 exit 0 took 1529s

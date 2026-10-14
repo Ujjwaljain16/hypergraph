@@ -1,0 +1,16 @@
+\section{Threats to validity}
+\label{sec:validity}
+
+\paragraph{One machine, not idle.} All numbers come from one laptop that was also running other work. Sampled before each run, the one-minute load average was between \M{loadmin} and \M{loadmax} (median \M{loadmed}) on 10 cores. That figure includes the tail of the previous run, whose parallel workloads use 8 threads, so only part of it is outside work. Absolute throughput will differ on a server, and short workloads are sensitive to interference. We report medians, show every run in \cref{app:variability}, and mark ratios whose run ranges overlap. Conclusions in this report rest only on ratios that are large compared with that spread.
+
+\paragraph{Durability.} On this machine one \texttt{FileChannel.force} after a small write takes about 3.8\,ms at the median, the cost of a write that reaches stable storage. Both systems pay it on every synchronous commit: HStore through its group commit, HyperGraphDB through the explicit log flush described in \cref{sec:durability}. Without that flush, HyperGraphDB's synchronous configuration would not sync at all. The \wl{recover} workload kills a process, not the machine, so it measures recovery time and the system's own buffering, not power-failure durability. HStore's behaviour under torn writes and lost syncs is covered by its crash-injection tests, which are outside the scope of this report.
+
+\paragraph{Memory fits in RAM.} At both scales the files fit in the operating system's page cache. Reads that miss a system's own 64\,MiB cache are served from memory, not from the SSD. The cold-read numbers therefore measure decoding and cache admission, not device latency.
+
+\paragraph{Cache budgets.} HStore counts its 64\,MiB node cache against an estimate of the heap each cached node takes, not a measured size. JE's 64\,MiB budget is exact, but HyperGraphDB's atom and incidence caches are not capped in bytes. Neither side therefore holds exactly 64\,MiB. The retained heap in \cref{tab:memory} shows what each kept after ingest.
+
+\paragraph{Workload coverage.} The dataset is synthetic. It uses set hyperedges without roles, properties or ordered members, and node values of a few bytes. Queries are single storage operations, not HQL or HyperGraphDB queries, so query planning is not measured. Workloads run in a fixed order within one process, so each one starts from the state the previous one left: cache contents, garbage, and for HStore, unwritten nodes waiting for a checkpoint.
+
+\paragraph{Versions.} HyperGraphDB 1.4 is built against Berkeley DB JE 5.0.73, which is older than current JE releases. We did not try other JE versions or tuning beyond the cache size. Both systems otherwise use their default settings.
+
+\paragraph{Authorship.} The HStore authors wrote the harness and both adapters. To limit bias, both adapters call the most direct storage API available, every read result is cross-checked between the systems, and both receive the same warm-up and cache budget. The harness, the adapters and the raw results are published with HStore.
