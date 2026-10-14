@@ -20,6 +20,7 @@ import java.util.Random;
 import java.util.stream.LongStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PowerLossTest {
@@ -61,6 +62,23 @@ class PowerLossTest {
         try (StorageEngine engine = StorageEngine.open(directory, options)) {
             assertEquals(0, engine.recovery().discardedCommits());
             assertEquals(6_000, (long) engine.read(snapshot -> snapshot.requireEdge(edge).size()));
+            engine.verifyReferences();
+        }
+    }
+
+    @Test
+    void aPageDirectoryWhoseFirstPageNumberWasNeverForcedStillHandsOutNumbers() {
+        EngineOptions options = options(Durability.SYNC, WalMode.PAGE_REFERENCES);
+        try (PowerLoss loss = PowerLoss.watch(directory)) {
+            loss.crashOn(event -> event.kind() == PowerLoss.Kind.MAPPED_FORCE && event.file().endsWith("pages.ref"));
+            assertThrows(PowerLoss.Cut.class, () -> StorageEngine.open(directory, options));
+            loss.restore(PowerLoss.Tear.NOTHING, new Random(1));
+        }
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
+            engine.write(txn -> txn.createNode(EngineTest.NODE, "first"));
+        }
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
+            assertTrue(engine.read(snapshot -> snapshot.resolve(0, EngineTest.NODE, "first")).isPresent());
             engine.verifyReferences();
         }
     }

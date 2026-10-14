@@ -194,7 +194,9 @@ checkpoint writes have no WAL record; the checkpoint forces the directory before
 refers to them. Recovery
 writes each logged address back into the directory before it checks or replays the page, so an entry that a crash
 lost comes back from the log. The header's next index is updated on every allocation, and recovery raises it past
-every number it restores, so a restored number is never handed out a second time.
+every number it restores, so a restored number is never handed out a second time. Number 0 is never used, so a
+next index of 0 (a directory whose header was forced when the file was created, before the first checkpoint forced
+it again) is read as 1.
 
 `pages.dir` and `pages.ref` force the `data/segments` directory when they are created, and so does every new segment
 file, so that a power loss can't drop the file itself after its contents were forced.

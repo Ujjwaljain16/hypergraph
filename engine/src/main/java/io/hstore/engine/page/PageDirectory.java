@@ -28,7 +28,7 @@ final class PageDirectory implements AutoCloseable {
             entries.header(NEXT_OFFSET, 1L);
         }
         PageDirectory directory = new PageDirectory(entries);
-        directory.next = entries.header(NEXT_OFFSET);
+        directory.next = Math.max(1L, entries.header(NEXT_OFFSET));
         return directory;
     }
 
