@@ -177,12 +177,21 @@ public final class ChangeFeed implements AutoCloseable {
     }
 
     public void append(CommitEvent event) {
-        if (event.generation() <= lastGeneration) {
-            return;
+        if (event.generation() > lastGeneration) {
+            write(event.generation(), codec.encode(event));
         }
-        byte[] payload = codec.encode(event);
+    }
+
+    public void appendEncoded(byte[] payload) {
+        long generation = codec.generationOf(payload);
+        if (generation > lastGeneration) {
+            write(generation, payload);
+        }
+    }
+
+    private void write(long generation, byte[] payload) {
         ByteCursor frame = ByteCursor.fixed(FRAME_HEADER + payload.length);
-        frame.putInt(payload.length).putInt(Checksums.crc32c(payload)).putLong(event.generation()).putBytes(payload);
+        frame.putInt(payload.length).putInt(Checksums.crc32c(payload)).putLong(generation).putBytes(payload);
         lock.lock();
         try {
             Segment active = segments.isEmpty() || end - segments.lastKey() >= segmentBytes ? roll() : segments.lastEntry().getValue();
@@ -193,7 +202,7 @@ public final class ChangeFeed implements AutoCloseable {
                     channel.write(buffer, local + buffer.position());
                 }
             });
-            remember(event.generation(), end);
+            remember(generation, end);
             end += buffer.limit();
             appended.signalAll();
         } catch (IOException e) {
