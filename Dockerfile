@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# SPDX-FileCopyrightText: Metacog Labs
+# SPDX-FileCopyrightText: MetaCognition India Pvt Limited
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 FROM ghcr.io/graalvm/native-image-community:25 AS build

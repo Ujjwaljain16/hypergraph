@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-FileCopyrightText: MetaCognition India Pvt Limited
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 const SVG = 'http://www.w3.org/2000/svg';
