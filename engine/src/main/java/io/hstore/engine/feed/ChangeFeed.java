@@ -10,8 +10,8 @@ import io.hstore.engine.page.FileHandle;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -307,7 +307,7 @@ public final class ChangeFeed implements AutoCloseable {
     }
 
     public Stream<CommitEvent> replay(long afterGeneration) {
-        Iterator<Frame> frames = new FrameReader(startFor(afterGeneration), end);
+        Iterator<Frame> frames = new FrameReader(startFor(afterGeneration), end, afterGeneration);
         return StreamSupport.stream(Spliterators.spliteratorUnknownSize(frames, Spliterator.ORDERED | Spliterator.NONNULL), false)
                 .filter(frame -> frame.generation() > afterGeneration)
                 .map(frame -> codec.decode(frame.payload()));
@@ -351,13 +351,20 @@ public final class ChangeFeed implements AutoCloseable {
     }
 
     private final class FrameReader implements Iterator<Frame> {
+        private final ByteBuffer header = ByteBuffer.allocate(FRAME_HEADER).order(ByteOrder.LITTLE_ENDIAN);
         private final long limit;
+        private final long skipThrough;
         private long position;
         private Frame next;
 
         FrameReader(long from, long limit) {
+            this(from, limit, Long.MIN_VALUE);
+        }
+
+        FrameReader(long from, long limit, long skipThrough) {
             this.position = from;
             this.limit = limit;
+            this.skipThrough = skipThrough;
         }
 
         @Override
@@ -389,32 +396,37 @@ public final class ChangeFeed implements AutoCloseable {
         }
 
         private Frame readLocked() {
-            Map.Entry<Long, Segment> entry = segments.floorEntry(position);
-            if (entry == null || !entry.getValue().file.isOpen()) {
-                return null;
-            }
-            FileHandle file = entry.getValue().file;
-            long local = position - entry.getKey();
             try {
-                ByteBuffer header = ByteBuffer.allocate(FRAME_HEADER);
-                if (!readFully(file, header, local)) {
-                    return null;
+                while (position + FRAME_HEADER <= limit) {
+                    Map.Entry<Long, Segment> entry = segments.floorEntry(position);
+                    if (entry == null || !entry.getValue().file.isOpen()) {
+                        return null;
+                    }
+                    FileHandle file = entry.getValue().file;
+                    long local = position - entry.getKey();
+                    if (!readFully(file, header.clear(), local)) {
+                        return null;
+                    }
+                    int length = header.getInt(0);
+                    int crc = header.getInt(Integer.BYTES);
+                    long generation = header.getLong(2 * Integer.BYTES);
+                    if (length < 0 || position + FRAME_HEADER + length > limit) {
+                        return null;
+                    }
+                    if (generation <= skipThrough) {
+                        position += FRAME_HEADER + length;
+                        continue;
+                    }
+                    ByteBuffer body = ByteBuffer.allocate(length);
+                    if (!readFully(file, body, local + FRAME_HEADER)) {
+                        return null;
+                    }
+                    byte[] payload = body.array();
+                    return Checksums.crc32c(payload) == crc && carries(payload, generation)
+                            ? new Frame(position, position + FRAME_HEADER + length, generation, payload)
+                            : null;
                 }
-                ByteCursor in = ByteCursor.over(MemorySegment.ofBuffer(header.flip()));
-                int length = in.getInt();
-                int crc = in.getInt();
-                long generation = in.getLong();
-                if (length < 0 || position + FRAME_HEADER + length > limit) {
-                    return null;
-                }
-                ByteBuffer body = ByteBuffer.allocate(length);
-                if (!readFully(file, body, local + FRAME_HEADER)) {
-                    return null;
-                }
-                byte[] payload = body.array();
-                return Checksums.crc32c(payload) == crc && carries(payload, generation)
-                        ? new Frame(position, position + FRAME_HEADER + length, generation, payload)
-                        : null;
+                return null;
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }

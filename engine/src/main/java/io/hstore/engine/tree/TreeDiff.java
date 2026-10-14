@@ -88,7 +88,21 @@ public final class TreeDiff {
         record Subtree(Ref ref) implements Item {
         }
 
-        record Element(long key, Object value) implements Item {
+        final class Run implements Item {
+            private final Leaf leaf;
+            private int index;
+
+            Run(Leaf leaf) {
+                this.leaf = leaf;
+            }
+
+            long key() {
+                return leaf.key(index);
+            }
+
+            Object value() {
+                return leaf.value(index);
+            }
         }
     }
 
@@ -139,23 +153,21 @@ public final class TreeDiff {
             }
             return switch (a) {
                 case Item.Subtree(Ref ra) when b instanceof Item.Subtree(Ref rb) -> compareSubtrees(ra, rb);
-                case Item.Subtree(Ref ra) when b instanceof Item.Element(long key, Object value) -> {
-                    if (ra.summary().min() > key) {
-                        right.pop();
-                        yield new Delta.Added<>(key, after.schema().cast(value));
+                case Item.Subtree(Ref ra) when b instanceof Item.Run run -> {
+                    if (ra.summary().min() > run.key()) {
+                        yield new Delta.Added<>(run.key(), after.schema().cast(take(right, run)));
                     }
                     expand(left, before);
                     yield null;
                 }
-                case Item.Element(long key, Object value) when b instanceof Item.Subtree(Ref rb) -> {
-                    if (rb.summary().min() > key) {
-                        left.pop();
-                        yield new Delta.Removed<>(key, before.schema().cast(value));
+                case Item.Run run when b instanceof Item.Subtree(Ref rb) -> {
+                    if (rb.summary().min() > run.key()) {
+                        yield new Delta.Removed<>(run.key(), before.schema().cast(take(left, run)));
                     }
                     expand(right, after);
                     yield null;
                 }
-                case Item.Element(long ka, Object va) when b instanceof Item.Element(long kb, Object vb) -> compareElements(ka, va, kb, vb);
+                case Item.Run ra when b instanceof Item.Run rb -> compareElements(ra, rb);
                 default -> throw new IllegalStateException();
             };
         }
@@ -183,17 +195,17 @@ public final class TreeDiff {
             return null;
         }
 
-        private Delta<V> compareElements(long ka, Object va, long kb, Object vb) {
+        private Delta<V> compareElements(Item.Run ra, Item.Run rb) {
+            long ka = ra.key();
+            long kb = rb.key();
             if (ka < kb) {
-                left.pop();
-                return new Delta.Removed<>(ka, before.schema().cast(va));
+                return new Delta.Removed<>(ka, before.schema().cast(take(left, ra)));
             }
             if (kb < ka) {
-                right.pop();
-                return new Delta.Added<>(kb, after.schema().cast(vb));
+                return new Delta.Added<>(kb, after.schema().cast(take(right, rb)));
             }
-            left.pop();
-            right.pop();
+            Object va = take(left, ra);
+            Object vb = take(right, rb);
             return Objects.equals(va, vb) ? null : new Delta.Changed<>(ka, before.schema().cast(va), after.schema().cast(vb));
         }
 
@@ -201,20 +213,28 @@ public final class TreeDiff {
             while (side.peek() instanceof Item.Subtree) {
                 expand(side, tree);
             }
-            if (side.isEmpty()) {
+            if (!(side.peek() instanceof Item.Run run)) {
                 return null;
             }
-            Item.Element element = (Item.Element) side.pop();
-            V value = tree.schema().cast(element.value());
-            return removed ? new Delta.Removed<>(element.key(), value) : new Delta.Added<>(element.key(), value);
+            long key = run.key();
+            V value = tree.schema().cast(take(side, run));
+            return removed ? new Delta.Removed<>(key, value) : new Delta.Added<>(key, value);
+        }
+
+        private static Object take(Deque<Item> side, Item.Run run) {
+            Object value = run.value();
+            if (++run.index == run.leaf.size()) {
+                side.pop();
+            }
+            return value;
         }
 
         private void expand(Deque<Item> side, Tree<V> tree) {
             Item.Subtree subtree = (Item.Subtree) side.pop();
             switch (tree.node(subtree.ref())) {
                 case Leaf leaf -> {
-                    for (int i = leaf.size() - 1; i >= 0; i--) {
-                        side.push(new Item.Element(leaf.key(i), leaf.value(i)));
+                    if (leaf.size() > 0) {
+                        side.push(new Item.Run(leaf));
                     }
                 }
                 case Branch branch -> {

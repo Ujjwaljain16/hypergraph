@@ -137,6 +137,49 @@ class DatabaseTest {
     }
 
     @Test
+    void bulkLoadedMembersMatchMembersAddedOneAtATime() {
+        MemberSpec spec = MemberSpec.roles("author").withWeight(0.5).withValidity(new Validity(10, 20));
+        long[] edges = database.write(writer -> {
+            long[] people = new long[5];
+            for (int i = 0; i < people.length; i++) {
+                people[i] = writer.node("Person", "p" + i, Map.of("name", "Person " + i));
+            }
+            long added = writer.edge("Coauthorship", Map.of("year", 2024));
+            for (long person : people) {
+                writer.add(added, person, spec);
+            }
+            long fromArray = writer.edge("Coauthorship", Map.of("year", 2024));
+            writer.load(fromArray, new long[]{people[3], people[0], people[4], people[1], people[2]}, spec);
+            long fromList = writer.edge("Coauthorship", Map.of("year", 2024));
+            writer.load(fromList, List.of(people[4], people[2], people[0], people[3], people[1]), spec);
+            long empty = writer.edge("Coauthorship", Map.of("year", 2024));
+            writer.load(empty, new long[0], spec);
+            return new long[]{added, fromArray, fromList, empty};
+        });
+        database.read(reader -> {
+            List<Member> expected = reader.members(edges[0]).toList();
+            assertEquals(5, expected.size());
+            assertEquals(expected, reader.members(edges[1]).toList());
+            assertEquals(expected, reader.members(edges[2]).toList());
+            assertEquals(0, reader.cardinality(edges[3]));
+            return null;
+        });
+        long node = database.read(reader -> reader.resolve("Person", "p0"));
+        assertThrows(HStoreException.InvalidSchema.class, () -> database.write(writer -> {
+            writer.load(edges[3], new long[]{node}, MemberSpec.roles("reviewer"));
+            return null;
+        }));
+        assertThrows(HStoreException.class, () -> database.write(writer -> {
+            writer.load(edges[3], new long[]{node, 999_999_999L}, spec);
+            return null;
+        }));
+        assertThrows(HStoreException.class, () -> database.write(writer -> {
+            writer.load(node, new long[]{node}, spec);
+            return null;
+        }));
+    }
+
+    @Test
     void incidentEdgeVisitorsSeeTheSameEdgesAsTheIncidenceStream() {
         long[] people = database.write(writer -> {
             long hub = writer.node("Person", "hub", Map.of("name", "Hub"));
