@@ -17,7 +17,7 @@ Source of truth:
 | Checkpoints | `engine/src/main/java/io/hstore/engine/maintenance/Checkpointer.java`, `tree/Materializer.java`, `catalog/CatalogStore.java` |
 | Reference counts | `engine/src/main/java/io/hstore/engine/maintenance/ReferenceCounter.java`, `page/ReferenceCounts.java`, `page/ReferenceJournal.java` |
 | Byte encodings | `engine/src/main/java/io/hstore/engine/page/ByteCursor.java`, `tree/Ref.java`, `tree/Summary.java` |
-| Crash test matrix | `engine/src/test/java/io/hstore/engine/CrashRecoveryTest.java`, `DeferredWritesTest.java` |
+| Crash test matrix | `engine/src/test/java/io/hstore/engine/CrashRecoveryTest.java`, `DeferredWritesTest.java`, `PowerLossTest.java` |
 
 Related: [transactions](transactions.md), [change feed](../storage/change-feed.md), [pages](../storage/pages.md), [catalog and generations](../storage/catalog-and-generations.md), [maintenance](../storage/maintenance.md), [configuration](../operations/configuration.md).
 
@@ -354,3 +354,40 @@ After each completed checkpoint, `StorageEngine.timedCheckpoint` logs `checkpoin
 `recoveryStopsAtTheFirstCommitWhosePagesAreMissing` covers the power-loss reordering that a process crash cannot produce. With `PAGE_REFERENCES` it commits `durable`, reopens, commits `lost-1` and `lost-2`, each of which creates a node and bulk-loads a 20,000-member edge (the load spills pages, and the commit writes the rest of the tree because it grew by more than 4,096 entries), halts, and truncates the last data segment to one byte short of its size before `lost-2`, so `lost-1`'s last page fails its checksum. Recovery must report `discardedCommits >= 1`, keep `durable`, drop `lost-2` (which itself has intact pages but follows a broken commit), and accept new writes that survive another reopen.
 
 `concurrentCommitsShareDurabilityBarriers` runs 400 concurrent writers and checks that all 400 commits are visible and that `averageGroupCommit >= 1`.
+
+### Power loss
+
+The tests above stop the engine but keep every byte it wrote, which is what a killed process leaves behind. `PowerLossTest` models a power failure instead, where only what was forced is certain to be on disk.
+
+The engine opens every file it writes or syncs through `FileHandle.channel`, and forces its memory-mapped files (`pages.dir`, `pages.ref`) through `FileHandle.force`. Both go through a package-private `FileHandle.Channels` that defaults to `FileChannel::open`. The test helper `PowerLoss` (`engine/src/test/java/io/hstore/engine/page/PowerLoss.java`) replaces it for one directory and records, per file, every write, truncation and `force`, every force of a mapping, and every force of a directory. It can cut the power before any of these events: the call throws `PowerLoss.Cut`, and later I/O still reaches the files but is no longer recorded. `restore` then rewrites the directory as the disk could hold it after the failure:
+
+| `Tear` | Writes made since a file's last `force` |
+|---|---|
+| `NOTHING` | all lost; every file holds what its last `force` saw |
+| `ALL` | all kept, as after a process crash |
+| `HALF_LAST` | all kept except the last one in each file, which is cut in half: a WAL record cut short, half a page |
+| `FLIP_LAST` | all kept, with one byte flipped in the middle of the last one in each file, so its checksum fails |
+| `RANDOM` | per file a prefix, a random subset or all of them, with a write sometimes applied only in part; a mapped file mixes 4 KiB blocks from its last `force` and from the moment of the crash; sometimes one byte of one unsynced write is flipped |
+
+A file created since its directory was last forced may be gone (always, under `NOTHING`). A file the engine wrote without going through `FileHandle` is left empty, unless it was renamed from a `.tmp` file that was forced first, which keeps its contents.
+
+`powerCutsAtRandomEventsRecoverAPrefixOfTheCommits` runs a seeded workload for both durability levels and both WAL modes: small commits that append a new node to one ordered edge, commits that also bulk-load 300 or 5,000 members into a new edge (spilling pages, and writing pages at commit for trees past 4,096 changes), commits that delete an earlier bulk edge, aborted transactions with and without spilled pages, checkpoints and compactions. It first runs without a crash to count the I/O events, then cuts the power at four random events, each with a random `Tear`. One seed per configuration runs by default; `-Dhstore.powerloss.seeds=N` runs seeds 1 to N. After restoring, it opens the database, checks it, commits once more and checkpoints, with a second power cut at a random event anywhere in that sequence, including recovery itself. After restoring again it checks once more. Each check requires that:
+
+* the commits that survived are a prefix of the commits attempted;
+* under `SYNC` every acknowledged commit is in it, and under `ASYNC` every commit a completed checkpoint covered;
+* no aborted transaction appears, and every bulk edge exists with its full size exactly when the prefix created it and did not delete it;
+* the change feed holds one event per surviving commit and nothing else, generations 1 to the last one;
+* the second recovery found the same prefix as the first, and the commit after it survived if it was acknowledged under `SYNC` or checkpointed;
+* `TreeVerifier` accepts every tree of every branch and the reference counts match (`verifyReferences`), as `hstore check` does.
+
+The other tests in the class each pin one case: unsynced `ASYNC` commits after a checkpoint are lost together; a `Commit` record cut short or with a flipped byte loses only the commit that was not acknowledged; a commit whose `PAGE_REFERENCES` page was torn is discarded although its log records survived; and five cases that failed before the fixes that came with them, listed in the table below.
+
+| Test | What went wrong before |
+|---|---|
+| `aDatabaseCreatedJustBeforeAPowerLossStillOpens` | `FORMAT` was written without a `force`, so it could come back empty, and the database then refused to open (`uses storage format 1`) although its log held acknowledged commits |
+| `pagesInASegmentCreatedSinceTheLastCheckpointSurvive` | the `data/segments` directory was never forced, so a new segment file, or `pages.dir` and `pages.ref` themselves, could disappear with the pages of acknowledged commits in them |
+| `aPageDirectoryWhoseFirstPageNumberWasNeverForcedStillHandsOutNumbers` | `pages.dir` forces its header with next index 0 when it is created and only sets it to 1 afterwards; losing power before the first checkpoint left next index 0, and every later checkpoint failed with `page number out of range: 0` |
+| `aZeroedFeedFrameBeforeASurvivingOneDoesNotRepeatEvents` | zeros where an unsynced feed frame never reached the disk read as frames of generation 0; recovery then appended the events of replayed commits a second time |
+| `aFeedFrameWhoseUnsyncedGenerationWasDamagedDoesNotHideCommittedEvents` | the feed CRC does not cover the header's generation; a damaged generation made recovery skip the events of acknowledged commits, which were then lost from the feed |
+
+The model does not cover directories created with `Files.createDirectories` (their own entries are assumed durable), deletions (a deleted file stays deleted), or the files of the database module (`PayloadStore`, `SemanticPlane`).
