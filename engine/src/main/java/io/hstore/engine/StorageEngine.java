@@ -6,6 +6,7 @@ package io.hstore.engine;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.catalog.CatalogImage;
 import io.hstore.engine.catalog.CatalogStore;
+import io.hstore.engine.catalog.EngineSlots;
 import io.hstore.engine.catalog.SlotRegistry;
 import io.hstore.engine.feed.ChangeFeed;
 import io.hstore.engine.feed.FeedCodec;
@@ -38,6 +39,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -70,9 +72,11 @@ public final class StorageEngine implements AutoCloseable {
     private final Dictionary dictionary;
     private final Recovery.Outcome recovery;
     private final ReentrantLock maintenance = new ReentrantLock();
+    private final ReentrantLock settings = new ReentrantLock();
     private final Thread maintainer;
     private final List<Runnable> checkpointListeners = new CopyOnWriteArrayList<>();
     private long writtenAtCheckpoint;
+    private volatile OptionalLong checkpointAt;
     private volatile boolean closed;
 
     private StorageEngine(Path directory, EngineOptions options, FileChannel lockChannel, FileLock lock) {
@@ -101,6 +105,7 @@ public final class StorageEngine implements AutoCloseable {
                 checkpoint.current(), recovery.image().checkpointLsn());
         this.compactor = new Compactor(transactions, pages, checkpointer, options.faults());
         this.dictionary = new Dictionary(transactions);
+        this.checkpointAt = storedCheckpointAt();
         checkpointer.checkpoint();
         compactor.reclaim();
         references.start();
@@ -319,8 +324,34 @@ public final class StorageEngine implements AutoCloseable {
     }
 
     public CheckpointThreshold checkpointThreshold() {
-        return CheckpointThreshold.resolve(OptionalLong.empty(), options.checkpointWalBytes(),
+        return CheckpointThreshold.resolve(checkpointAt, options.checkpointWalBytes(),
                 pages.liveBytes().values().stream().mapToLong(Long::longValue).sum());
+    }
+
+    public CheckpointThreshold checkpointAt(OptionalLong bytes) {
+        requireOpen();
+        if (bytes.isPresent() && bytes.getAsLong() < 1) {
+            throw HStoreException.invalid("a checkpoint threshold must be at least one byte, not " + bytes.getAsLong());
+        }
+        settings.lock();
+        try {
+            transactions.system(Branch.MAIN, workspace -> {
+                workspace.write(EngineSlots.SETTINGS, EngineSlots.CHECKPOINT_WAL_BYTES,
+                        _ -> bytes.isPresent() ? Optional.of(bytes.getAsLong()) : Optional.empty());
+                return null;
+            });
+            checkpointAt = bytes;
+        } finally {
+            settings.unlock();
+        }
+        LockSupport.unpark(maintainer);
+        return checkpointThreshold();
+    }
+
+    private OptionalLong storedCheckpointAt() {
+        try (Snapshot snapshot = transactions.snapshot(Branch.MAIN)) {
+            return snapshot.get(EngineSlots.SETTINGS, EngineSlots.CHECKPOINT_WAL_BYTES).stream().mapToLong(Long::longValue).findFirst();
+        }
     }
 
     public ReferenceCounter.Verification verifyReferences() {
