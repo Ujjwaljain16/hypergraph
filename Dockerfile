@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/root/.m2 \
 
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.title="HStore" \
-      org.opencontainers.image.vendor="Metacog Labs" \
+      org.opencontainers.image.vendor="MetaCognition India Pvt Limited" \
       org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0" \
       org.opencontainers.image.source="https://github.com/metacoglabs/hypergraph"
 ARG UID=999
