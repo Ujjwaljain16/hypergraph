@@ -93,7 +93,7 @@ max_connections          = 200
 | `wal_mode` | `HSTORE_WAL_MODE` | `references` | Applies to the pages a commit writes itself: spilled pages of bulk loads and trees that changed in more than 4,096 places. `references`: the WAL logs `PageRef(pageId, address, length, crc32c)` records and those pages are synced before the WAL. `images`: the WAL logs their full images. Ordinary commits log only the keys they changed, and pages written at checkpoints are not logged in either mode. See [WAL and recovery](../transactions/wal-and-recovery.md). |
 | `node_cache_mb` | `HSTORE_NODE_CACHE_MB` | `256` | Megabytes of Java heap for decoded tree nodes, each counted at an estimate of the memory it takes. |
 | `max_open_segment_files` | `HSTORE_MAX_OPEN_SEGMENT_FILES` | `256` | Segment files kept open at once. A segment file is opened when a page in it is written or read without its memory map, and once the limit is reached the least recently used file that no thread is using is closed to make room, after its unsynced writes are forced to disk. Must be between 1 and 2,147,483,647. |
-| `checkpoint_wal_mb` | `HSTORE_CHECKPOINT_WAL_MB` | `256` | WAL volume, or volume of pages written, since the last checkpoint that triggers a background checkpoint. |
+| `checkpoint_wal_mb` | `HSTORE_CHECKPOINT_WAL_MB` | `auto` | WAL volume, or volume of pages written, since the last checkpoint that triggers a background checkpoint. `auto` sizes it from the store: a quarter of the live bytes in the data segments, at least 2 MiB and at most 256 MiB. A number is megabytes, between 1 and 16,777,216. A threshold stored with `CHECKPOINT AT` overrides this setting. |
 | `write_buffer_mb` | `HSTORE_WRITE_BUFFER_MB` | `64` | Megabytes of Java heap held by committed tree nodes that no checkpoint has written yet. A background checkpoint starts once more than half of it is in use; a commit that finds it full waits for a checkpoint, for at most 30 seconds. Must be between 1 and 16,777,216. |
 | `history_limit` | `HSTORE_HISTORY_LIMIT` | `64` | Committed generations kept addressable for `AT GENERATION`, `AS OF`, `HISTORY` and the Studio time slider. History is kept in memory only: after a restart it holds the checkpointed generation and the generations replayed from the WAL after it. |
 | `compaction_live_ratio` | `HSTORE_COMPACTION_LIVE_RATIO` | `0.5` | Sealed segments whose live bytes fall below this fraction of their allocated bytes are emptied by compaction, which moves their live pages to the active segment: one segment (the emptiest) per background pass whenever one is below the ratio, or all of them with `COMPACT`. Pages count as free once nothing refers to them and no retained generation or open reader can reach them; a checkpoint releases them. Time-travel history is preserved. Emptied segments are deleted after the next checkpoint, once no reader that started before the move is still open. Must satisfy 0 < r < 1; other values fail at startup. |
@@ -170,6 +170,20 @@ image of the generation it wrote, and truncates WAL segments before the checkpoi
 at the cost of more frequent catalog writes. Recovery time scales roughly linearly with WAL volume since the
 last checkpoint. The same volume of page writes also triggers a checkpoint, which is what releases dead pages
 during a bulk load.
+
+With `auto` (the default) the threshold follows the store. A store with 12 MiB of live data checkpoints every
+3 MiB of log, one with 512 MiB every 128 MiB, and one of 1 GiB or more every 256 MiB, the fixed default before
+`auto`. The rule is in [maintenance](../storage/maintenance.md#checkpoints).
+
+The threshold in use is decided in this order:
+
+1. a value stored in the database with `CHECKPOINT AT <size>` ([HQL](../database/hql.md#maintenance)), which
+   persists across restarts and crashes and is removed with `CHECKPOINT AT AUTO`;
+2. a number given for `checkpoint_wal_mb` (`EngineOptions.withCheckpointWalBytes` for embedded use);
+3. the automatic rule.
+
+`STATS` and the Studio dashboard show the value in use and which of the three set it. Changing it with
+`CHECKPOINT AT` takes effect on the next maintenance pass, without a restart.
 
 **`write_buffer_mb`.** Commits keep their new tree nodes on the heap until a checkpoint writes them, and this
 setting bounds that heap. A key that many commits change is written once per checkpoint, so a larger buffer means

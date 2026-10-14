@@ -5,6 +5,7 @@ package io.hstore.db;
 
 import io.hstore.db.query.QueryResult;
 import io.hstore.db.query.Session;
+import io.hstore.engine.CheckpointThreshold;
 import io.hstore.engine.EngineOptions;
 import io.hstore.engine.HStoreException;
 
@@ -126,6 +127,9 @@ class SecurityTest {
             assertThrows(HStoreException.InvalidSchema.class, () -> auditor.execute("INSERT NODE Patient 'x' {mrn: 'x'}"));
             assertThrows(HStoreException.InvalidSchema.class, () -> alice.execute("CREATE NODE TYPE Forbidden"));
             assertThrows(HStoreException.InvalidSchema.class, () -> alice.execute("USE TENANT globex"));
+            HStoreException.InvalidSchema denied = assertThrows(HStoreException.InvalidSchema.class, () -> alice.execute("CHECKPOINT AT 64MB"));
+            assertTrue(denied.getMessage().contains("ADMIN"), denied.getMessage());
+            assertEquals(CheckpointThreshold.Source.AUTOMATIC, database.engine().checkpointThreshold().source());
             assertEquals("acme", alice.execute("WHOAMI").rows().getFirst().get(1).render());
         }
         assertTrue(database.requiresAuthentication());

@@ -321,7 +321,7 @@ The checkpoint LSN is the end of `g`'s `Commit` record, not the position of the 
 | Trigger | Where |
 |---|---|
 | Every open, right after recovery | `StorageEngine` constructor |
-| The write buffer holds more than half of `writeBufferBytes` (default 64 MiB); WAL or page writes grew by more than `checkpointWalBytes` (default 256 MiB) since the last checkpoint; or more than 1 048 576 reference counts changed. Checked every `maintenanceInterval` (default 500 ms), or sooner when a commit finds the write buffer full | `StorageEngine.maintain` |
+| The write buffer holds more than half of `writeBufferBytes` (default 64 MiB); WAL or page writes grew by more than the checkpoint threshold since the last checkpoint (a value stored with `CHECKPOINT AT`, else `checkpointWalBytes`, else by default a quarter of the live data between 2 MiB and 256 MiB; see [maintenance](../storage/maintenance.md#checkpoints)); or more than 1 048 576 reference counts changed. Checked every `maintenanceInterval` (default 500 ms), or sooner when a commit finds the write buffer full or passes the checkpoint threshold | `StorageEngine.maintain` |
 | Compaction, before choosing victims and again after moving pages, before deleting segments | `StorageEngine.compact` |
 | `verifyReferences()`, before it compares the counts | `StorageEngine.verifyReferences` |
 | Clean shutdown | `StorageEngine.close` |

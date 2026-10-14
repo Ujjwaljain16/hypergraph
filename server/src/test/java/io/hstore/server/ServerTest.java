@@ -181,6 +181,20 @@ class ServerTest {
     }
 
     @Test
+    void checkpointWalMbIsAutomaticUnlessGivenInMegabytes() {
+        assertEquals(EngineOptions.AUTOMATIC_CHECKPOINTS, ServerConfig.load(Optional.empty(), Map.of(), Map.of()).engineOptions().checkpointWalBytes());
+        assertEquals(EngineOptions.AUTOMATIC_CHECKPOINTS,
+                ServerConfig.load(Optional.empty(), Map.of("HSTORE_CHECKPOINT_WAL_MB", "AUTO"), Map.of()).engineOptions().checkpointWalBytes());
+        assertEquals(64L << 20, ServerConfig.load(Optional.empty(), Map.of("HSTORE_CHECKPOINT_WAL_MB", "64"), Map.of()).engineOptions().checkpointWalBytes());
+        assertEquals(512L << 20, ServerConfig.load(Optional.empty(), Map.of(), Map.of("checkpoint-wal-mb", "512")).engineOptions().checkpointWalBytes());
+        for (String invalid : List.of("0", "-1", "99999999999999", "sometimes")) {
+            IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                    () -> ServerConfig.load(Optional.empty(), Map.of("HSTORE_CHECKPOINT_WAL_MB", invalid), Map.of()).engineOptions());
+            assertTrue(failure.getMessage().contains("checkpoint_wal_mb"), failure.getMessage());
+        }
+    }
+
+    @Test
     void tlsWithoutACertificateIsRejectedAtStartup() {
         ServerConfig config = ServerConfig.load(Optional.empty(), Map.of(), Map.of("tls", "on"));
         IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, config::serverTls);

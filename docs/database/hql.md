@@ -83,7 +83,7 @@ Values and their storage are described in [data model](data-model.md#values).
 | [Views](#materialized-views) | `CREATE VIEW`, `REFRESH VIEW`, `VIEW`, `SHOW VIEWS` |
 | [Tenancy](#tenancy-and-users) | `CREATE TENANT`, `ALTER TENANT`, `SHOW TENANTS`, `CREATE USER`, `ALTER USER`, `DROP USER`, `SHOW USERS`, `USE TENANT`, `AUTHENTICATE` |
 | [Session](#session-and-output) | `WHOAMI`, `FORMAT` |
-| [Maintenance](#maintenance) | `CHECKPOINT`, `COMPACT`, `STATS` |
+| [Maintenance](#maintenance) | `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT`, `STATS` |
 
 Statements marked **ADMIN** are rejected for non-admin principals before execution
 (`Executor.administrative`). Write statements additionally require the WRITER role (`Principal.requireWrite`).
@@ -702,20 +702,38 @@ Atom cells render as `{"id", "label"}`, list cells as arrays, `NULL` as `null`, 
 ## Maintenance
 
 ```ebnf
-checkpoint = "CHECKPOINT" ;   (* ADMIN *)
-compact    = "COMPACT" ;      (* ADMIN *)
-stats      = "STATS" ;        (* ADMIN *)
+checkpoint    = "CHECKPOINT" ;                                     (* ADMIN *)
+checkpoint_at = "CHECKPOINT" "AT" ( "AUTO" | number unit ) ;       (* ADMIN *)
+unit          = "B" | "KB" | "MB" | "GB" | "TB" | "KiB" | "MiB" | "GiB" | "TiB" ;   (* any case *)
+compact       = "COMPACT" ;                                        (* ADMIN *)
+stats         = "STATS" ;                                          (* ADMIN *)
 ```
 
 ```sql
-CHECKPOINT;   -- checkpoint at generation 246, lsn 222166
-COMPACT;      -- compacted segments [] at generation 246
+CHECKPOINT;              -- checkpoint at generation 246, lsn 222166
+CHECKPOINT AT 64MB;      -- checkpoint after 67108864 bytes of log, set by CHECKPOINT AT
+CHECKPOINT AT 1 gb;      -- checkpoint after 1073741824 bytes of log, set by CHECKPOINT AT
+CHECKPOINT AT AUTO;      -- checkpoint after 2097152 bytes of log, sized from the store
+COMPACT;                 -- compacted segments [] at generation 246
 STATS;
 ```
 
+`CHECKPOINT AT` sets how much WAL, or how many bytes of pages, the background maintenance thread lets build up
+before it takes a checkpoint. Units are powers of 1024 (`1KB` is 1,024 bytes) and the space before the unit is
+optional. The size must be a whole, positive number of bytes; a size without a unit is a syntax error. The value
+is stored in the database and committed like any other change, so it survives a restart or a crash, and it takes
+effect on the next maintenance pass. It wins over the `checkpoint_wal_mb` setting. `CHECKPOINT AT AUTO` removes
+it, and the threshold goes back to `checkpoint_wal_mb`, or to the automatic rule when that is `auto` (see
+[configuration](../operations/configuration.md#reference)). The statement commits on its own, outside any open
+transaction, and needs the ADMIN role.
+
+The value is kept in an engine slot that builds without `CHECKPOINT AT` don't know. Once a database has run
+`CHECKPOINT AT <size>`, older builds can no longer open it: they fail with `no slot registered with id 8`.
+
 `STATS` columns `metric, value`: catalog statistics (see [statistics](views-signals-stats.md#statistics)),
 engine counters (`commits`, `rebased commits`, `conflicts`, `pages read`, `pages written`, `data bytes written`,
-`wal bytes`, `wal segments`, `cache hit rate`, `data segments`, `feed bytes`), the `semantic index generation`
+`wal bytes`, `wal segments`, `checkpoint after wal bytes`, `checkpoint threshold` (`automatic`, `database` or
+`configuration`), `cache hit rate`, `data segments`, `feed bytes`), the `semantic index generation`
 and one `planner feedback <path>` row per access-path kind with a learned correction factor.
 
 ## Errors

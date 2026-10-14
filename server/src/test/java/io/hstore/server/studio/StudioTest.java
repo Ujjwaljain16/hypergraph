@@ -178,6 +178,14 @@ class StudioTest {
         Map<String, Json> stats = object(get("/api/stats", cookie).body());
         assertTrue(stats.containsKey("engine"));
         assertTrue(stats.containsKey("segments"));
+        Map<String, Json> configuration = ((Json.Obj) stats.get("configuration")).fields();
+        assertEquals(new Json.Str("automatic"), configuration.get("checkpointSource"));
+        try (Session session = new Session(database)) {
+            session.execute("CHECKPOINT AT 64MB");
+        }
+        configuration = ((Json.Obj) object(get("/api/stats", cookie).body()).get("configuration")).fields();
+        assertEquals(new Json.Str("database"), configuration.get("checkpointSource"));
+        assertEquals(64L << 20, ((Json.Number) configuration.get("checkpointWalBytes")).value().longValueExact());
         Map<String, Json> history = object(get("/api/history", cookie).body());
         assertTrue(((Json.Array) history.get("generations")).items().size() > 1);
     }

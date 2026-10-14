@@ -47,7 +47,7 @@ final class StatementLogger {
         return switch (statement) {
             case Statement.CreateType _, Statement.CreateIndex _, Statement.CreateJsonIndex _, Statement.CreateView _,
                  Statement.CreateBranch _, Statement.DropBranch _, Statement.CreateTenant _, Statement.AlterTenant _,
-                 Statement.CreateUser _, Statement.AlterUser _, Statement.DropUser _ -> Category.DDL;
+                 Statement.CreateUser _, Statement.AlterUser _, Statement.DropUser _, Statement.CheckpointAt _ -> Category.DDL;
             case Statement.Query _, Statement.Explain _, Statement.Members _, Statement.IncidentTo _, Statement.Describe _,
                  Statement.Gather _, Statement.Reduce _, Statement.Scatter _, Statement.Propagate _, Statement.Neighbors _,
                  Statement.OverlapJoin _, Statement.Closure _, Statement.PatternQuery _, Statement.Expand _, Statement.History _,

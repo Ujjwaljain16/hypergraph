@@ -6,6 +6,7 @@ package io.hstore.engine;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.catalog.CatalogImage;
 import io.hstore.engine.catalog.CatalogStore;
+import io.hstore.engine.catalog.EngineSlots;
 import io.hstore.engine.catalog.SlotRegistry;
 import io.hstore.engine.feed.ChangeFeed;
 import io.hstore.engine.feed.FeedCodec;
@@ -38,9 +39,12 @@ import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
@@ -69,9 +73,14 @@ public final class StorageEngine implements AutoCloseable {
     private final Dictionary dictionary;
     private final Recovery.Outcome recovery;
     private final ReentrantLock maintenance = new ReentrantLock();
+    private final ReentrantLock settings = new ReentrantLock();
     private final Thread maintainer;
     private final List<Runnable> checkpointListeners = new CopyOnWriteArrayList<>();
     private long writtenAtCheckpoint;
+    private volatile OptionalLong checkpointAt;
+    private final AtomicBoolean wakePending = new AtomicBoolean();
+    private volatile long wakeAtWal = Long.MAX_VALUE;
+    private volatile long wakeAtPages = Long.MAX_VALUE;
     private volatile boolean closed;
 
     private StorageEngine(Path directory, EngineOptions options, FileChannel lockChannel, FileLock lock) {
@@ -100,13 +109,16 @@ public final class StorageEngine implements AutoCloseable {
                 checkpoint.current(), recovery.image().checkpointLsn());
         this.compactor = new Compactor(transactions, pages, checkpointer, options.faults());
         this.dictionary = new Dictionary(transactions);
+        this.checkpointAt = storedCheckpointAt();
         checkpointer.checkpoint();
         compactor.reclaim();
         references.start();
         LOG.log(System.Logger.Level.INFO, "database at {0} is ready: generation {1}, {2} data segments, page size {3}, {4} durability, {5} wal",
                 directory, transactions.current().id(), pages.segments().size(), options.pageSize(), options.durability(), options.walMode());
+        armWake();
         this.maintainer = Thread.ofVirtual().name("hstore-maintenance").start(this::maintain);
         transactions.whenFull(() -> LockSupport.unpark(maintainer));
+        transactions.afterCommit(this::wakeIfDue);
     }
 
     public static StorageEngine open(Path directory, EngineOptions options) {
@@ -317,6 +329,37 @@ public final class StorageEngine implements AutoCloseable {
         return pages.liveBytes();
     }
 
+    public CheckpointThreshold checkpointThreshold() {
+        return CheckpointThreshold.resolve(checkpointAt, options.checkpointWalBytes(),
+                pages.liveBytes().values().stream().mapToLong(Long::longValue).sum());
+    }
+
+    public CheckpointThreshold checkpointAt(OptionalLong bytes) {
+        requireOpen();
+        if (bytes.isPresent() && bytes.getAsLong() < 1) {
+            throw HStoreException.invalid("a checkpoint threshold must be at least one byte, not " + bytes.getAsLong());
+        }
+        settings.lock();
+        try {
+            transactions.system(Branch.MAIN, workspace -> {
+                workspace.write(EngineSlots.SETTINGS, EngineSlots.CHECKPOINT_WAL_BYTES,
+                        _ -> bytes.isPresent() ? Optional.of(bytes.getAsLong()) : Optional.empty());
+                return null;
+            });
+            checkpointAt = bytes;
+        } finally {
+            settings.unlock();
+        }
+        LockSupport.unpark(maintainer);
+        return checkpointThreshold();
+    }
+
+    private OptionalLong storedCheckpointAt() {
+        try (Snapshot snapshot = transactions.snapshot(Branch.MAIN)) {
+            return snapshot.get(EngineSlots.SETTINGS, EngineSlots.CHECKPOINT_WAL_BYTES).stream().mapToLong(Long::longValue).findFirst();
+        }
+    }
+
     public ReferenceCounter.Verification verifyReferences() {
         requireOpen();
         maintenance.lock();
@@ -351,9 +394,10 @@ public final class StorageEngine implements AutoCloseable {
                     continue;
                 }
                 try {
+                    long threshold = checkpointThreshold().bytes();
                     if (transactions.recountUnwritten() > options.writeBufferBytes() / 2
-                            || checkpointer.walSinceCheckpoint() > options.checkpointWalBytes()
-                            || pages.bytesWritten() - writtenAtCheckpoint > options.checkpointWalBytes()
+                            || checkpointer.walSinceCheckpoint() > threshold
+                            || pages.bytesWritten() - writtenAtCheckpoint > threshold
                             || references.pending() > CHANGED_COUNTS_LIMIT) {
                         timedCheckpoint();
                     }
@@ -368,6 +412,7 @@ public final class StorageEngine implements AutoCloseable {
                     if (!reclaimed.isEmpty()) {
                         LOG.log(System.Logger.Level.INFO, "reclaimed retired segments {0}", reclaimed);
                     }
+                    armWake();
                 } finally {
                     maintenance.unlock();
                 }
@@ -377,6 +422,23 @@ public final class StorageEngine implements AutoCloseable {
                 }
             }
         }
+    }
+
+    private void armWake() {
+        long threshold = checkpointThreshold().bytes();
+        wakeAtWal = saturatedSum(wal.bytesAppended(), Math.max(0, threshold - checkpointer.walSinceCheckpoint()));
+        wakeAtPages = saturatedSum(writtenAtCheckpoint, threshold);
+        wakePending.set(false);
+    }
+
+    private void wakeIfDue() {
+        if ((wal.bytesAppended() > wakeAtWal || pages.bytesWritten() > wakeAtPages) && wakePending.compareAndSet(false, true)) {
+            LockSupport.unpark(maintainer);
+        }
+    }
+
+    private static long saturatedSum(long base, long increment) {
+        return increment > Long.MAX_VALUE - base ? Long.MAX_VALUE : base + increment;
     }
 
     private void requireOpen() {

@@ -50,6 +50,11 @@ public final class EngineSlots {
                     in -> new RequestRecord(in.getString(), in.getVarLong(), in.getVarLong())),
             EntryMeasure.keyed(request -> Hashing.of(request.requestId())));
 
+    public static final TreeSchema<Long> SETTING_SCHEMA = new TreeSchema<>(15, "settings", FingerprintMode.SET,
+            ValueCodec.rows(_ -> 10, ByteCursor::putVarLong, ByteCursor::getVarLong), EntryMeasure.keyed(Hashing::of));
+
+    public static final long CHECKPOINT_WAL_BYTES = 1;
+
     public static final Slot<AtomRecord> CATALOG = Slot.primary(1, "catalog", ATOM_SCHEMA);
     public static final Slot<Postings<Incident>> REVERSE = Slot.derived(2, "reverse", REVERSE_INDEX.schema());
     public static final Slot<Postings<Marker>> TYPES = Slot.derived(3, "type-index", TYPE_INDEX.schema());
@@ -58,7 +63,9 @@ public final class EngineSlots {
     public static final Slot<Postings<Marker>> SYMBOL_LOOKUP = Slot.derived(6, "symbol-lookup", SYMBOL_INDEX.schema());
     public static final Slot<RequestRecord> REQUESTS = Slot.primary(7, "requests", REQUEST_SCHEMA);
 
-    public static final List<Slot<?>> ALL = List.of(CATALOG, REVERSE, TYPES, CANONICAL, SYMBOLS, SYMBOL_LOOKUP, REQUESTS);
+    public static final Slot<Long> SETTINGS = Slot.primary(8, "settings", SETTING_SCHEMA);
+
+    public static final List<Slot<?>> ALL = List.of(CATALOG, REVERSE, TYPES, CANONICAL, SYMBOLS, SYMBOL_LOOKUP, REQUESTS, SETTINGS);
 
     private EngineSlots() {
     }

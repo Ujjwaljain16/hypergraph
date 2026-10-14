@@ -159,7 +159,7 @@ protocol (origin `connection {n}`) and Studio (origin `studio`). A statement is 
 holds:
 
 1. it matches `log_statement`:
-   * `ddl`: `CREATE … TYPE/INDEX/JSON INDEX/VIEW/BRANCH`, `DROP BRANCH`, `CREATE/ALTER TENANT`, `CREATE/ALTER/DROP USER`;
+   * `ddl`: `CREATE … TYPE/INDEX/JSON INDEX/VIEW/BRANCH`, `DROP BRANCH`, `CREATE/ALTER TENANT`, `CREATE/ALTER/DROP USER`, `CHECKPOINT AT`;
    * `mod`: everything that is not a read. Reads are queries, `EXPLAIN`, `MEMBERS`, `INCIDENT TO`, `DESCRIBE`,
      HORA operators, `HISTORY`, `STATS`, `SHOW …`, `WHOAMI`, `DIFF …`, signal resolution and `TRACE`;
    * `all`: every statement;

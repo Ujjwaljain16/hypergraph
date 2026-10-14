@@ -37,6 +37,7 @@ import io.hstore.db.value.Json;
 import io.hstore.db.value.Value;
 import io.hstore.db.view.MaterializedViews;
 import io.hstore.db.view.ViewCell;
+import io.hstore.engine.CheckpointThreshold;
 import io.hstore.engine.EngineStats;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.Branch;
@@ -316,6 +317,7 @@ final class Executor {
                 var result = database().engine().checkpoint();
                 yield QueryResult.message("checkpoint at generation " + result.generation() + ", lsn " + result.lsn());
             }
+            case Statement.CheckpointAt(OptionalLong bytes) -> QueryResult.message(describe(database().engine().checkpointAt(bytes)));
             case Statement.Compact _ -> {
                 var report = database().engine().compact();
                 yield QueryResult.message("compacted segments " + report.compacted() + " at generation " + report.generation());
@@ -330,11 +332,19 @@ final class Executor {
         return switch (statement) {
             case Statement.CreateBranch _, Statement.DropBranch _, Statement.MergeBranch _, Statement.Sample _,
                  Statement.DiffGenerations _, Statement.DiffBranches _, Statement.History _, Statement.Stats _,
-                 Statement.Checkpoint _, Statement.Compact _, Statement.CreateTenant _, Statement.AlterTenant _,
+                 Statement.Checkpoint _, Statement.CheckpointAt _, Statement.Compact _, Statement.CreateTenant _, Statement.AlterTenant _,
                  Statement.CreateUser _, Statement.AlterUser _, Statement.DropUser _, Statement.ShowTenants _, Statement.ShowUsers _,
                  Statement.CreateView _, Statement.RefreshView _, Statement.ShowView _, Statement.CreateType _,
                  Statement.CreateIndex _, Statement.CreateJsonIndex _ -> true;
             default -> false;
+        };
+    }
+
+    private static String describe(CheckpointThreshold threshold) {
+        return "checkpoint after " + threshold.bytes() + " bytes of log, " + switch (threshold.source()) {
+            case AUTOMATIC -> "sized from the store";
+            case DATABASE -> "set by CHECKPOINT AT";
+            case CONFIGURATION -> "set by configuration";
         };
     }
 
@@ -612,6 +622,9 @@ final class Executor {
         metrics.put("data bytes written", QueryResult.number(engine.dataBytesWritten()));
         metrics.put("wal bytes", QueryResult.number(engine.walBytes()));
         metrics.put("wal segments", QueryResult.number(engine.walSegments()));
+        CheckpointThreshold threshold = database().engine().checkpointThreshold();
+        metrics.put("checkpoint after wal bytes", QueryResult.number(threshold.bytes()));
+        metrics.put("checkpoint threshold", QueryResult.text(threshold.source().name().toLowerCase()));
         metrics.put("cache hit rate", QueryResult.number(Math.round(engine.cacheHitRate() * 1000) / 1000.0));
         metrics.put("data segments", QueryResult.number(engine.segments().size()));
         metrics.put("feed bytes", QueryResult.number(engine.feedBytes()));

@@ -8,6 +8,11 @@ import { bytes, count, duration, number, plural, timestamp } from '../format.js'
 import { theme } from '../palette.js';
 
 const INTERVAL = 2000;
+const CHECKPOINT_SOURCES = {
+  automatic: 'automatic',
+  database: 'set by CHECKPOINT AT',
+  configuration: 'set by checkpoint_wal_mb'
+};
 
 export class DashboardPage {
   constructor(studio) {
@@ -125,7 +130,7 @@ export class DashboardPage {
             pair('WAL mode', configuration.walMode),
             pair('Node cache', bytes(configuration.nodeCacheBytes)),
             pair('History limit', `${count(configuration.historyLimit)} generations`),
-            pair('Checkpoint after', bytes(configuration.checkpointWalBytes)),
+            pair('Checkpoint after', `${bytes(configuration.checkpointWalBytes)} of WAL · ${CHECKPOINT_SOURCES[configuration.checkpointSource] ?? configuration.checkpointSource}`),
             pair('Change feed', bytes(engine.feedBytes)),
             pair('Studio sessions', count(stats.studioSessions)),
             pair('Replayed at start', `${count(recovery.replayedCommits)} commits`),
