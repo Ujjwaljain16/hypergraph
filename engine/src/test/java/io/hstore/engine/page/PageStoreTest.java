@@ -8,8 +8,10 @@ import io.hstore.engine.HStoreException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -19,7 +21,9 @@ import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -27,11 +31,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class PageStoreTest {
 
     private static final int PAGE_SIZE = 4096;
     private static final int PAGES_PER_SEGMENT = 2048;
+    private static final int OPEN_FILES = 256;
+    private static final Path DESCRIPTORS = Path.of("/dev/fd");
     private static final int PAYLOAD_LENGTH_OFFSET = 24;
 
     @TempDir
@@ -43,7 +50,7 @@ class PageStoreTest {
         Map<Long, byte[]> written = new LinkedHashMap<>();
         List<Long> ids = new ArrayList<>();
         List<SegmentInfo> segments;
-        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, OPEN_FILES, List.of())) {
             for (int i = 0; i < 16_000; i++) {
                 byte[] image = image(random, PageHeader.SIZE + random.nextInt(PAGE_SIZE - PageHeader.SIZE + 1));
                 long pageId = store.allocate(image.length);
@@ -59,7 +66,7 @@ class PageStoreTest {
             written.forEach((pageId, image) -> assertArrayEquals(image, bytes(store.read(pageId))));
             segments = store.segments();
         }
-        try (PageStore reopened = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, segments)) {
+        try (PageStore reopened = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, OPEN_FILES, segments)) {
             written.forEach((pageId, image) -> assertArrayEquals(image, bytes(reopened.read(pageId))));
             long first = ids.getFirst();
             reopened.read(first);
@@ -69,7 +76,7 @@ class PageStoreTest {
 
     @Test
     void pagesCannotBeChangedThroughWhatReadReturns() {
-        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, OPEN_FILES, List.of())) {
             long first = write(store, PAGE_SIZE);
             fillPastOneSegment(store);
             long last = write(store, 200);
@@ -82,7 +89,7 @@ class PageStoreTest {
 
     @Test
     void finishedSegmentsAreMappedAndTheGrowingOneIsNotUntilItGrows() {
-        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, OPEN_FILES, List.of())) {
             long finished = write(store, PAGE_SIZE);
             fillPastOneSegment(store);
             long growing = write(store, PAGE_SIZE);
@@ -101,7 +108,7 @@ class PageStoreTest {
 
     @Test
     void anInterruptedThreadReadsAndWritesPagesWithoutClosingTheSegment() throws Exception {
-        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, OPEN_FILES, List.of())) {
             long before = write(store, PAGE_SIZE);
             byte[] expected = bytes(store.read(before));
             long[] written = new long[1];
@@ -128,7 +135,7 @@ class PageStoreTest {
 
     @Test
     void pagesAreNumberedInOrderWhicheverSegmentHoldsThem() {
-        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, OPEN_FILES, List.of())) {
             List<Long> ids = new ArrayList<>();
             while (store.segments().size() < 3) {
                 ids.add(write(store, PAGE_SIZE / 2));
@@ -142,7 +149,7 @@ class PageStoreTest {
 
     @Test
     void aNumberWithoutAnAddressIsReportedAsCorrupt() {
-        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, OPEN_FILES, List.of())) {
             write(store, 200);
             assertThrows(HStoreException.CorruptPage.class, () -> store.read(PageId.pack(99, 0)));
         }
@@ -150,7 +157,7 @@ class PageStoreTest {
 
     @Test
     void aPageCannotBeWrittenPastWhatWasAllocatedForIt() {
-        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, OPEN_FILES, List.of())) {
             long pageId = store.allocate(100);
             assertThrows(IllegalArgumentException.class, () -> store.write(pageId, MemorySegment.ofArray(image(new Random(1), 200))));
         }
@@ -158,7 +165,7 @@ class PageStoreTest {
 
     @Test
     void aSegmentIsNotSettledWhileAPageAllocatedInItIsUnwritten() {
-        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, OPEN_FILES, List.of())) {
             long pending = store.allocate(PAGE_SIZE);
             int segment = store.segmentOf(pending);
             fillPastOneSegment(store);
@@ -170,7 +177,7 @@ class PageStoreTest {
 
     @Test
     void evacuatingASegmentMovesOnlyThePagesTheDirectoryStillPointsAt() {
-        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of())) {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, OPEN_FILES, List.of())) {
             Map<Long, byte[]> kept = new LinkedHashMap<>();
             List<Long> released = new ArrayList<>();
             int segment = store.activeSegment() == 0 ? 1 : store.activeSegment();
@@ -218,7 +225,7 @@ class PageStoreTest {
         long[] ids = new long[pages];
         byte[][] images = new byte[pages][];
         AtomicInteger written = new AtomicInteger();
-        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, List.of());
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, OPEN_FILES, List.of());
              ExecutorService readers = Executors.newFixedThreadPool(4)) {
             List<Future<Long>> checks = new ArrayList<>();
             for (int t = 0; t < 4; t++) {
@@ -246,6 +253,117 @@ class PageStoreTest {
             for (Future<Long> check : checks) {
                 assertTrue(check.get() > 0);
             }
+        }
+    }
+
+    @Test
+    void segmentFilesOpenOnDemandAndStayWithinThePool() throws Exception {
+        assumeTrue(Files.isDirectory(DESCRIPTORS));
+        int pool = 4;
+        Random random = new Random(5);
+        Map<Long, byte[]> written = new LinkedHashMap<>();
+        List<Long> ids = new ArrayList<>();
+        List<SegmentInfo> segments;
+        long before = openDescriptors();
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, 16, pool, List.of())) {
+            for (int i = 0; i < 2_000; i++) {
+                byte[] image = image(random, PAGE_SIZE - random.nextInt(64));
+                long pageId = store.allocate(image.length);
+                store.write(pageId, MemorySegment.ofArray(image));
+                written.put(pageId, image);
+                ids.add(pageId);
+                long earlier = ids.get(random.nextInt(ids.size()));
+                assertArrayEquals(written.get(earlier), bytes(store.read(earlier)));
+                assertTrue(store.openFiles() <= pool, store.openFiles() + " segment files open");
+            }
+            store.sync();
+            segments = store.segments();
+            assertTrue(segments.size() > 100, segments.size() + " segments");
+            assertTrue(openDescriptors() - before <= pool + 2, (openDescriptors() - before) + " more descriptors than before");
+        }
+        before = openDescriptors();
+        try (PageStore reopened = PageStore.open(directory, PAGE_SIZE, 16, pool, segments)) {
+            assertEquals(0, reopened.openFiles());
+            written.forEach((pageId, image) -> assertArrayEquals(image, bytes(reopened.read(pageId))));
+            assertTrue(reopened.openFiles() <= pool);
+            assertTrue(openDescriptors() - before <= pool + 2, (openDescriptors() - before) + " more descriptors than before");
+        }
+    }
+
+    @Test
+    void aSegmentClosedToMakeRoomIsForcedFirstAndSyncSkipsIt() {
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, PAGES_PER_SEGMENT, 1, List.of())) {
+            long first = write(store, PAGE_SIZE);
+            assertEquals(1, store.unsyncedFiles());
+            long pending = store.allocate(PAGE_SIZE);
+            fillPastOneSegment(store);
+            store.sync();
+            long forced = store.segmentForces();
+            store.write(pending, MemorySegment.ofArray(image(new Random(PAGE_SIZE), PAGE_SIZE)));
+            assertEquals(store.segmentOf(first), store.segmentOf(pending));
+            long next = write(store, PAGE_SIZE);
+            assertNotEquals(store.segmentOf(pending), store.segmentOf(next));
+            assertEquals(forced + 1, store.segmentForces(), "the earlier segment was forced when the active one took its place");
+            assertEquals(1, store.unsyncedFiles());
+            store.sync();
+            assertEquals(forced + 2, store.segmentForces());
+            store.sync();
+            assertEquals(forced + 2, store.segmentForces());
+            assertArrayEquals(bytes(store.read(first)), bytes(store.read(pending)));
+        }
+    }
+
+    @Test
+    void readersAndWritersShareASmallPoolWithoutSeeingAClosedFile() throws Exception {
+        int pages = 3_000;
+        long[] ids = new long[pages];
+        byte[][] images = new byte[pages][];
+        AtomicInteger written = new AtomicInteger();
+        AtomicBoolean done = new AtomicBoolean();
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, 64, 2, List.of());
+             ExecutorService readers = Executors.newFixedThreadPool(4)) {
+            List<Future<Long>> checks = new ArrayList<>();
+            for (int t = 0; t < 4; t++) {
+                Random random = new Random(t);
+                checks.add(readers.submit(() -> {
+                    long reads = 0;
+                    while (!done.get()) {
+                        int known = written.get();
+                        if (known > 0) {
+                            int i = known - 1 - random.nextInt(Math.min(known, 32));
+                            assertArrayEquals(images[i], bytes(store.read(ids[i])), "page " + i);
+                            if (++reads % 64 == 0) {
+                                store.sync();
+                            }
+                        }
+                    }
+                    return reads;
+                }));
+            }
+            Random random = new Random(11);
+            try {
+                for (int i = 0; i < pages; i++) {
+                    images[i] = image(random, PAGE_SIZE - random.nextInt(64));
+                    ids[i] = store.allocate(images[i].length);
+                    store.write(ids[i], MemorySegment.ofArray(images[i]));
+                    written.incrementAndGet();
+                    assertTrue(store.openFiles() <= 2, store.openFiles() + " segment files open");
+                }
+            } finally {
+                done.set(true);
+            }
+            for (Future<Long> check : checks) {
+                assertTrue(check.get() > 0);
+            }
+            for (int i = 0; i < pages; i++) {
+                assertArrayEquals(images[i], bytes(store.read(ids[i])));
+            }
+        }
+    }
+
+    private static long openDescriptors() throws IOException {
+        try (Stream<Path> listing = Files.list(DESCRIPTORS)) {
+            return listing.count();
         }
     }
 

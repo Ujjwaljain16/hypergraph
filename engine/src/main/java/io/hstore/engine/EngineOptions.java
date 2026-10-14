@@ -15,6 +15,7 @@ import java.util.List;
 public record EngineOptions(
         int pageSize,
         int pagesPerSegment,
+        int maxOpenSegmentFiles,
         long walSegmentBytes,
         long nodeCacheBytes,
         Durability durability,
@@ -32,6 +33,9 @@ public record EngineOptions(
     public EngineOptions {
         if (Integer.bitCount(pageSize) != 1 || pageSize < 1024 || pageSize > 1 << 20) {
             throw new IllegalArgumentException("page size must be a power of two between 1 KiB and 1 MiB: " + pageSize);
+        }
+        if (maxOpenSegmentFiles < 1) {
+            throw new IllegalArgumentException("at least one segment file must be allowed open: " + maxOpenSegmentFiles);
         }
         if (compactionLiveRatio <= 0 || compactionLiveRatio >= 1) {
             throw new IllegalArgumentException("compaction live ratio must be between 0 and 1: " + compactionLiveRatio);
@@ -53,77 +57,82 @@ public record EngineOptions(
     }
 
     public static EngineOptions defaults() {
-        return new EngineOptions(16 * 1024, 16 * 1024, 64L << 20, 256L << 20, Durability.SYNC, WalMode.PAGE_REFERENCES, 64,
+        return new EngineOptions(16 * 1024, 16 * 1024, 256, 64L << 20, 256L << 20, Durability.SYNC, WalMode.PAGE_REFERENCES, 64,
                 256L << 20, 64L << 20, 0.5, 100_000, Duration.ofMillis(500), List.of(), List.of(), CrashPoint.Injector.NONE);
     }
 
     public EngineOptions withPageSize(int bytes) {
-        return new EngineOptions(bytes, pagesPerSegment, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
+        return new EngineOptions(bytes, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
                 checkpointWalBytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, faults);
     }
 
     public EngineOptions withWalSegmentBytes(long bytes) {
-        return new EngineOptions(pageSize, pagesPerSegment, bytes, nodeCacheBytes, durability, walMode, historyLimit,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, bytes, nodeCacheBytes, durability, walMode, historyLimit,
                 checkpointWalBytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, faults);
     }
 
     public EngineOptions withPagesPerSegment(int pages) {
-        return new EngineOptions(pageSize, pages, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
+        return new EngineOptions(pageSize, pages, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
+                checkpointWalBytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, faults);
+    }
+
+    public EngineOptions withMaxOpenSegmentFiles(int files) {
+        return new EngineOptions(pageSize, pagesPerSegment, files, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
                 checkpointWalBytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, faults);
     }
 
     public EngineOptions withDurability(Durability mode) {
-        return new EngineOptions(pageSize, pagesPerSegment, walSegmentBytes, nodeCacheBytes, mode, walMode, historyLimit,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, mode, walMode, historyLimit,
                 checkpointWalBytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, faults);
     }
 
     public EngineOptions withWalMode(WalMode mode) {
-        return new EngineOptions(pageSize, pagesPerSegment, walSegmentBytes, nodeCacheBytes, durability, mode, historyLimit,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, mode, historyLimit,
                 checkpointWalBytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, faults);
     }
 
     public EngineOptions withHistoryLimit(int generations) {
-        return new EngineOptions(pageSize, pagesPerSegment, walSegmentBytes, nodeCacheBytes, durability, walMode, generations,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, walMode, generations,
                 checkpointWalBytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, faults);
     }
 
     public EngineOptions withCheckpointWalBytes(long bytes) {
-        return new EngineOptions(pageSize, pagesPerSegment, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
                 bytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, faults);
     }
 
     public EngineOptions withWriteBufferBytes(long bytes) {
-        return new EngineOptions(pageSize, pagesPerSegment, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
                 checkpointWalBytes, bytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, faults);
     }
 
     public EngineOptions withMaintenanceInterval(Duration interval) {
-        return new EngineOptions(pageSize, pagesPerSegment, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
                 checkpointWalBytes, writeBufferBytes, compactionLiveRatio, feedRetention, interval, slots, derivations, faults);
     }
 
     public EngineOptions withNodeCacheBytes(long bytes) {
-        return new EngineOptions(pageSize, pagesPerSegment, walSegmentBytes, bytes, durability, walMode, historyLimit,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, bytes, durability, walMode, historyLimit,
                 checkpointWalBytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, faults);
     }
 
     public EngineOptions withCompactionLiveRatio(double ratio) {
-        return new EngineOptions(pageSize, pagesPerSegment, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
                 checkpointWalBytes, writeBufferBytes, ratio, feedRetention, maintenanceInterval, slots, derivations, faults);
     }
 
     public EngineOptions withFeedRetention(long generations) {
-        return new EngineOptions(pageSize, pagesPerSegment, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
                 checkpointWalBytes, writeBufferBytes, compactionLiveRatio, generations, maintenanceInterval, slots, derivations, faults);
     }
 
     public EngineOptions withExtensions(List<Slot<?>> extensionSlots, List<Derivation> extensionDerivations) {
-        return new EngineOptions(pageSize, pagesPerSegment, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
                 checkpointWalBytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, extensionSlots, extensionDerivations, faults);
     }
 
     public EngineOptions withFaults(CrashPoint.Injector injector) {
-        return new EngineOptions(pageSize, pagesPerSegment, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
+        return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
                 checkpointWalBytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, injector);
     }
 }

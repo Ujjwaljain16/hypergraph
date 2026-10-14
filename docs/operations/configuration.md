@@ -92,6 +92,7 @@ max_connections          = 200
 | `durability` | `HSTORE_DURABILITY` | `sync` | `sync`: a commit is acknowledged after the group-commit barrier has `fsync`ed it. `async`: acknowledged once appended, so a crash can lose a suffix of acknowledged commits but never corrupts the database. |
 | `wal_mode` | `HSTORE_WAL_MODE` | `references` | Applies to the pages a commit writes itself: spilled pages of bulk loads and trees that changed in more than 4,096 places. `references`: the WAL logs `PageRef(pageId, address, length, crc32c)` records and those pages are synced before the WAL. `images`: the WAL logs their full images. Ordinary commits log only the keys they changed, and pages written at checkpoints are not logged in either mode. See [WAL and recovery](../transactions/wal-and-recovery.md). |
 | `node_cache_mb` | `HSTORE_NODE_CACHE_MB` | `256` | Megabytes of Java heap for decoded tree nodes, each counted at an estimate of the memory it takes. |
+| `max_open_segment_files` | `HSTORE_MAX_OPEN_SEGMENT_FILES` | `256` | Segment files kept open at once. A segment file is opened when a page in it is written or read without its memory map, and once the limit is reached the least recently used file that no thread is using is closed to make room, after its unsynced writes are forced to disk. Must be between 1 and 2,147,483,647. |
 | `checkpoint_wal_mb` | `HSTORE_CHECKPOINT_WAL_MB` | `256` | WAL volume, or volume of pages written, since the last checkpoint that triggers a background checkpoint. |
 | `write_buffer_mb` | `HSTORE_WRITE_BUFFER_MB` | `64` | Megabytes of Java heap held by committed tree nodes that no checkpoint has written yet. A background checkpoint starts once more than half of it is in use; a commit that finds it full waits for a checkpoint, for at most 30 seconds. Must be between 1 and 16,777,216. |
 | `history_limit` | `HSTORE_HISTORY_LIMIT` | `64` | Committed generations kept addressable for `AT GENERATION`, `AS OF`, `HISTORY` and the Studio time slider. History is kept in memory only: after a restart it holds the checkpointed generation and the generations replayed from the WAL after it. |
@@ -156,6 +157,13 @@ enough.
 The value must be between 1 and 16,777,216 (16 TiB). Two older names are refused at startup, whether they come from `hstore.conf`, the environment or a flag:
 `cache_mb`, the name this setting had before it was released, and `cache_nodes`, a node count. Both messages name
 `node_cache_mb`.
+
+**`max_open_segment_files`.** Each open segment file holds one file descriptor. Reads from sealed segments go
+through a read-only memory map, and a map stays valid after its file is closed, so in steady state only the
+segment being written and the ones written or remapped recently are open. Closing a file costs an `fsync` if it
+has unsynced writes, and opening it again costs one `open` call. The write-ahead log, the change feed,
+`pages.dir`, `pages.ref` and client connections need descriptors too, so keep the process limit (`ulimit -n`)
+well above this value.
 
 **`checkpoint_wal_mb`.** A checkpoint writes the tree nodes that commits left in memory, publishes the catalog
 image of the generation it wrote, and truncates WAL segments before the checkpoint LSN. Lower values shorten recovery, since recovery replays WAL after the last checkpoint,

@@ -107,6 +107,14 @@ final class ServerConfig {
         return megabytes << 20;
     }
 
+    int positive(Setting setting) {
+        long value = number(setting);
+        if (value < 1 || value > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("%s must be between 1 and %,d, not %d".formatted(setting.key(), Integer.MAX_VALUE, value));
+        }
+        return (int) value;
+    }
+
     boolean flag(Setting setting) {
         return switch (values.get(setting).toLowerCase()) {
             case "on", "true", "yes", "1" -> true;
@@ -125,6 +133,7 @@ final class ServerConfig {
                 .withDurability(Durability.valueOf(string(Setting.DURABILITY).toUpperCase()))
                 .withWalMode(string(Setting.WAL_MODE).equalsIgnoreCase("images") ? WalMode.PAGE_IMAGES : WalMode.PAGE_REFERENCES)
                 .withNodeCacheBytes(megabytes(Setting.NODE_CACHE_MB))
+                .withMaxOpenSegmentFiles(positive(Setting.MAX_OPEN_SEGMENT_FILES))
                 .withCheckpointWalBytes(number(Setting.CHECKPOINT_WAL_MB) << 20)
                 .withWriteBufferBytes(megabytes(Setting.WRITE_BUFFER_MB))
                 .withHistoryLimit(integer(Setting.HISTORY_LIMIT))
