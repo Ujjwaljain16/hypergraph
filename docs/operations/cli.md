@@ -228,5 +228,5 @@ port                     = 7700
 ```
 $ hstore version
 hstore 0.1.0 (Java 25.0.4+7-LTS-jvmci-b01)
-Licensed under PolyForm Noncommercial 1.0.0. Commercial use needs a license from Metacog Labs: krish@getmetacognition.com
+Licensed under PolyForm Noncommercial 1.0.0. Commercial use needs a license from MetaCognition India Pvt Limited: krish@getmetacognition.com
 ```

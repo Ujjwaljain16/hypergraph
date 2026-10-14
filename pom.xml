@@ -12,7 +12,7 @@
     <url>https://github.com/metacoglabs/hypergraph</url>
 
     <organization>
-        <name>Metacog Labs</name>
+        <name>MetaCognition India Pvt Limited</name>
         <url>https://github.com/metacoglabs</url>
     </organization>
 
@@ -20,7 +20,7 @@
         <license>
             <name>PolyForm-Noncommercial-1.0.0</name>
             <url>https://polyformproject.org/licenses/noncommercial/1.0.0/</url>
-            <comments>Commercial use needs a license from Metacog Labs: krish@getmetacognition.com</comments>
+            <comments>Commercial use needs a license from MetaCognition India Pvt Limited: krish@getmetacognition.com</comments>
         </license>
     </licenses>
 
@@ -109,7 +109,7 @@
                             <manifestEntries>
                                 <Implementation-Title>${project.artifactId}</Implementation-Title>
                                 <Implementation-Version>${project.version}</Implementation-Version>
-                                <Implementation-Vendor>Metacog Labs</Implementation-Vendor>
+                                <Implementation-Vendor>MetaCognition India Pvt Limited</Implementation-Vendor>
                                 <License>PolyForm-Noncommercial-1.0.0</License>
                                 <License-Contact>krish@getmetacognition.com</License-Contact>
                                 <Source>https://github.com/metacoglabs/hypergraph</Source>

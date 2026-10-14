@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Metacog Labs
+# SPDX-FileCopyrightText: MetaCognition India Pvt Limited
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 set -Eeuo pipefail
 

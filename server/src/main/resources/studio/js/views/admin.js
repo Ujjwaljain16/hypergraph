@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-FileCopyrightText: MetaCognition India Pvt Limited
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 import { api, hql, identifier } from '../api.js';

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Metacog Labs
+// SPDX-FileCopyrightText: MetaCognition India Pvt Limited
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 
 package io.hstore.server;
@@ -31,7 +31,7 @@ import javax.net.ssl.SSLContext;
 public final class Main {
 
     static final String VERSION = "0.1.0";
-    static final String NOTICE = "Licensed under PolyForm Noncommercial 1.0.0. Commercial use needs a license from Metacog Labs: krish@getmetacognition.com";
+    static final String NOTICE = "Licensed under PolyForm Noncommercial 1.0.0. Commercial use needs a license from MetaCognition India Pvt Limited: krish@getmetacognition.com";
 
     private static final String USAGE = """
             usage: hstore <command> [options]
