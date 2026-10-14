@@ -50,7 +50,9 @@ public final class Recovery {
                                   SlotRegistry slots, NodeSource source) {
         Map<Long, List<WalRecord>> pending = new HashMap<>();
         List<WalRecord.Commit> commits = new ArrayList<>();
+        long[] highestTxn = {0};
         wal.read(checkpoint.checkpointLsn()).forEach(positioned -> {
+            highestTxn[0] = Math.max(highestTxn[0], positioned.record().txnId());
             switch (positioned.record()) {
                 case WalRecord.Commit commit -> commits.add(commit);
                 case WalRecord.Abort abort -> pending.remove(abort.txnId());
@@ -82,6 +84,11 @@ public final class Recovery {
             generation = redo(generation, commit, body, pages, feed, codec, slots, source);
             history.add(generation);
             replayed.add(generation);
+        }
+        if (generation.nextTxn() <= highestTxn[0]) {
+            generation = new Generation(generation.id(), generation.wallTime(), generation.txnId(), generation.nextAtom(),
+                    highestTxn[0] + 1, generation.branches());
+            history.set(history.size() - 1, generation);
         }
         pages.sync();
         feed.truncateAfter(generation.id());
