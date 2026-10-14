@@ -25,6 +25,7 @@ enum Setting {
     DURABILITY("durability", "sync", "sync waits for fsync before acknowledging commits; async does not"),
     WAL_MODE("wal_mode", "references", "references logs page checksums and syncs data first; images logs full page images"),
     NODE_CACHE_MB("node_cache_mb", "256", "megabytes of heap for decoded tree nodes, each counted at an estimate of its size"),
+    MAX_OPEN_SEGMENT_FILES("max_open_segment_files", "256", "segment files kept open at once; opening another closes the least recently used"),
     CHECKPOINT_WAL_MB("checkpoint_wal_mb", "256", "write-ahead log volume that triggers a background checkpoint"),
     WRITE_BUFFER_MB("write_buffer_mb", "64", "megabytes of committed tree nodes kept in memory until a checkpoint writes them"),
     HISTORY_LIMIT("history_limit", "64", "committed generations retained for time travel"),

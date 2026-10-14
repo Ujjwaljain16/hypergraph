@@ -165,6 +165,22 @@ class ServerTest {
     }
 
     @Test
+    void openSegmentFilesComeFromTheFileTheEnvironmentOrAFlag(@TempDir Path data) throws Exception {
+        assertEquals(256, ServerConfig.load(Optional.empty(), Map.of(), Map.of()).engineOptions().maxOpenSegmentFiles());
+        Files.writeString(data.resolve(ServerConfig.FILE), "max_open_segment_files = 64\n");
+        assertEquals(64, ServerConfig.load(Optional.of(data), Map.of(), Map.of()).engineOptions().maxOpenSegmentFiles());
+        assertEquals(32, ServerConfig.load(Optional.of(data), Map.of("HSTORE_MAX_OPEN_SEGMENT_FILES", "32"), Map.of())
+                .engineOptions().maxOpenSegmentFiles());
+        assertEquals(16, ServerConfig.load(Optional.of(data), Map.of("HSTORE_MAX_OPEN_SEGMENT_FILES", "32"),
+                Map.of("max-open-segment-files", "16")).engineOptions().maxOpenSegmentFiles());
+        for (String outOfRange : List.of("0", "-3", "4294967296")) {
+            IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
+                    () -> ServerConfig.load(Optional.empty(), Map.of("HSTORE_MAX_OPEN_SEGMENT_FILES", outOfRange), Map.of()).engineOptions());
+            assertTrue(failure.getMessage().contains("max_open_segment_files"), failure.getMessage());
+        }
+    }
+
+    @Test
     void tlsWithoutACertificateIsRejectedAtStartup() {
         ServerConfig config = ServerConfig.load(Optional.empty(), Map.of(), Map.of("tls", "on"));
         IllegalArgumentException failure = assertThrows(IllegalArgumentException.class, config::serverTls);
