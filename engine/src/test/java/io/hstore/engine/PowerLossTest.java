@@ -3,6 +3,7 @@
 
 package io.hstore.engine;
 
+import io.hstore.engine.feed.CommitEvent;
 import io.hstore.engine.page.PowerLoss;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Incidence;
@@ -14,8 +15,14 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Random;
 import java.util.stream.LongStream;
 
@@ -80,6 +87,62 @@ class PowerLossTest {
         try (StorageEngine engine = StorageEngine.open(directory, options)) {
             assertTrue(engine.read(snapshot -> snapshot.resolve(0, EngineTest.NODE, "first")).isPresent());
             engine.verifyReferences();
+        }
+    }
+
+    @Test
+    void aFeedFrameWhoseUnsyncedGenerationWasDamagedDoesNotHideCommittedEvents() throws Exception {
+        List<Long> frames = threeCommitsThenPowerLoss();
+        try (FileChannel feed = FileChannel.open(feedSegment(), StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+            ByteBuffer generation = ByteBuffer.allocate(1);
+            feed.read(generation, frames.get(2) + 10);
+            generation.put(0, (byte) (generation.get(0) ^ 0x5A));
+            feed.write(generation.rewind(), frames.get(2) + 10);
+        }
+        assertFeedHoldsOneEventPerCommit();
+    }
+
+    @Test
+    void aZeroedFeedFrameBeforeASurvivingOneDoesNotRepeatEvents() throws Exception {
+        List<Long> frames = threeCommitsThenPowerLoss();
+        try (FileChannel feed = FileChannel.open(feedSegment(), StandardOpenOption.WRITE)) {
+            feed.write(ByteBuffer.allocate(Math.toIntExact(frames.get(2) - frames.get(1))), frames.get(1));
+        }
+        assertFeedHoldsOneEventPerCommit();
+    }
+
+    private List<Long> threeCommitsThenPowerLoss() throws Exception {
+        EngineOptions options = options(Durability.SYNC, WalMode.PAGE_REFERENCES);
+        try (PowerLoss loss = PowerLoss.watch(directory)) {
+            StorageEngine engine = StorageEngine.open(directory, options);
+            for (int i = 0; i < 3; i++) {
+                String key = "n" + i;
+                engine.write(txn -> txn.createNode(EngineTest.NODE, key));
+            }
+            loss.powerOff();
+            engine.halt();
+            loss.restore(PowerLoss.Tear.ALL, new Random(1));
+        }
+        List<Long> frames = new ArrayList<>();
+        try (FileChannel feed = FileChannel.open(feedSegment(), StandardOpenOption.READ)) {
+            ByteBuffer length = ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+            for (long position = 0; position < feed.size(); position += 16 + length.getInt(0)) {
+                frames.add(position);
+                feed.read(length.clear(), position);
+            }
+        }
+        assertEquals(3, frames.size());
+        return frames;
+    }
+
+    private Path feedSegment() {
+        return directory.resolve("feed").resolve("%016x.feed".formatted(0));
+    }
+
+    private void assertFeedHoldsOneEventPerCommit() {
+        try (StorageEngine engine = StorageEngine.open(directory, options(Durability.SYNC, WalMode.PAGE_REFERENCES))) {
+            assertEquals(3L, (long) engine.read(snapshot -> snapshot.countOfType(0, EngineTest.NODE)));
+            assertEquals(List.of(1L, 2L, 3L), engine.feed().replay(0).map(CommitEvent::generation).toList());
         }
     }
 
