@@ -57,7 +57,7 @@ class CheckpointConcurrencyTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = CrashPoint.class, names = {"WAL_FORCE"})
+    @EnumSource(value = CrashPoint.class, names = {"CHECKPOINT_REBIND", "WAL_FORCE"})
     void aCommitFinishesWhileTheCheckpointIsAtThisStep(CrashPoint point) throws Exception {
         AtomicReference<StorageEngine> opened = new AtomicReference<>();
         AtomicReference<Object> outcome = new AtomicReference<>();
@@ -98,7 +98,7 @@ class CheckpointConcurrencyTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = CrashPoint.class, names = {"CHECKPOINT_CATALOG", "WAL_FORCE", "CHECKPOINT_JOURNAL"})
+    @EnumSource(value = CrashPoint.class, names = {"CHECKPOINT_CATALOG", "CHECKPOINT_REBIND", "WAL_FORCE", "CHECKPOINT_JOURNAL"})
     void aCrashAtThisCheckpointStepLosesNoAcknowledgedCommit(CrashPoint point) throws Exception {
         AtomicBoolean armed = new AtomicBoolean();
         Thread test = Thread.currentThread();

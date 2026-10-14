@@ -548,23 +548,25 @@ public final class TransactionManager {
         epoch.publish();
         published = epoch;
         commitEnds.headMap(materialized.id(), false).clear();
+        Materializer.Rebinding rebinding = new Materializer.Rebinding(epoch);
+        rebound(head.get(), rebinding);
+        storage.faults().reach(CrashPoint.CHECKPOINT_REBIND);
         exclusive(() -> {
-            rebind(epoch);
+            Generation rebound = rebound(head.get(), rebinding);
+            head.set(rebound);
+            current.set(rebound);
+            history.put(rebound.id(), rebound);
             return null;
         });
         recountUnwritten();
         signalRoom();
     }
 
-    private void rebind(Epoch epoch) {
-        Generation latest = head.get();
+    private Generation rebound(Generation latest, Materializer.Rebinding rebinding) {
         Map<Integer, Branch> branches = new TreeMap<>();
         latest.branches().forEach((id, branch) -> branches.put(id, branch.withRoots(branch.roots().map((slot, ref) ->
-                Materializer.rebound(ref, storage.slots().slot(slot).schema(), epoch)))));
-        Generation rebound = new Generation(latest.id(), latest.wallTime(), latest.txnId(), latest.nextAtom(), latest.nextTxn(), branches);
-        head.set(rebound);
-        current.set(rebound);
-        history.put(rebound.id(), rebound);
+                rebinding.rebound(ref, storage.slots().slot(slot).schema())))));
+        return new Generation(latest.id(), latest.wallTime(), latest.txnId(), latest.nextAtom(), latest.nextTxn(), branches);
     }
 
     private void makeDurable(int batchSize, boolean wrotePages) {

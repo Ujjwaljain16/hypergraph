@@ -16,6 +16,7 @@ public enum CrashPoint {
     CHECKPOINT_PAGES,
     CHECKPOINT_CATALOG,
     CHECKPOINT_JOURNAL,
+    CHECKPOINT_REBIND,
     WAL_FORCE;
 
     @FunctionalInterface
