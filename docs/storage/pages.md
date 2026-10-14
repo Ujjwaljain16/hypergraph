@@ -244,7 +244,7 @@ xxd -s $((64 + 1234 * 8)) -l 8 -g 8 -e data/segments/pages.ref
 |---|---|
 | Location | `<data>/data/segments/%08x.seg`, e.g. `00000001.seg` |
 | Contents | Node images packed back to back. Each image starts on a 64-byte boundary and occupies ⌈length / 64⌉ units. The bytes after an image up to the next boundary are never written (file holes or zeros). |
-| Capacity | `segmentUnits = min(2²⁴, pagesPerSegment × pageSize / 64)`. With the defaults (16 KiB × 16 384) that is 4 194 304 units = 256 MiB. |
+| Capacity | Grows with the store. A new segment gets 8 MiB, doubled for as long as the result is at most an eighth of the bytes in the store's other segments (retired ones not counted) and at most `maximumUnits = min(2²⁴, pagesPerSegment × pageSize / 64)`. With the defaults (16 KiB × 16 384) the maximum is 256 MiB, so segments are 8 MiB until the store holds 128 MiB, 16 MiB from there, and 256 MiB from 2 GiB on. A store that shrinks after compaction gets small segments again. |
 | Mutability | Append-only. A byte range, once written, is never rewritten. Old images become garbage when no retained generation references them, and are removed by deleting whole segments ([maintenance.md](maintenance.md)). |
 | Id assignment | `segments.lastKey() + 1` |
 
@@ -270,7 +270,7 @@ sequenceDiagram
     M->>NC: encode(frozen, PageId.NONE, epoch, pageSize)
     NC-->>M: image (80 + payloadLength bytes, sealed with pageId 0)
     M->>PS: allocate(image.byteSize())
-    PS->>PS: units = ⌈len / 64⌉; roll the segment if nextUnit + units > segmentUnits
+    PS->>PS: units = ⌈len / 64⌉; roll the segment if nextUnit + units > activeUnits
     PS->>PS: index = next index; directory[index] = (activeSegment, nextUnit, units)
     PS-->>M: pack(index, 0); nextUnit += units
     M->>H: assign(image, pageId): write pageId at offset 8, recompute the crc
@@ -279,7 +279,8 @@ sequenceDiagram
 
 * `allocate` rejects `length > pageSize`.
 * Allocation is serialized by a `ReentrantLock`, and only the counter and directory updates run under it.
-* Rolling a segment marks the previous one `SEALED`, creates the next id, forces the `data/segments` directory so the new file's entry is durable before any page in it is, and resets `nextUnit` to 0.
+* Rolling a segment marks the previous one `SEALED`, creates the next id, sets `activeUnits` to the new segment's capacity, forces the `data/segments` directory so the new file's entry is durable before any page in it is, and resets `nextUnit` to 0.
+* A segment's capacity is not recorded anywhere. Page addresses are a segment id and a unit offset, so nothing depends on how big a segment was meant to be. On open, the active segment's capacity is worked out again from the other segments. Segments of different sizes sit side by side, and a store written with fixed 256 MiB segments opens as it is.
 * `PageStore.write(pageId, image)` looks the number up in the directory and performs a positional `FileChannel.write` at `offset × 64`, then marks the file dirty. It refuses an image longer than the units allocated for it. A checkpoint writes each image as soon as it has allocated it. For the pages a commit writes, the write happens later, inside `TransactionManager.append`, after the WAL records have been appended (see [wal-and-recovery.md](../transactions/wal-and-recovery.md)).
 * `PageStore.sync()` calls `FileChannel.force(false)` on every segment written since the last sync, and leaves every other segment alone, open or not. The group committer calls it once per batch in `PAGE_REFERENCES` WAL mode, before the WAL sync, if a commit in the batch wrote pages. `PageStore.checkpoint()` does the same and then forces the page directory; only `Checkpointer` calls it.
 

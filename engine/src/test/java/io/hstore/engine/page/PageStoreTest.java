@@ -361,6 +361,94 @@ class PageStoreTest {
         }
     }
 
+    @Test
+    void newSegmentsStartSmallAndDoubleAsTheStoreGrowsUpToTheMaximum() {
+        long first = 64 << 10;
+        int maximumPages = 256;
+        Map<Long, byte[]> written = new LinkedHashMap<>();
+        List<SegmentInfo> segments;
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, first, maximumPages, OPEN_FILES, List.of(), -1)) {
+            Random random = new Random(13);
+            for (int i = 0; i < 6_000; i++) {
+                int before = store.activeSegment();
+                byte[] image = image(random, PAGE_SIZE);
+                long pageId = store.allocate(image.length);
+                store.write(pageId, MemorySegment.ofArray(image));
+                written.put(pageId, image);
+                int active = store.activeSegment();
+                if (active != before) {
+                    long stored = store.segments().stream().filter(info -> info.id() != active).mapToLong(SegmentInfo::bytes).sum();
+                    long expected = first;
+                    while (expected * 2 <= (long) maximumPages * PAGE_SIZE && expected * 2 * 8 <= stored) {
+                        expected *= 2;
+                    }
+                    assertEquals(expected, store.segmentBytes(), "segment " + active + " after " + stored + " bytes");
+                }
+            }
+            segments = store.segments();
+        }
+        List<Long> sealed = segments.stream().limit(segments.size() - 1).map(SegmentInfo::bytes).toList();
+        assertEquals(first, sealed.getFirst());
+        assertEquals((long) maximumPages * PAGE_SIZE, sealed.getLast());
+        for (long size = first; size <= (long) maximumPages * PAGE_SIZE; size *= 2) {
+            assertTrue(sealed.contains(size), "no segment of " + size + " bytes in " + sealed);
+        }
+        for (int i = 1; i < sealed.size(); i++) {
+            assertTrue(sealed.get(i) >= sealed.get(i - 1), "segments shrank in " + sealed);
+        }
+        try (PageStore reopened = PageStore.open(directory, PAGE_SIZE, first, maximumPages, OPEN_FILES, segments, -1)) {
+            assertEquals((long) maximumPages * PAGE_SIZE, reopened.segmentBytes());
+            written.forEach((pageId, image) -> assertArrayEquals(image, bytes(reopened.read(pageId))));
+        }
+    }
+
+    @Test
+    void segmentsGetSmallerAgainOnceTheStoreShrinks() {
+        long first = 64 << 10;
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, first, 256, OPEN_FILES, List.of(), -1)) {
+            while (store.segmentBytes() < 256 * PAGE_SIZE) {
+                write(store, PAGE_SIZE);
+            }
+            int active = store.activeSegment();
+            store.sealActive(active);
+            store.segments().forEach(info -> {
+                store.transition(info.id(), SegmentState.COMPACTING, 0);
+                store.transition(info.id(), SegmentState.RETIRED, 1);
+                store.delete(info.id());
+            });
+            long pageId = write(store, PAGE_SIZE);
+            assertEquals(1, store.segments().size());
+            assertEquals(first, store.segmentBytes());
+            assertArrayEquals(image(new Random(PAGE_SIZE), PAGE_SIZE), bytes(store.read(pageId)));
+        }
+    }
+
+    @Test
+    void aStoreWrittenWithFixedSegmentsKeepsWorkingWithGrowingOnes() {
+        Map<Long, byte[]> written = new LinkedHashMap<>();
+        List<SegmentInfo> segments;
+        Random random = new Random(17);
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, 256L * PAGE_SIZE, 256, OPEN_FILES, List.of(), -1)) {
+            for (int i = 0; i < 600; i++) {
+                byte[] image = image(random, PAGE_SIZE);
+                long pageId = store.allocate(image.length);
+                store.write(pageId, MemorySegment.ofArray(image));
+                written.put(pageId, image);
+            }
+            segments = store.segments();
+        }
+        try (PageStore store = PageStore.open(directory, PAGE_SIZE, 16L * PAGE_SIZE, 256, OPEN_FILES, segments, -1)) {
+            for (int i = 0; i < 600; i++) {
+                byte[] image = image(random, PAGE_SIZE);
+                long pageId = store.allocate(image.length);
+                store.write(pageId, MemorySegment.ofArray(image));
+                written.put(pageId, image);
+            }
+            written.forEach((pageId, image) -> assertArrayEquals(image, bytes(store.read(pageId))));
+            assertTrue(store.segments().stream().map(SegmentInfo::bytes).distinct().count() > 1);
+        }
+    }
+
     private static long openDescriptors() throws IOException {
         try (Stream<Path> listing = Files.list(DESCRIPTORS)) {
             return listing.count();

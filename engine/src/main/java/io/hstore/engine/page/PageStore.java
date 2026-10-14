@@ -28,10 +28,13 @@ public final class PageStore implements AutoCloseable {
     }
 
     private static final long PASS_BYTES = 4L << 20;
+    private static final long FIRST_SEGMENT_BYTES = 8L << 20;
+    private static final long GROWTH_FRACTION = 8;
 
     private final Path directory;
     private final int pageSize;
-    private final int segmentUnits;
+    private final int firstUnits;
+    private final int maximumUnits;
     private final FilePool pool;
     private final Map<Integer, SegmentFile> files = new ConcurrentHashMap<>();
     private final ConcurrentSkipListMap<Integer, SegmentInfo> segments = new ConcurrentSkipListMap<>();
@@ -48,11 +51,13 @@ public final class PageStore implements AutoCloseable {
     private int releasedCount;
     private int activeSegment;
     private int nextUnit;
+    private int activeUnits;
 
-    private PageStore(Path directory, int pageSize, int pagesPerSegment, int openFiles) {
+    private PageStore(Path directory, int pageSize, long firstSegmentBytes, int pagesPerSegment, int openFiles) {
         this.directory = directory;
         this.pageSize = pageSize;
-        this.segmentUnits = (int) Math.min(PageAddress.MAX_OFFSET + 1L, (long) pagesPerSegment * pageSize / PageId.UNIT_BYTES);
+        this.maximumUnits = (int) Math.min(PageAddress.MAX_OFFSET + 1L, (long) pagesPerSegment * pageSize / PageId.UNIT_BYTES);
+        this.firstUnits = (int) Math.min(firstSegmentBytes / PageId.UNIT_BYTES, maximumUnits);
         this.pool = new FilePool(openFiles);
     }
 
@@ -62,7 +67,12 @@ public final class PageStore implements AutoCloseable {
 
     public static PageStore open(Path directory, int pageSize, int pagesPerSegment, int openFiles, Collection<SegmentInfo> known,
                                  long checkpointLsn) {
-        PageStore store = new PageStore(directory, pageSize, pagesPerSegment, openFiles);
+        return open(directory, pageSize, FIRST_SEGMENT_BYTES, pagesPerSegment, openFiles, known, checkpointLsn);
+    }
+
+    static PageStore open(Path directory, int pageSize, long firstSegmentBytes, int pagesPerSegment, int openFiles,
+                          Collection<SegmentInfo> known, long checkpointLsn) {
+        PageStore store = new PageStore(directory, pageSize, firstSegmentBytes, pagesPerSegment, openFiles);
         store.restore(known, checkpointLsn);
         return store;
     }
@@ -102,6 +112,7 @@ public final class PageStore implements AutoCloseable {
                 .ifPresent(info -> {
                     activeSegment = info.id();
                     nextUnit = Math.toIntExact(info.units());
+                    activeUnits = unitsForNextSegment(info.id());
                 });
         files.forEach((id, file) -> {
             if (id != activeSegment) {
@@ -236,7 +247,7 @@ public final class PageStore implements AutoCloseable {
     }
 
     private long claim(int units) {
-        if (activeSegment == 0 || nextUnit + units > segmentUnits) {
+        if (activeSegment == 0 || nextUnit + units > activeUnits) {
             rollSegment();
         }
         int offset = nextUnit;
@@ -254,10 +265,23 @@ public final class PageStore implements AutoCloseable {
             }
         }
         int id = segments.isEmpty() ? 1 : segments.lastKey() + 1;
+        activeUnits = unitsForNextSegment(id);
         files.put(id, SegmentFile.create(id, SegmentFile.pathFor(directory, id), pool));
         segments.put(id, new SegmentInfo(id, SegmentState.ACTIVE, 0, 0, 0));
         activeSegment = id;
         nextUnit = 0;
+    }
+
+    private int unitsForNextSegment(int id) {
+        long stored = segments.values().stream()
+                .filter(info -> info.id() != id && info.state() != SegmentState.RETIRED)
+                .mapToLong(SegmentInfo::units)
+                .sum();
+        long units = firstUnits;
+        while (units * 2 <= maximumUnits && units * 2 * GROWTH_FRACTION <= stored) {
+            units *= 2;
+        }
+        return (int) units;
     }
 
     private void adjustLive(long address, int sign) {
@@ -465,7 +489,12 @@ public final class PageStore implements AutoCloseable {
     }
 
     public long segmentBytes() {
-        return (long) segmentUnits * PageId.UNIT_BYTES;
+        allocation.lock();
+        try {
+            return (long) activeUnits * PageId.UNIT_BYTES;
+        } finally {
+            allocation.unlock();
+        }
     }
 
     public void sealActive(int segment) {

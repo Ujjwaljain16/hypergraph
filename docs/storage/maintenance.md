@@ -315,7 +315,7 @@ A failure names the page, for example `HStoreException.corrupt(pageId, "checksum
 | `compaction_live_ratio` | 0.5 | A sealed segment is compacted when fewer than this fraction of its images are live |
 | `page_size` | 16384 | Maximum node image size; fixed at `init` |
 
-The segment capacity is `EngineOptions.pagesPerSegment × pageSize`, by default 16 384 × 16 KiB = 256 MiB, capped at 1 GiB by the 24-bit unit offset.
+New segments start at 8 MiB and double as the store grows, up to `EngineOptions.pagesPerSegment × pageSize`, by default 16 384 × 16 KiB = 256 MiB and never more than 1 GiB because of the 24-bit unit offset ([pages.md](pages.md#segment-files)). Small stores therefore have many small segments that compaction can empty one at a time.
 
 ```sql
 CHECKPOINT;

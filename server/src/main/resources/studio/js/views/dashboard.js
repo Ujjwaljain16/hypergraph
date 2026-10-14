@@ -100,7 +100,7 @@ export class DashboardPage {
       h('h2', { class: 'section-title' }, 'Storage'),
       h('div', { class: 'split' },
         h('div', { class: 'card' },
-          h('div', { class: 'card-head' }, h('h3', {}, 'Data segments'), h('span', { class: 'muted' }, `${count(segments.length)} segments · ${bytes(configuration.segmentBytes)} each`)),
+          h('div', { class: 'card-head' }, h('h3', {}, 'Data segments'), h('span', { class: 'muted' }, `${count(segments.length)} segments · up to ${bytes(configuration.segmentBytes)} each`)),
           h('div', { class: 'segments' }, segments.map(segment => {
             const fill = h('span');
             fill.style.height = `${Math.round(Math.min(1, segment.bytes / configuration.segmentBytes) * 100)}%`;
