@@ -17,6 +17,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -252,5 +254,40 @@ class QueryLanguageTest {
     void syntaxErrorsAreReportedWithOffsets() {
         HStoreException.InvalidSchema error = assertThrows(HStoreException.InvalidSchema.class, () -> session.execute("MATCH EDGE c:Claim WHERE"));
         assertTrue(error.getMessage().contains("offset"), error.getMessage());
+    }
+
+    @Test
+    void checkpointAtTakesSizesInAnyCaseOrAuto() {
+        Map<String, Long> sizes = Map.of("CHECKPOINT AT 64MB", 64L << 20, "checkpoint at 64 mb", 64L << 20, "CHECKPOINT AT 1GB", 1L << 30,
+                "CHECKPOINT AT 512KB", 512L << 10, "CHECKPOINT AT 1.5 GiB", 3L << 29, "Checkpoint At 4096 b", 4096L);
+        sizes.forEach((text, bytes) -> assertEquals(new Ast.Statement.CheckpointAt(OptionalLong.of(bytes)), Parser.parse(text), text));
+        assertEquals(new Ast.Statement.CheckpointAt(OptionalLong.empty()), Parser.parse("CHECKPOINT AT AUTO"));
+        assertEquals(new Ast.Statement.CheckpointAt(OptionalLong.empty()), Parser.parse("checkpoint at auto"));
+        assertEquals(new Ast.Statement.Checkpoint(), Parser.parse("CHECKPOINT"));
+        for (String bad : List.of("CHECKPOINT AT", "CHECKPOINT AT 64", "CHECKPOINT AT 64 PB", "CHECKPOINT AT 0MB", "CHECKPOINT AT -1MB",
+                "CHECKPOINT AT 0.5B", "CHECKPOINT AT MB", "CHECKPOINT AT 99999999999TB", "CHECKPOINT AT 'auto'", "CHECKPOINT AT 64MB 2")) {
+            HStoreException.InvalidSchema error = assertThrows(HStoreException.InvalidSchema.class, () -> session.execute(bad), bad);
+            assertTrue(error.getMessage().contains("syntax error"), error.getMessage());
+        }
+    }
+
+    @Test
+    void checkpointAtIsKeptAcrossReopenAndAutoClearsIt() {
+        assertTrue(session.execute("CHECKPOINT AT 64MB").message().contains("67108864 bytes of log, set by CHECKPOINT AT"));
+        assertEquals(List.of("67108864", "database"), checkpointStats());
+        session.close();
+        database.close();
+        database = HypergraphDatabase.open(directory, DatabaseOptions.defaults()
+                .withEngine(EngineOptions.defaults().withPageSize(4096).withHistoryLimit(500)));
+        session = new Session(database);
+        assertEquals(List.of("67108864", "database"), checkpointStats());
+        assertTrue(session.execute("CHECKPOINT AT AUTO").message().contains("sized from the store"));
+        assertEquals(List.of(String.valueOf(2L << 20), "automatic"), checkpointStats());
+    }
+
+    private List<String> checkpointStats() {
+        Map<String, String> metrics = session.execute("STATS").rows().stream()
+                .collect(Collectors.toMap(row -> row.get(0).render(), row -> row.get(1).render()));
+        return List.of(metrics.get("checkpoint after wal bytes"), metrics.get("checkpoint threshold"));
     }
 }

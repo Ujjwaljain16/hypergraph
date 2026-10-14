@@ -393,6 +393,9 @@ public final class Parser {
             return new Statement.ShowViews();
         }
         if (accept("CHECKPOINT")) {
+            if (accept("AT")) {
+                return new Statement.CheckpointAt(accept("AUTO") ? OptionalLong.empty() : OptionalLong.of(size()));
+            }
             return new Statement.Checkpoint();
         }
         if (accept("COMPACT")) {
@@ -929,6 +932,32 @@ public final class Parser {
         } catch (NumberFormatException e) {
             throw error("malformed number " + token.text());
         }
+    }
+
+    private long size() {
+        BigDecimal amount = number();
+        Token unit = next();
+        long scale = unit.kind() != Token.Kind.WORD ? 0 : switch (unit.text().toUpperCase()) {
+            case "B" -> 1;
+            case "KB", "KIB" -> 1L << 10;
+            case "MB", "MIB" -> 1L << 20;
+            case "GB", "GIB" -> 1L << 30;
+            case "TB", "TIB" -> 1L << 40;
+            default -> 0;
+        };
+        if (scale == 0) {
+            throw error("expected a size unit (B, KB, MB, GB or TB) but found " + unit);
+        }
+        long bytes;
+        try {
+            bytes = amount.multiply(BigDecimal.valueOf(scale)).longValueExact();
+        } catch (ArithmeticException e) {
+            throw error(amount.toPlainString() + " " + unit.text() + " is not a whole number of bytes");
+        }
+        if (bytes < 1) {
+            throw error("a size must be positive, not " + amount.toPlainString() + " " + unit.text());
+        }
+        return bytes;
     }
 
     private long longValue() {

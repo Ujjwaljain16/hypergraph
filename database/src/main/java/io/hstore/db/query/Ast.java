@@ -314,6 +314,9 @@ public final class Ast {
         record Checkpoint() implements Statement {
         }
 
+        record CheckpointAt(OptionalLong bytes) implements Statement {
+        }
+
         record Compact() implements Statement {
         }
     }
