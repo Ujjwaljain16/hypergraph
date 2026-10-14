@@ -51,6 +51,7 @@ public final class Transaction extends View implements AutoCloseable {
 
     private final TransactionManager manager;
     private final long id;
+    private final Retained retained;
     private final Generation snapshot;
     private final Branch branch;
     private final TxnOptions options;
@@ -64,9 +65,10 @@ public final class Transaction extends View implements AutoCloseable {
     private long[] spilled = new long[0];
     private int spilledPages;
 
-    Transaction(TransactionManager manager, long id, Generation snapshot, TxnOptions options) {
+    Transaction(TransactionManager manager, long id, Retained retained, Generation snapshot, TxnOptions options) {
         this.manager = manager;
         this.id = id;
+        this.retained = retained;
         this.snapshot = snapshot;
         this.branch = snapshot.branch(options.branch());
         this.options = options;
@@ -277,7 +279,7 @@ public final class Transaction extends View implements AutoCloseable {
             }
             throw failure;
         } finally {
-            manager.unpin(snapshot.id());
+            retained.unpin();
         }
     }
 
@@ -288,7 +290,7 @@ public final class Transaction extends View implements AutoCloseable {
                 manager.logAbort(id);
                 manager.discard(spilled());
             }
-            manager.unpin(snapshot.id());
+            retained.unpin();
         }
     }
 

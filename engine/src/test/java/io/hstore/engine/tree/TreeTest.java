@@ -231,6 +231,34 @@ class TreeTest {
     }
 
     @Test
+    void firstAndLastFollowEditsAtBothEnds() {
+        MemoryPages pages = new MemoryPages(1024);
+        assertEquals(Optional.empty(), Tree.empty(LONGS, pages).first());
+        assertEquals(Optional.empty(), Tree.empty(LONGS, pages).last());
+        TreeMap<Long, Long> oracle = asMap(new TreeSet<>(LongStream.range(0, 20_000).map(x -> x * 3).boxed().toList()));
+        Tree<Long> tree = pages.persist(build(pages, new TreeSet<>(oracle.keySet())));
+        assertTrue(tree.height() > 1);
+        WriteScope scope = new WriteScope();
+        for (int round = 0; round < 300; round++) {
+            assertEquals(oracle.firstKey(), tree.first().orElseThrow().key());
+            assertEquals(oracle.firstEntry().getValue(), tree.first().orElseThrow().value());
+            assertEquals(oracle.lastKey(), tree.last().orElseThrow().key());
+            assertEquals(oracle.lastEntry().getValue(), tree.last().orElseThrow().value());
+            long low = oracle.firstKey();
+            long high = oracle.lastKey();
+            tree = tree.remove(scope, low).remove(scope, high);
+            oracle.remove(low);
+            oracle.remove(high);
+            if (round % 3 == 0) {
+                tree = tree.put(scope, high + 1, (long) round);
+                oracle.put(high + 1, (long) round);
+            }
+        }
+        assertEquals(oracle.firstKey(), pages.persist(tree).first().orElseThrow().key());
+        assertEquals(oracle.lastKey(), pages.persist(tree).last().orElseThrow().key());
+    }
+
+    @Test
     void keysetPaginationIsStable() {
         MemoryPages pages = new MemoryPages(1024);
         Tree<Long> tree = pages.persist(build(pages, new TreeSet<>(LongStream.range(0, 1000).map(x -> x * 2).boxed().toList())));

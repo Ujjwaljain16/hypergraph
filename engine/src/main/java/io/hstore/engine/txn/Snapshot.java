@@ -10,17 +10,30 @@ import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.tree.NodeSource;
 import io.hstore.engine.tree.Tree;
 
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 
 public final class Snapshot extends View implements AutoCloseable {
 
+    private static final VarHandle CLOSED;
+
+    static {
+        try {
+            CLOSED = MethodHandles.lookup().findVarHandle(Snapshot.class, "closed", boolean.class);
+        } catch (ReflectiveOperationException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
     private final TransactionManager manager;
+    private final Retained retained;
     private final Generation generation;
     private final Branch branch;
-    private final AtomicBoolean open = new AtomicBoolean(true);
+    private volatile boolean closed;
 
-    Snapshot(TransactionManager manager, Generation generation, Branch branch) {
+    Snapshot(TransactionManager manager, Retained retained, Generation generation, Branch branch) {
         this.manager = manager;
+        this.retained = retained;
         this.generation = generation;
         this.branch = branch;
     }
@@ -59,8 +72,8 @@ public final class Snapshot extends View implements AutoCloseable {
 
     @Override
     public void close() {
-        if (open.compareAndSet(true, false)) {
-            manager.unpin(generation.id());
+        if (CLOSED.compareAndSet(this, false, true)) {
+            retained.unpin();
         }
     }
 }

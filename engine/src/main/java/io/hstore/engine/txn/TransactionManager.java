@@ -77,11 +77,10 @@ public final class TransactionManager {
 
     private final Storage storage;
     private final List<Derivation> derivations;
-    private final AtomicReference<Generation> current;
+    private final AtomicReference<Retained> current;
     private final AtomicReference<Generation> head;
     private final GroupCommitter committer;
-    private final ConcurrentSkipListMap<Long, Generation> history = new ConcurrentSkipListMap<>();
-    private final ConcurrentSkipListMap<Long, Integer> pins = new ConcurrentSkipListMap<>();
+    private final ConcurrentSkipListMap<Long, Retained> history = new ConcurrentSkipListMap<>();
     private final ReentrantLock commitLock = new ReentrantLock();
     private final ConcurrentSkipListMap<Long, Long> commitEnds = new ConcurrentSkipListMap<>();
     private final AtomicLong unwritten = new AtomicLong();
@@ -103,13 +102,12 @@ public final class TransactionManager {
     public TransactionManager(Storage storage, Generation recovered, Collection<Generation> retained) {
         this.storage = storage;
         this.derivations = Stream.concat(EngineDerivations.ALL.stream(), storage.derivations().stream()).toList();
-        this.current = new AtomicReference<>(recovered);
         this.head = new AtomicReference<>(recovered);
         this.committer = new GroupCommitter(this::makeDurable);
         this.atoms = new AtomicLong(recovered.nextAtom());
         this.txns = new AtomicLong(recovered.nextTxn());
-        retained.forEach(generation -> history.put(generation.id(), generation));
-        history.put(recovered.id(), recovered);
+        retained.forEach(this::retain);
+        this.current = new AtomicReference<>(retain(recovered));
         commitEnds.put(recovered.id(), storage.wal().end());
     }
 
@@ -122,11 +120,22 @@ public final class TransactionManager {
     }
 
     public Generation current() {
-        return current.get();
+        return current.get().generation();
     }
 
     public Collection<Generation> history() {
-        return List.copyOf(history.values());
+        return history.values().stream().map(Retained::generation).toList();
+    }
+
+    private Retained retain(Generation generation) {
+        Retained retained = history.get(generation.id());
+        if (retained == null) {
+            retained = new Retained(generation);
+            history.put(generation.id(), retained);
+        } else {
+            retained.rebind(generation);
+        }
+        return retained;
     }
 
     public long allocateAtom() {
@@ -138,66 +147,58 @@ public final class TransactionManager {
     }
 
     public Snapshot snapshot(int branch) {
-        Generation generation = pinCurrent();
-        try {
-            return new Snapshot(this, generation, generation.branch(branch));
-        } catch (RuntimeException e) {
-            unpin(generation.id());
-            throw e;
-        }
+        return snapshot(pinCurrent(), branch);
     }
 
     public Snapshot snapshotAt(long generationId, int branch) {
-        pin(generationId);
-        Generation generation = history.get(generationId);
-        if (generation == null) {
-            unpin(generationId);
+        Retained retained = history.get(generationId);
+        if (retained == null || !retained.pin()) {
             throw HStoreException.invalid("generation " + generationId + " is no longer retained");
         }
+        return snapshot(retained, branch);
+    }
+
+    private Snapshot snapshot(Retained retained, int branch) {
         try {
-            return new Snapshot(this, generation, generation.branch(branch));
+            Generation generation = retained.generation();
+            return new Snapshot(this, retained, generation, generation.branch(branch));
         } catch (RuntimeException e) {
-            unpin(generationId);
+            retained.unpin();
             throw e;
         }
     }
 
     public Optional<Generation> generationAsOf(long wallTime) {
-        return history.descendingMap().values().stream().filter(generation -> generation.wallTime() <= wallTime).findFirst();
+        return history.descendingMap().values().stream().map(Retained::generation)
+                .filter(generation -> generation.wallTime() <= wallTime).findFirst();
     }
 
     public Transaction begin(TxnOptions options) {
-        Generation generation = pinCurrent();
+        Retained retained = pinCurrent();
         try {
-            return new Transaction(this, txns.getAndIncrement(), generation, options);
+            return new Transaction(this, txns.getAndIncrement(), retained, retained.generation(), options);
         } catch (RuntimeException e) {
-            unpin(generation.id());
+            retained.unpin();
             throw e;
         }
     }
 
-    private Generation pinCurrent() {
+    private Retained pinCurrent() {
         while (true) {
-            Generation generation = current.get();
-            pin(generation.id());
-            if (history.containsKey(generation.id())) {
-                return generation;
+            Retained retained = current.get();
+            if (retained.pin()) {
+                return retained;
             }
-            unpin(generation.id());
         }
     }
 
-    void pin(long generation) {
-        pins.merge(generation, 1, Integer::sum);
-    }
-
-    void unpin(long generation) {
-        pins.computeIfPresent(generation, (_, count) -> count > 1 ? count - 1 : null);
-    }
-
     public OptionalLong oldestPinned() {
-        Map.Entry<Long, Integer> first = pins.firstEntry();
-        return first == null ? OptionalLong.empty() : OptionalLong.of(first.getKey());
+        for (Map.Entry<Long, Retained> entry : history.entrySet()) {
+            if (entry.getValue().pinned()) {
+                return OptionalLong.of(entry.getKey());
+            }
+        }
+        return OptionalLong.empty();
     }
 
     public long oldestReadable() {
@@ -453,8 +454,7 @@ public final class TransactionManager {
         walBytes.add(written);
         long[] provisional = provisional(spilled, writes);
         GroupCommitter.Pending pending = new GroupCommitter.Pending(next, () -> {
-            history.put(next.id(), next);
-            current.set(next);
+            current.set(retain(next));
             storage.references().provisional(next.id(), provisional);
             if (!event.isEmpty()) {
                 storage.feed().append(event);
@@ -554,8 +554,7 @@ public final class TransactionManager {
         exclusive(() -> {
             Generation rebound = rebound(head.get(), rebinding);
             head.set(rebound);
-            current.set(rebound);
-            history.put(rebound.id(), rebound);
+            current.set(retain(rebound));
             return null;
         });
         recountUnwritten();
@@ -583,16 +582,11 @@ public final class TransactionManager {
 
     private void trimHistory() {
         long excess = history.size() - storage.historyLimit();
-        long latest = current.get().id();
-        for (Iterator<Long> generations = history.keySet().iterator(); excess > 0 && generations.hasNext(); ) {
-            long generation = generations.next();
-            if (generation == latest || pins.containsKey(generation)) {
-                continue;
-            }
-            Generation trimmed = history.remove(generation);
-            if (pins.containsKey(generation)) {
-                history.put(generation, trimmed);
-            } else {
+        Retained latest = current.get();
+        for (Iterator<Retained> generations = history.values().iterator(); excess > 0 && generations.hasNext(); ) {
+            Retained generation = generations.next();
+            if (generation != latest && generation.drop()) {
+                generations.remove();
                 excess--;
             }
         }
