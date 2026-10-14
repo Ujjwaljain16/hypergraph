@@ -450,7 +450,7 @@ Optional.empty
 | `add(edge, member, spec)` | WRITER | upsert an incidence (roles validated against the type) |
 | `insertAt(edge, index, member, spec)` / `append(...)` | WRITER | ordered edges |
 | `remove(edge, member)` / `removeAt(edge, index)` | WRITER | membership removal |
-| `load(edge, members, spec)` | WRITER | replaces the whole membership with a tree built bottom-up from `members` (`Hyperedge.build`) |
+| `load(edge, members, spec)` | WRITER | replaces the whole membership with a tree built bottom-up from `members` (`Hyperedge.build`); `members` is a `List<Long>` or a `long[]`, and the edge and the roles are checked once per call |
 | `qualify(edge, member, qualifier)` | WRITER | attach an assertion id to an incidence |
 | `set(atom, name, value[, validity])` / `unset(atom, name)` | WRITER | per-key OCC on the property bag |
 | `document(atom, json)` | WRITER | stores `$document` |

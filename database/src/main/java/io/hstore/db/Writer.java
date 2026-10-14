@@ -21,6 +21,7 @@ import io.hstore.db.value.Json;
 import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
 import io.hstore.db.value.Values;
+import io.hstore.engine.Dictionary;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.AtomRecord;
 import io.hstore.engine.catalog.EngineSlots;
@@ -31,6 +32,7 @@ import io.hstore.engine.tree.Ref;
 import io.hstore.engine.txn.Transaction;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -138,13 +140,11 @@ public final class Writer extends Reader {
     }
 
     private void assign(long atom, TypeDef definition, Map<String, ?> properties) {
-        definition.properties().stream()
-                .filter(PropertyDef::required)
-                .filter(property -> !properties.containsKey(property.name()))
-                .findFirst()
-                .ifPresent(missing -> {
-                    throw HStoreException.invalid(definition.name() + " requires property '" + missing.name() + "'");
-                });
+        for (PropertyDef property : definition.properties()) {
+            if (property.required() && !properties.containsKey(property.name())) {
+                throw HStoreException.invalid(definition.name() + " requires property '" + property.name() + "'");
+            }
+        }
         properties.forEach((name, value) -> set(atom, name, Value.of(value)));
     }
 
@@ -178,7 +178,19 @@ public final class Writer extends Reader {
     }
 
     public void load(long edge, List<Long> members, MemberSpec spec) {
-        txn.load(edge, members.stream().map(member -> incidence(edge, member, spec)).toList());
+        load(edge, members.stream().mapToLong(Long::longValue).toArray(), spec);
+    }
+
+    public void load(long edge, long[] members, MemberSpec spec) {
+        Incidence[] incidences = new Incidence[members.length];
+        if (members.length > 0) {
+            Incidence first = incidences[0] = incidence(edge, members[0], spec);
+            for (int i = 1; i < members.length; i++) {
+                requireVisible(members[i]);
+                incidences[i] = new Incidence(members[i], first.roleSet(), first.weight(), first.validFrom(), first.validTo(), first.dataRef(), first.qualifier());
+            }
+        }
+        txn.load(edge, Arrays.asList(incidences));
     }
 
     public void qualify(long edge, long member, long qualifier) {
@@ -188,20 +200,30 @@ public final class Writer extends Reader {
     }
 
     private Incidence incidence(long edge, long member, MemberSpec spec) {
+        requireMembership(edge, spec);
+        requireVisible(member);
+        int roleSet = spec.roles().isEmpty() ? Dictionary.NO_ROLES : database.engine().dictionary().roleSet(spec.roles());
+        long weight = spec.weight().isPresent() ? Weight.of(spec.weight().getAsDouble()) : Weight.ONE;
+        return new Incidence(member, roleSet, weight, spec.validity().from(), spec.validity().to(), spec.dataRef(), spec.qualifier());
+    }
+
+    private void requireMembership(long edge, MemberSpec spec) {
         principal().requireWrite();
         Atom container = require(edge);
         if (!container.isEdge()) {
             throw HStoreException.invalid("atom " + edge + " is not a hyperedge");
         }
-        spec.roles().stream().filter(role -> !container.type().allowsRole(role)).findFirst().ifPresent(role -> {
-            throw HStoreException.invalid(container.type().name() + " does not declare role '" + role + "'");
-        });
+        for (String role : spec.roles()) {
+            if (!container.type().allowsRole(role)) {
+                throw HStoreException.invalid(container.type().name() + " does not declare role '" + role + "'");
+            }
+        }
+    }
+
+    private void requireVisible(long member) {
         if (!visible(member)) {
             throw HStoreException.invalid("member atom " + member + " does not exist");
         }
-        int roleSet = database.engine().dictionary().roleSet(spec.roles());
-        return new Incidence(member, roleSet, spec.weight().stream().mapToLong(Weight::of).findFirst().orElse(Weight.ONE),
-                spec.validity().from(), spec.validity().to(), spec.dataRef(), spec.qualifier());
     }
 
     public void set(long atom, String name, Value value) {
