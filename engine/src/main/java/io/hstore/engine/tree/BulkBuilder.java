@@ -14,6 +14,7 @@ import java.util.function.BinaryOperator;
 public final class BulkBuilder<V> {
 
     private static final int SPILL_BATCH = 32;
+    private static final int INITIAL_CAPACITY = 8;
 
     private final TreeSchema<V> schema;
     private final NodeSource source;
@@ -21,8 +22,8 @@ public final class BulkBuilder<V> {
     private final Layout layout;
     private final List<Ref> leaves = new ArrayList<>();
     private BinaryOperator<V> merge = (_, latest) -> latest;
-    private long[] keys = new long[64];
-    private Object[] values = new Object[64];
+    private long[] keys = new long[0];
+    private Object[] values = new Object[0];
     private int size;
     private int bytes;
     private int unspilled;
@@ -58,8 +59,9 @@ public final class BulkBuilder<V> {
         }
         entryBytes += size == 0 ? ByteCursor.signedVarLongSize(key) : ByteCursor.varLongSize(key - keys[size - 1]);
         if (size == keys.length) {
-            keys = Arrays.copyOf(keys, size * 2);
-            values = Arrays.copyOf(values, size * 2);
+            int capacity = Math.max(INITIAL_CAPACITY, size * 2);
+            keys = Arrays.copyOf(keys, capacity);
+            values = Arrays.copyOf(values, capacity);
         }
         keys[size] = key;
         values[size] = value;
