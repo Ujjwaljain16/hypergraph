@@ -27,7 +27,8 @@ Related: [transactions](transactions.md), [change feed](../storage/change-feed.m
 
 ```text
 <db>/
-  FORMAT                         properties: format=8, page-size=<bytes>
+  FORMAT                         properties: format=8, page-size=<bytes>; written to FORMAT.tmp, forced,
+                                 renamed and the directory forced, before anything else is created
   LOCK                           exclusive FileLock held while open
   catalog/manifest               name of the current catalog image file
   catalog/generations/%016x.cat  checkpointed catalog images (3 newest retained)

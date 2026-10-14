@@ -14,6 +14,7 @@ import io.hstore.engine.maintenance.Checkpointer;
 import io.hstore.engine.maintenance.Compactor;
 import io.hstore.engine.maintenance.Recovery;
 import io.hstore.engine.maintenance.ReferenceCounter;
+import io.hstore.engine.page.FileHandle;
 import io.hstore.engine.page.PageStore;
 import io.hstore.engine.tree.NodeCache;
 import io.hstore.engine.tree.NodeSource;
@@ -24,12 +25,15 @@ import io.hstore.engine.txn.TransactionManager;
 import io.hstore.engine.txn.TxnOptions;
 import io.hstore.engine.wal.WriteAheadLog;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.List;
@@ -145,9 +149,16 @@ public final class StorageEngine implements AutoCloseable {
         }
         format.setProperty("format", FORMAT_VERSION);
         format.setProperty("page-size", Integer.toString(options.pageSize()));
-        try (var out = Files.newOutputStream(file)) {
-            format.store(out, null);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        format.store(bytes, null);
+        Path temporary = directory.resolve("FORMAT.tmp");
+        try (FileChannel channel = FileHandle.channel(temporary, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+                StandardOpenOption.TRUNCATE_EXISTING)) {
+            channel.write(ByteBuffer.wrap(bytes.toByteArray()));
+            channel.force(true);
         }
+        Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE);
+        FileHandle.syncDirectory(directory);
     }
 
     public Path directory() {
