@@ -15,7 +15,8 @@ public enum CrashPoint {
     COMPACTION_RETIRE,
     CHECKPOINT_PAGES,
     CHECKPOINT_CATALOG,
-    CHECKPOINT_JOURNAL;
+    CHECKPOINT_JOURNAL,
+    WAL_FORCE;
 
     @FunctionalInterface
     public interface Injector {

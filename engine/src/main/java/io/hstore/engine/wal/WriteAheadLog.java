@@ -7,6 +7,7 @@ import io.hstore.engine.HStoreException;
 import io.hstore.engine.page.ByteCursor;
 import io.hstore.engine.page.Checksums;
 import io.hstore.engine.page.FileHandle;
+import io.hstore.engine.txn.CrashPoint;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -42,7 +43,9 @@ public final class WriteAheadLog implements AutoCloseable {
 
     private final Path directory;
     private final long segmentBytes;
+    private final CrashPoint.Injector faults;
     private final ReentrantLock lock = new ReentrantLock();
+    private final ReentrantLock syncing = new ReentrantLock();
     private final NavigableMap<Long, Path> segments = new TreeMap<>();
     private final AtomicLong bytesAppended = new AtomicLong();
     private FileHandle active;
@@ -50,13 +53,18 @@ public final class WriteAheadLog implements AutoCloseable {
     private long end;
     private boolean dirty;
 
-    private WriteAheadLog(Path directory, long segmentBytes) {
+    private WriteAheadLog(Path directory, long segmentBytes, CrashPoint.Injector faults) {
         this.directory = directory;
         this.segmentBytes = segmentBytes;
+        this.faults = faults;
     }
 
     public static WriteAheadLog open(Path directory, long segmentBytes) {
-        WriteAheadLog log = new WriteAheadLog(directory, segmentBytes);
+        return open(directory, segmentBytes, CrashPoint.Injector.NONE);
+    }
+
+    public static WriteAheadLog open(Path directory, long segmentBytes, CrashPoint.Injector faults) {
+        WriteAheadLog log = new WriteAheadLog(directory, segmentBytes, faults);
         log.restore();
         return log;
     }
@@ -166,14 +174,47 @@ public final class WriteAheadLog implements AutoCloseable {
     }
 
     public void sync() {
+        syncing.lock();
+        try {
+            FileHandle target;
+            lock.lock();
+            try {
+                if (!dirty || active == null) {
+                    return;
+                }
+                target = active;
+                dirty = false;
+            } finally {
+                lock.unlock();
+            }
+            force(target);
+        } finally {
+            syncing.unlock();
+        }
+    }
+
+    private void force(FileHandle target) {
+        try {
+            faults.reach(CrashPoint.WAL_FORCE);
+            target.run(channel -> channel.force(false));
+        } catch (IOException e) {
+            if (unforced(target)) {
+                throw HStoreException.io("write-ahead log sync failed", e);
+            }
+        } catch (RuntimeException | Error failure) {
+            unforced(target);
+            throw failure;
+        }
+    }
+
+    private boolean unforced(FileHandle target) {
         lock.lock();
         try {
-            if (dirty && active != null) {
-                active.run(channel -> channel.force(false));
-                dirty = false;
+            if (target != active) {
+                return false;
             }
-        } catch (IOException e) {
-            throw HStoreException.io("write-ahead log sync failed", e);
+            dirty = true;
+            return true;
         } finally {
             lock.unlock();
         }
@@ -198,22 +239,25 @@ public final class WriteAheadLog implements AutoCloseable {
     }
 
     public void truncateBefore(long lsn) {
+        List<Path> obsolete = new ArrayList<>();
         lock.lock();
         try {
-            List<Long> obsolete = new ArrayList<>();
             for (Map.Entry<Long, Path> entry : segments.entrySet()) {
                 Long next = segments.higherKey(entry.getKey());
                 if (next != null && next <= lsn && entry.getKey() != activeStart) {
-                    obsolete.add(entry.getKey());
+                    obsolete.add(entry.getValue());
                 }
             }
-            for (long start : obsolete) {
-                Files.deleteIfExists(segments.remove(start));
+            segments.values().removeAll(obsolete);
+        } finally {
+            lock.unlock();
+        }
+        try {
+            for (Path path : obsolete) {
+                Files.deleteIfExists(path);
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
-        } finally {
-            lock.unlock();
         }
     }
 
