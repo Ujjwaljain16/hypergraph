@@ -64,6 +64,8 @@ HyperGraphDB opens a store after a crash faster at scale 1, 76 ms against 128 ms
 single commits in both are bound by the cost of a forced write. The
 [benchmark report](docs/benchmark-report.pdf) (PDF) covers every workload, configuration and caveat, and
 [docs/benchmarks.md](docs/benchmarks.md) explains how to rerun it.
+The [HStore paper](docs/hstore-paper.pdf) describes the design and evaluates the current code against
+HyperGraphDB on a cloud machine.
 
 ## Quick start with Docker
 
@@ -201,6 +203,7 @@ The full index is [docs/README.md](docs/README.md).
 | HStore Studio | [docs/operations/studio.md](docs/operations/studio.md) |
 | Benchmarks against HyperGraphDB | [docs/benchmarks.md](docs/benchmarks.md) |
 | Benchmark report (PDF) | [docs/benchmark-report.pdf](docs/benchmark-report.pdf) |
+| Paper: design and evaluation (PDF) | [docs/hstore-paper.pdf](docs/hstore-paper.pdf) |
 | Development | [docs/development.md](docs/development.md) |
 
 ## Contributing

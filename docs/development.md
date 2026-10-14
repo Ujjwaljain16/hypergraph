@@ -240,3 +240,21 @@ installs `org.hypergraphdb:hgdb` and `org.hypergraphdb:hgbdbje` version `1.4-994
 generator, `SCALE` × 50,000 nodes and × 100,000 hyperedges), writes `benchmarks/results/scale-N-durability/*.json`
 and prints a Markdown report whose *Results agree* column cross-checks every query checksum between the two
 engines. Methodology and published numbers: [benchmarks.md](benchmarks.md).
+
+## Paper
+
+`paper/` holds the HStore paper: the LaTeX sources (ACM `acmart`, `sigconf` layout), the R scripts that draw every
+figure and the result files the evaluation is built from. Nothing in the text is typed in by hand: `R/results.R` reads
+`paper/results/<configuration>/*.json` and `paper/ablation/<change>/*.json`, the same files `Comparison run` writes,
+and turns them into the plots, the tables and the `\M{...}` macros the text uses for every number.
+
+You need `tectonic` and R with `ggplot2`, `patchwork` and `jsonlite`. Then:
+
+```
+paper/build.sh            # figures, numbers and docs/hstore-paper.pdf
+paper/build.sh figures    # only the figures and paper/generated/*.tex
+```
+
+The first run compiles the paper once so that tectonic downloads the Libertine and Inconsolata fonts, and the R
+figures then use the same fonts as the text. To redo the evaluation with new numbers, replace the JSON files under
+`paper/results` and `paper/ablation` and build again.
