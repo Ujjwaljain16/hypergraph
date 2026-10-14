@@ -92,11 +92,11 @@ sequenceDiagram
 
 ### Pins
 
-Every `Snapshot` and `Transaction` pins its generation id in `TransactionManager.pins`, a `ConcurrentSkipListMap<Long, Integer>` reference count. `oldestPinned()` is the smallest pinned id. The compactor consults it before deleting retired segments (see [maintenance.md](maintenance.md)), and `trimHistory` never drops a pinned generation.
+Every `Snapshot` and `Transaction` pins its generation by incrementing the reader count of the generation's `Retained` entry in `TransactionManager.history`, and decrements it when it closes. `oldestPinned()` is the smallest id whose count is above zero. The compactor consults it before deleting retired segments (see [maintenance.md](maintenance.md)), and `trimHistory` never drops a pinned generation.
 
 ## History retention and time travel
 
-Published generations are kept in `TransactionManager.history` (a `ConcurrentSkipListMap` by id).
+Published generations are kept in `TransactionManager.history` (a `ConcurrentSkipListMap` by id, each value a `Retained` holding the generation and its reader count).
 
 * `trimHistory` runs on every publication. While there are more than `historyLimit` entries (`history_limit`, default 64), it drops the oldest generations that are neither pinned nor current, skipping over pinned ones rather than stopping at them. A long-running snapshot therefore keeps only its own generation alive beyond the limit; older unpinned generations are still trimmed.
 * `snapshotAt(generation, branch)` pins the generation and opens a snapshot over its root vector. A generation that has been trimmed fails with `generation N is no longer retained`.

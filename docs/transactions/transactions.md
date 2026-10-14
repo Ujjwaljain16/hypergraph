@@ -88,23 +88,24 @@ If a transaction that spilled is aborted (explicitly, or by `close()` without co
 ```mermaid
 flowchart LR
     subgraph TM[TransactionManager]
-        H[("history: generation id to Generation")]
-        P[("pins: generation id to pin count")]
+        H[("history: generation id to Retained (generation, reader count)")]
         C[current]
     end
-    B[begin / snapshot] -->|pin current.id| P
-    S[snapshotAt g] -->|pin g, then look up history| H
-    X[commit / Snapshot.close / abort] -->|unpin| P
+    B[begin / snapshot] -->|pin current| C
+    S[snapshotAt g] -->|look up history, then pin| H
+    X[commit / Snapshot.close / abort] -->|unpin its Retained| H
     PUB[publication of g+1] -->|history.put, trimHistory| H
 ```
 
-* `snapshot(branch)` and `begin(options)` call `pinCurrent()`: read `current`, increment `pins[id]`, then check that `history` still holds that generation. If a trim removed it in between, it unpins and tries again with the new `current`. Publication puts a generation into `history` before it makes it `current`, so this only loops when a reader races a trim.
-* `snapshotAt(g, branch)` pins `g` first and then looks it up in `history`, so a concurrent trim cannot remove it between lookup and pin. If `g` is gone it unpins and throws `INVALID_SCHEMA` (`"generation g is no longer retained"`).
-* `trimHistory()` (run during publication) computes `excess = history.size() - historyLimit` and walks the history oldest first, removing every generation that is neither pinned nor `current` until `excess` reaches 0. After removing one it checks the pins again and puts the generation back if a reader pinned it in the meantime. Pinned generations are **skipped**, not barriers: a long-running snapshot on an old generation keeps exactly that generation, while newer unpinned ones are still trimmed, so the history size stays bounded by `historyLimit + number of distinct pinned generations`.
-* `oldestPinned()` exposes the oldest pinned generation to maintenance so that compaction never deletes a segment a pinned snapshot may still read. `oldestReadable()`, the smaller of that and the oldest retained generation, tells a checkpoint which dead pages it may release ([maintenance](../storage/maintenance.md#releasing-pages)).
+Each entry of `history` is a `Retained`: the `Generation`, an `AtomicInteger` count of the readers and writers pinned on it, and a `dropped` flag. `current` points at the `Retained` of the current generation, and a `Snapshot` or `Transaction` keeps the `Retained` it pinned, so pinning and unpinning touch only that counter and allocate nothing.
+
+* `snapshot(branch)` and `begin(options)` call `pinCurrent()`: read `current`, increment its count, then check its `dropped` flag. If a trim dropped it in between, it decrements and tries again with the new `current`. Publication puts a generation into `history` before it makes it `current`, so this only loops when a reader races a trim.
+* `snapshotAt(g, branch)` looks `g` up in `history` and pins it the same way. If `g` is gone or was dropped, it throws `INVALID_SCHEMA` (`"generation g is no longer retained"`).
+* `trimHistory()` (run during publication) computes `excess = history.size() - historyLimit` and walks the history oldest first, removing every generation that is neither pinned nor `current` until `excess` reaches 0. To remove one it sets `dropped` and then reads the count again; if a reader pinned it in the meantime it clears `dropped` and skips it. A reader increments before it reads `dropped` and the trim sets `dropped` before it reads the count, so at least one of them sees the other. Pinned generations are **skipped**, not barriers: a long-running snapshot on an old generation keeps exactly that generation, while newer unpinned ones are still trimmed, so the history size stays bounded by `historyLimit + number of distinct pinned generations`.
+* `oldestPinned()` walks the history oldest first and returns the first generation with readers, so that compaction never deletes a segment a pinned snapshot may still read. `oldestReadable()`, the smaller of that and the oldest retained generation, tells a checkpoint which dead pages it may release ([maintenance](../storage/maintenance.md#releasing-pages)).
 * `generationAsOf(wallTime)` returns the newest retained generation with `wallTime <= t` (used by `AS OF` time travel).
 
-A `Snapshot` is a `View` whose trees are rooted at the pinned branch's root vector; `Snapshot.close()` unpins once (`AtomicBoolean` guard). Retention defaults: `EngineOptions.historyLimit = 64`. History is kept in memory only; after a restart it starts again from the generations recovery rebuilt ([catalog and generations](../storage/catalog-and-generations.md#history-retention-and-time-travel)).
+A `Snapshot` is a `View` whose trees are rooted at the pinned branch's root vector; `Snapshot.close()` unpins once (a `closed` flag set by compare-and-set). Retention defaults: `EngineOptions.historyLimit = 64`. History is kept in memory only; after a restart it starts again from the generations recovery rebuilt ([catalog and generations](../storage/catalog-and-generations.md#history-retention-and-time-travel)).
 
 ## 5. Commit
 

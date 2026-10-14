@@ -43,6 +43,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -522,6 +523,35 @@ class EngineTest {
                 assertEquals(1, snapshot.degree(1_000_006));
                 return null;
             });
+        }
+    }
+
+    @Test
+    void aPinnedGenerationOutlivesTheHistoryLimitUntilItsReadersClose() {
+        try (StorageEngine engine = StorageEngine.open(directory, small().withHistoryLimit(2))) {
+            engine.write(txn -> txn.createNode(NODE, "first"));
+            long pinned = engine.transactions().current().id();
+            Snapshot held = engine.snapshot();
+            Transaction open = engine.transactions().begin(TxnOptions.defaults());
+            for (int i = 0; i < 5; i++) {
+                int index = i;
+                engine.write(txn -> txn.createNode(NODE, "later-" + index));
+            }
+            assertEquals(OptionalLong.of(pinned), engine.transactions().oldestPinned());
+            try (Snapshot again = engine.snapshotAt(pinned, Branch.MAIN)) {
+                assertEquals(pinned, again.generation());
+            }
+            held.close();
+            held.close();
+            assertEquals(OptionalLong.of(pinned), engine.transactions().oldestPinned());
+            open.abort();
+            assertEquals(OptionalLong.empty(), engine.transactions().oldestPinned());
+            engine.write(txn -> txn.createNode(NODE, "trims"));
+            assertThrows(HStoreException.class, () -> engine.snapshotAt(pinned, Branch.MAIN));
+            assertEquals(2, engine.transactions().history().size());
+            try (Snapshot current = engine.snapshot()) {
+                assertEquals(OptionalLong.of(current.generation()), engine.transactions().oldestPinned());
+            }
         }
     }
 

@@ -26,12 +26,14 @@ public final class Snapshot extends View implements AutoCloseable {
     }
 
     private final TransactionManager manager;
+    private final Retained retained;
     private final Generation generation;
     private final Branch branch;
     private volatile boolean closed;
 
-    Snapshot(TransactionManager manager, Generation generation, Branch branch) {
+    Snapshot(TransactionManager manager, Retained retained, Generation generation, Branch branch) {
         this.manager = manager;
+        this.retained = retained;
         this.generation = generation;
         this.branch = branch;
     }
@@ -71,7 +73,7 @@ public final class Snapshot extends View implements AutoCloseable {
     @Override
     public void close() {
         if (CLOSED.compareAndSet(this, false, true)) {
-            manager.unpin(generation.id());
+            retained.unpin();
         }
     }
 }

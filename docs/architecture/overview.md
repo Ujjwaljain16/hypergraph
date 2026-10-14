@@ -88,7 +88,7 @@ The engine has no dependencies outside `java.base`. All three modules build into
 | `engine.topology` | Hyperedge representation: `Hyperedge` (members tree plus order index), `Incidence` (one member's role set, weight, validity, payload and qualifier), `IncidenceCodec` (columnar leaf encoding), `MemberChange`, `Weight` (fixed point) and `Validity`. |
 | `engine.index` | `PostingIndex`, a two-level index from a key to a postings set. Small sets are inlined and large ones are promoted to their own tree. Used by the reverse incidence, type, canonical-key and symbol indexes. |
 | `engine.catalog` | `AtomRecord` (`NodeRecord`/`EdgeRecord`) and its codec, `EngineSlots` (built-in slots, schemas and key functions), `Slot`/`SlotRegistry`, `RootVector`, `Generation`, `Branch`, `Symbol`, and `CatalogImage`/`CatalogStore` (checkpoint files). |
-| `engine.txn` | `TransactionManager` (commit lock, append, publication, pins, history, write buffer), `ChangeLog` (the key changes a commit logs, and their replay), `Transaction` (op log, read sets, rebase), `Snapshot`, `View` (read API shared by both), `Workspace` (mutable root vector plus derivations), `GroupCommitter`, `Op`/`EdgeAction`, `Derivation`/`EngineDerivations`, `CrashPoint`, `Durability`, `WalMode`, `Isolation` and `TxnOptions`. |
+| `engine.txn` | `TransactionManager` (commit lock, append, publication, history and its pin counts, write buffer), `ChangeLog` (the key changes a commit logs, and their replay), `Transaction` (op log, read sets, rebase), `Snapshot`, `View` (read API shared by both), `Workspace` (mutable root vector plus derivations), `GroupCommitter`, `Op`/`EdgeAction`, `Derivation`/`EngineDerivations`, `CrashPoint`, `Durability`, `WalMode`, `Isolation` and `TxnOptions`. |
 | `engine.wal` | `WriteAheadLog` (segmented, checksummed records) and `WalRecord` (`Begin`, `Page`, `PageRef`, `Changes`, `BranchMeta`, `Feed`, `Commit`, `Abort`, `Checkpoint`, and `Root`, which is still read but no longer written). |
 | `engine.feed` | `ChangeFeed` (segmented append-only `feed/*.feed` files, sparse generation index, retention, tailing subscriptions), `CommitEvent` and `FeedCodec`; see [change-feed.md](../storage/change-feed.md). |
 | `engine.maintenance` | `Checkpointer` (writes a published generation's trees to pages and publishes the catalog image), `ReferenceCounter` (counts references at each checkpoint, releases pages no reader can reach), `Compactor` (moving live pages out of victim segments, reclamation), `Recovery` (catalog discovery, replay of logged key changes, durable-prefix rule) and `ChangeLogCheck` (replays the log against the generations in memory; the tests use it). |
@@ -114,7 +114,7 @@ The engine has no dependencies outside `java.base`. All three modules build into
 
 ## Life of a read
 
-`HypergraphDatabase.read` opens a `Snapshot` (`engine/src/main/java/io/hstore/engine/txn/Snapshot.java`). Opening it pins the current generation (`TransactionManager.pinCurrent` increments a counter in `pins`) and wraps the branch's `RootVector`. The snapshot never changes, and no lock is held while it is read. `Snapshot.close` unpins.
+`HypergraphDatabase.read` opens a `Snapshot` (`engine/src/main/java/io/hstore/engine/txn/Snapshot.java`). Opening it pins the current generation (`TransactionManager.pinCurrent` increments the reader count of the current generation's `Retained` entry in `history`) and wraps the branch's `RootVector`. The snapshot never changes, and no lock is held while it is read. `Snapshot.close` unpins.
 
 ```mermaid
 sequenceDiagram
@@ -129,7 +129,7 @@ sequenceDiagram
     participant PS as PageStore
     C->>HD: read(branch, principal, work)
     HD->>TM: snapshot(branch)
-    TM->>TM: pins[current.id]++
+    TM->>TM: current.readers++
     TM-->>HD: Snapshot(generation, branch.roots)
     HD->>C: work.apply(Reader)
     C->>S: atom(id) / incident(atom) / edge(id)
@@ -149,7 +149,7 @@ sequenceDiagram
     end
     T-->>S: Optional value
     C-->>HD: result
-    HD->>TM: Snapshot.close(): pins[id]--
+    HD->>TM: Snapshot.close(): readers--
 ```
 
 Notes:
