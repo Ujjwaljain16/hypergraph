@@ -203,7 +203,8 @@ The corrections are process-local and visible in `STATS` as `planner feedback <k
 
 ### Catalog statistics
 
-`Statistics.refresh` (also triggered after 10,000 member/slot changes from the change feed) scans the catalog
+`Statistics.refresh` (also triggered from the change feed once the member/slot changes since the last refresh pass
+10,000 or a tenth of the store, whichever is larger) scans the catalog
 snapshot and builds cardinality and degree histograms (`Histogram`, 65 power-of-two buckets), counts of edges by
 exact cardinality (`Count_k`) and per-`(tenant, type)` counts. Above `SAMPLE_LIMIT` = 200,000 atoms, only atoms
 with `id % stride == 0` are sampled (`stride = ceil(total / 200000)`); the edge total and every per-cardinality count

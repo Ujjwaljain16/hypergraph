@@ -45,17 +45,20 @@ public final class Statistics implements AutoCloseable {
 
     private static final int SAMPLE_LIMIT = 200_000;
     private static final long REFRESH_AFTER_CHANGES = 10_000;
+    private static final long REFRESH_FRACTION = 10;
 
     private final StorageEngine engine;
     private final Map<String, Feedback> feedback = new ConcurrentHashMap<>();
     private final AtomicLong changesSinceRefresh = new AtomicLong();
+    private final AtomicLong refreshes = new AtomicLong();
+    private volatile long refreshAfter = REFRESH_AFTER_CHANGES;
     private final ChangeFeed.Subscription subscription;
     private volatile Catalog current;
 
     public Statistics(StorageEngine engine) {
         this.engine = engine;
         this.subscription = engine.feed().subscribe(engine.transactions().current().id(), event -> {
-            if (changesSinceRefresh.addAndGet(event.members().size() + event.slots().size()) > REFRESH_AFTER_CHANGES) {
+            if (changesSinceRefresh.addAndGet(event.members().size() + event.slots().size()) > refreshAfter) {
                 refresh();
             }
         }, (_, _) -> refresh());
@@ -87,12 +90,23 @@ public final class Statistics implements AutoCloseable {
             Map<Integer, Long> types = snapshot.scan(EngineSlots.TYPES).stream()
                     .collect(Collectors.toMap(entry -> (int) entry.key(), entry -> entry.value().size(), Long::sum, TreeMap::new));
             long edges = cardinalities.length * stride;
-            Catalog refreshed = new Catalog(snapshot.generation(), total, edges, sampled, Histogram.of(cardinalities),
+            Histogram cardinality = Histogram.of(cardinalities);
+            Catalog refreshed = new Catalog(snapshot.generation(), total, edges, sampled, cardinality,
                     Histogram.of(degrees), byCardinality, types);
             current = refreshed;
+            refreshAfter = Math.max(REFRESH_AFTER_CHANGES, (total + cardinality.sum() * stride) / REFRESH_FRACTION);
             changesSinceRefresh.set(0);
+            refreshes.incrementAndGet();
             return refreshed;
         }
+    }
+
+    long refreshes() {
+        return refreshes.get();
+    }
+
+    long acknowledged() {
+        return subscription.acknowledged();
     }
 
     public static long degree(View view, long atom) {
