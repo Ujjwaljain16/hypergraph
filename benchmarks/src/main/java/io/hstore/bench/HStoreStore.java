@@ -16,7 +16,6 @@ import io.hstore.engine.tree.TreeAlgebra;
 import io.hstore.engine.txn.Durability;
 
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -120,10 +119,10 @@ final class HStoreStore implements Store {
         }
     }
 
-    private List<Long> members(int[] indexes) {
-        List<Long> members = new ArrayList<>(indexes.length);
-        for (int index : indexes) {
-            members.add(nodes[index]);
+    private long[] members(int[] indexes) {
+        long[] members = new long[indexes.length];
+        for (int i = 0; i < indexes.length; i++) {
+            members[i] = nodes[indexes[i]];
         }
         return members;
     }
@@ -191,11 +190,7 @@ final class HStoreStore implements Store {
     public void largeEdge(int count) {
         large = database.write(writer -> {
             long edge = writer.edge(EDGE);
-            List<Long> members = new ArrayList<>(count);
-            for (int i = 0; i < count; i++) {
-                members.add(nodes[i]);
-            }
-            writer.load(edge, members, MemberSpec.PLAIN);
+            writer.load(edge, Arrays.copyOf(nodes, count), MemberSpec.PLAIN);
             return edge;
         });
     }
