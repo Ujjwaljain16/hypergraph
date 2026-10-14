@@ -4,9 +4,11 @@
 package io.hstore.engine.page;
 
 import java.io.IOException;
+import java.lang.foreign.MemorySegment;
 import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
+import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.locks.ReentrantLock;
@@ -26,6 +28,16 @@ public final class FileHandle implements AutoCloseable {
         void run(FileChannel channel) throws IOException;
     }
 
+    @FunctionalInterface
+    interface Channels {
+        FileChannel open(Path path, OpenOption... options) throws IOException;
+
+        default void forced(Path path) {
+        }
+    }
+
+    static volatile Channels channels = FileChannel::open;
+
     private final Path path;
     private final ReentrantLock reopening = new ReentrantLock();
     private volatile FileChannel channel;
@@ -37,7 +49,18 @@ public final class FileHandle implements AutoCloseable {
     }
 
     public static FileHandle open(Path path) throws IOException {
-        return new FileHandle(path, FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE));
+        return new FileHandle(path, channel(path, StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE));
+    }
+
+    public static FileChannel channel(Path path, OpenOption... options) throws IOException {
+        return channels.open(path, options);
+    }
+
+    public static void syncDirectory(Path directory) {
+        try (FileChannel listing = channel(directory, StandardOpenOption.READ)) {
+            listing.force(true);
+        } catch (IOException _) {
+        }
     }
 
     public static <T> T uninterrupted(Supplier<T> work) {
@@ -90,11 +113,18 @@ public final class FileHandle implements AutoCloseable {
         return call(FileChannel::size);
     }
 
+    void force(MemorySegment... mappings) {
+        for (MemorySegment mapping : mappings) {
+            mapping.force();
+        }
+        channels.forced(path);
+    }
+
     private void reopen(FileChannel failed) throws IOException {
         reopening.lock();
         try {
             if (!closed && channel == failed) {
-                channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+                channel = channel(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
             }
         } finally {
             reopening.unlock();

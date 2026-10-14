@@ -39,7 +39,12 @@ final class SegmentFile implements AutoCloseable {
 
     static SegmentFile open(int id, Path path) {
         try {
-            return new SegmentFile(id, path, FileHandle.open(path));
+            boolean created = !Files.exists(path);
+            SegmentFile segment = new SegmentFile(id, path, FileHandle.open(path));
+            if (created) {
+                FileHandle.syncDirectory(path.getParent());
+            }
+            return segment;
         } catch (IOException e) {
             throw new UncheckedIOException("cannot open segment " + path, e);
         }

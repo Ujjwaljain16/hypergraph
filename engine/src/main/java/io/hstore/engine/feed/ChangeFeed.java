@@ -122,6 +122,9 @@ public final class ChangeFeed implements AutoCloseable {
         long position = segments.firstKey();
         for (Iterator<Frame> frames = new FrameReader(position, last.start + last.file.size()); frames.hasNext(); ) {
             Frame frame = frames.next();
+            if (frame.generation() <= lastGeneration) {
+                break;
+            }
             remember(frame.generation(), position);
             position = frame.next();
         }
@@ -210,7 +213,7 @@ public final class ChangeFeed implements AutoCloseable {
         Path path = directory.resolve("%016x.feed".formatted(end));
         Segment segment = new Segment(end, path, FileHandle.open(path));
         segments.put(end, segment);
-        try (FileChannel listing = FileChannel.open(directory, StandardOpenOption.READ)) {
+        try (FileChannel listing = FileHandle.channel(directory, StandardOpenOption.READ)) {
             listing.force(true);
         } catch (IOException unsupported) {
             LOG.log(System.Logger.Level.DEBUG, "directory sync is not supported for " + directory, unsupported);
@@ -400,12 +403,16 @@ public final class ChangeFeed implements AutoCloseable {
                     return null;
                 }
                 byte[] payload = body.array();
-                return Checksums.crc32c(payload) == crc
+                return Checksums.crc32c(payload) == crc && carries(payload, generation)
                         ? new Frame(position, position + FRAME_HEADER + length, generation, payload)
                         : null;
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
+        }
+
+        private static boolean carries(byte[] payload, long generation) {
+            return payload.length > 0 && ByteCursor.wrap(payload).getVarLong() == generation;
         }
 
         private boolean readFully(FileHandle file, ByteBuffer buffer, long at) throws IOException {

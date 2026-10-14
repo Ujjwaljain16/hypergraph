@@ -5,6 +5,7 @@ package io.hstore.engine.catalog;
 
 import io.hstore.engine.page.ByteCursor;
 import io.hstore.engine.page.Checksums;
+import io.hstore.engine.page.FileHandle;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -114,7 +115,7 @@ public final class CatalogStore {
     private void writeDurably(Path target, byte[] bytes) {
         Path temporary = target.resolveSibling(target.getFileName() + ".tmp");
         try {
-            try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+            try (FileChannel channel = FileHandle.channel(temporary, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
                     StandardOpenOption.TRUNCATE_EXISTING)) {
                 channel.write(ByteBuffer.wrap(bytes));
                 channel.force(true);
@@ -124,16 +125,9 @@ public final class CatalogStore {
             } catch (AtomicMoveNotSupportedException e) {
                 Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
             }
-            syncDirectory(target.getParent());
+            FileHandle.syncDirectory(target.getParent());
         } catch (IOException e) {
             throw new UncheckedIOException("cannot publish catalog file " + target, e);
-        }
-    }
-
-    private static void syncDirectory(Path directory) {
-        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
-            channel.force(true);
-        } catch (IOException _) {
         }
     }
 

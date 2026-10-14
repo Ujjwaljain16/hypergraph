@@ -194,7 +194,12 @@ checkpoint writes have no WAL record; the checkpoint forces the directory before
 refers to them. Recovery
 writes each logged address back into the directory before it checks or replays the page, so an entry that a crash
 lost comes back from the log. The header's next index is updated on every allocation, and recovery raises it past
-every number it restores, so a restored number is never handed out a second time.
+every number it restores, so a restored number is never handed out a second time. Number 0 is never used, so a
+next index of 0 (a directory whose header was forced when the file was created, before the first checkpoint forced
+it again) is read as 1.
+
+`pages.dir` and `pages.ref` force the `data/segments` directory when they are created, and so does every new segment
+file, so that a power loss can't drop the file itself after its contents were forced.
 
 ### Reference counts
 
@@ -274,7 +279,7 @@ sequenceDiagram
 
 * `allocate` rejects `length > pageSize`.
 * Allocation is serialized by a `ReentrantLock`, and only the counter and directory updates run under it.
-* Rolling a segment marks the previous one `SEALED`, creates the next id, and resets `nextUnit` to 0.
+* Rolling a segment marks the previous one `SEALED`, creates the next id, forces the `data/segments` directory so the new file's entry is durable before any page in it is, and resets `nextUnit` to 0.
 * `PageStore.write(pageId, image)` looks the number up in the directory and performs a positional `FileChannel.write` at `offset × 64`, then marks the file dirty. It refuses an image longer than the units allocated for it. A checkpoint writes each image as soon as it has allocated it. For the pages a commit writes, the write happens later, inside `TransactionManager.append`, after the WAL records have been appended (see [wal-and-recovery.md](../transactions/wal-and-recovery.md)).
 * `PageStore.sync()` calls `FileChannel.force(false)` on every dirty segment. The group committer calls it once per batch in `PAGE_REFERENCES` WAL mode, before the WAL sync, if a commit in the batch wrote pages. `PageStore.checkpoint()` does the same and then forces the page directory; only `Checkpointer` calls it.
 
