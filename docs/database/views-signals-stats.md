@@ -151,8 +151,17 @@ record Catalog(long generation, long atoms, long edges, boolean sampled, Histogr
 | `edges` | `#sampled edges × stride` |
 | `typeCounts` | posting count per `typeKey(tenant, type)` from the type index (exact) |
 
-Refresh happens on first use, on `STATS`, and from a change-feed subscriber whenever more than
-`REFRESH_AFTER_CHANGES` = 10,000 member and slot changes accumulated.
+Refresh happens on first use, on `STATS`, and from a change-feed subscriber once the member and slot changes since
+the last refresh exceed `max(REFRESH_AFTER_CHANGES, size / REFRESH_FRACTION)`, with `REFRESH_AFTER_CHANGES` = 10,000
+and `REFRESH_FRACTION` = 10. `size` is what the last refresh counted: `atoms` plus the memberships of all edges
+(`cardinality.sum() × stride`). These are the units the change counter uses: in the engine, creating an edge with
+`k` members is one catalog change plus `k` member changes.
+
+A new or small store refreshes after its first 10,000 changes. Once the store holds more than about 100,000 atoms and
+memberships, the subscriber waits for roughly a tenth of it to change. A bulk load of `N` changes then triggers
+`O(log N)` full scans instead of `N / 10,000`, and the total scan work grows linearly with the load instead of with
+its square. The cost is that statistics on a large store can lag by up to a tenth of its size. `STATS` always
+refreshes first.
 
 ### Bounded-error sampling
 
