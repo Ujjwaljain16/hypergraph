@@ -44,6 +44,7 @@ import java.util.OptionalLong;
 import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
@@ -77,6 +78,9 @@ public final class StorageEngine implements AutoCloseable {
     private final List<Runnable> checkpointListeners = new CopyOnWriteArrayList<>();
     private long writtenAtCheckpoint;
     private volatile OptionalLong checkpointAt;
+    private final AtomicBoolean wakePending = new AtomicBoolean();
+    private volatile long wakeAtWal = Long.MAX_VALUE;
+    private volatile long wakeAtPages = Long.MAX_VALUE;
     private volatile boolean closed;
 
     private StorageEngine(Path directory, EngineOptions options, FileChannel lockChannel, FileLock lock) {
@@ -111,8 +115,10 @@ public final class StorageEngine implements AutoCloseable {
         references.start();
         LOG.log(System.Logger.Level.INFO, "database at {0} is ready: generation {1}, {2} data segments, page size {3}, {4} durability, {5} wal",
                 directory, transactions.current().id(), pages.segments().size(), options.pageSize(), options.durability(), options.walMode());
+        armWake();
         this.maintainer = Thread.ofVirtual().name("hstore-maintenance").start(this::maintain);
         transactions.whenFull(() -> LockSupport.unpark(maintainer));
+        transactions.afterCommit(this::wakeIfDue);
     }
 
     public static StorageEngine open(Path directory, EngineOptions options) {
@@ -406,6 +412,7 @@ public final class StorageEngine implements AutoCloseable {
                     if (!reclaimed.isEmpty()) {
                         LOG.log(System.Logger.Level.INFO, "reclaimed retired segments {0}", reclaimed);
                     }
+                    armWake();
                 } finally {
                     maintenance.unlock();
                 }
@@ -415,6 +422,23 @@ public final class StorageEngine implements AutoCloseable {
                 }
             }
         }
+    }
+
+    private void armWake() {
+        long threshold = checkpointThreshold().bytes();
+        wakeAtWal = saturatedSum(wal.bytesAppended(), Math.max(0, threshold - checkpointer.walSinceCheckpoint()));
+        wakeAtPages = saturatedSum(writtenAtCheckpoint, threshold);
+        wakePending.set(false);
+    }
+
+    private void wakeIfDue() {
+        if ((wal.bytesAppended() > wakeAtWal || pages.bytesWritten() > wakeAtPages) && wakePending.compareAndSet(false, true)) {
+            LockSupport.unpark(maintainer);
+        }
+    }
+
+    private static long saturatedSum(long base, long increment) {
+        return increment > Long.MAX_VALUE - base ? Long.MAX_VALUE : base + increment;
     }
 
     private void requireOpen() {

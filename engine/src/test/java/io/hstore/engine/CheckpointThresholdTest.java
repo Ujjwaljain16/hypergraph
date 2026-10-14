@@ -149,4 +149,28 @@ class CheckpointThresholdTest {
             assertTrue(checkpoints.get() > 0, "no background checkpoint after " + engine.stats().walBytes() + " bytes of log");
         }
     }
+
+    @Test
+    void aCommitThatPassesTheThresholdWakesTheMaintenanceThread() throws InterruptedException {
+        EngineOptions options = EngineTest.small().withWriteBufferBytes(1L << 30).withMaintenanceInterval(Duration.ofHours(1));
+        AtomicInteger checkpoints = new AtomicInteger();
+        try (StorageEngine engine = StorageEngine.open(directory, options)) {
+            engine.onCheckpoint(checkpoints::incrementAndGet);
+            String padding = "x".repeat(200);
+            for (int batch = 0; engine.stats().walBytes() <= CheckpointThreshold.FLOOR; batch++) {
+                int current = batch;
+                engine.write(txn -> {
+                    for (int i = 0; i < 200; i++) {
+                        txn.createNode(EngineTest.NODE, "node-" + current + "-" + i + padding);
+                    }
+                    return null;
+                });
+            }
+            long deadline = System.currentTimeMillis() + 10_000;
+            while (checkpoints.get() == 0 && System.currentTimeMillis() < deadline) {
+                Thread.sleep(10);
+            }
+            assertEquals(1, checkpoints.get(), "background checkpoints after " + engine.stats().walBytes() + " bytes of log");
+        }
+    }
 }

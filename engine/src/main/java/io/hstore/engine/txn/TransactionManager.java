@@ -89,6 +89,8 @@ public final class TransactionManager {
     private final Condition room = roomLock.newCondition();
     private volatile Runnable full = () -> {
     };
+    private volatile Runnable committed = () -> {
+    };
     private volatile boolean stopped;
     private final AtomicLong atoms;
     private final AtomicLong txns;
@@ -251,6 +253,7 @@ public final class TransactionManager {
         }
         Generation published = committer.await(appended.pending());
         commits.increment();
+        committed.run();
         if (!fast) {
             rebases.increment();
         }
@@ -479,6 +482,10 @@ public final class TransactionManager {
 
     public void whenFull(Runnable action) {
         full = action;
+    }
+
+    public void afterCommit(Runnable action) {
+        committed = action;
     }
 
     public long recountUnwritten() {
