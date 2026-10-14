@@ -38,6 +38,7 @@ import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ThreadLocalRandom;
@@ -317,6 +318,11 @@ public final class StorageEngine implements AutoCloseable {
         return pages.liveBytes();
     }
 
+    public CheckpointThreshold checkpointThreshold() {
+        return CheckpointThreshold.resolve(OptionalLong.empty(), options.checkpointWalBytes(),
+                pages.liveBytes().values().stream().mapToLong(Long::longValue).sum());
+    }
+
     public ReferenceCounter.Verification verifyReferences() {
         requireOpen();
         maintenance.lock();
@@ -351,9 +357,10 @@ public final class StorageEngine implements AutoCloseable {
                     continue;
                 }
                 try {
+                    long threshold = checkpointThreshold().bytes();
                     if (transactions.recountUnwritten() > options.writeBufferBytes() / 2
-                            || checkpointer.walSinceCheckpoint() > options.checkpointWalBytes()
-                            || pages.bytesWritten() - writtenAtCheckpoint > options.checkpointWalBytes()
+                            || checkpointer.walSinceCheckpoint() > threshold
+                            || pages.bytesWritten() - writtenAtCheckpoint > threshold
                             || references.pending() > CHANGED_COUNTS_LIMIT) {
                         timedCheckpoint();
                     }

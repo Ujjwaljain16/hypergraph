@@ -30,6 +30,8 @@ public record EngineOptions(
         List<Derivation> derivations,
         CrashPoint.Injector faults) {
 
+    public static final long AUTOMATIC_CHECKPOINTS = 0;
+
     public EngineOptions {
         if (Integer.bitCount(pageSize) != 1 || pageSize < 1024 || pageSize > 1 << 20) {
             throw new IllegalArgumentException("page size must be a power of two between 1 KiB and 1 MiB: " + pageSize);
@@ -42,6 +44,9 @@ public record EngineOptions(
         }
         if (nodeCacheBytes < 1) {
             throw new IllegalArgumentException("node cache must be at least one byte: " + nodeCacheBytes);
+        }
+        if (checkpointWalBytes < 0) {
+            throw new IllegalArgumentException("the checkpoint threshold cannot be negative: " + checkpointWalBytes);
         }
         if (writeBufferBytes < 1) {
             throw new IllegalArgumentException("the write buffer must be at least one byte: " + writeBufferBytes);
@@ -58,7 +63,7 @@ public record EngineOptions(
 
     public static EngineOptions defaults() {
         return new EngineOptions(16 * 1024, 16 * 1024, 256, 64L << 20, 256L << 20, Durability.SYNC, WalMode.PAGE_REFERENCES, 64,
-                256L << 20, 64L << 20, 0.5, 100_000, Duration.ofMillis(500), List.of(), List.of(), CrashPoint.Injector.NONE);
+                AUTOMATIC_CHECKPOINTS, 64L << 20, 0.5, 100_000, Duration.ofMillis(500), List.of(), List.of(), CrashPoint.Injector.NONE);
     }
 
     public EngineOptions withPageSize(int bytes) {
@@ -99,6 +104,10 @@ public record EngineOptions(
     public EngineOptions withCheckpointWalBytes(long bytes) {
         return new EngineOptions(pageSize, pagesPerSegment, maxOpenSegmentFiles, walSegmentBytes, nodeCacheBytes, durability, walMode, historyLimit,
                 bytes, writeBufferBytes, compactionLiveRatio, feedRetention, maintenanceInterval, slots, derivations, faults);
+    }
+
+    public EngineOptions withAutomaticCheckpoints() {
+        return withCheckpointWalBytes(AUTOMATIC_CHECKPOINTS);
     }
 
     public EngineOptions withWriteBufferBytes(long bytes) {
