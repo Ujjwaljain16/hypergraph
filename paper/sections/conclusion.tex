@@ -1,0 +1,12 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+HStore stores a hypergraph as trees of a single kind. Because every tree is a counted, summarized copy-on-write B+tree, the same code answers cardinality, rank, overlap and difference questions for a hyperedge's members, an atom's incidence set and the catalog, and the same checkpoint, recovery and compaction machinery serves all of them. Logging keys instead of pages removes most of the write cost that copy-on-write usually carries, and addressing pages through a directory lets compaction work without touching the trees. Against HyperGraphDB the result is faster reads and writes, fewer bytes written and less space on disk, at the price of more heap.
+
+\paragraph{Limitations.} A database is opened by one process, and there is no replication. Commits are validated and appended to the log under one lock, so commit throughput is bounded by that short critical section even when writers change different trees. Retained history lives in memory, so after a restart time travel reaches back only to the last checkpoint and the commits replayed after it. Unwritten nodes and decoded nodes are both Java heap, and \cref{sec:eval-resources} shows that HStore keeps more of it than HyperGraphDB. At scale~4 the slowest single commit in a run is slower on HStore than on HyperGraphDB, and we have not yet found what causes these stalls. Decoding leaf records on demand roughly halved the rate of incidence lookups from eight threads at scale~4, a regression we have not yet traced either. For small databases most of the space left after deletes and compaction is the active log segment and the change feed rather than data pages, and their retention is not yet tuned for small stores.
+
+\paragraph{Future work.} We plan to compare HStore with a graph database that stores reified hyperedges, to run the evaluation with data larger than main memory, and to measure many concurrent writers on overlapping hyperedges, where member-level conflict detection should matter most.
+
+\begin{acks}
+We thank Ujjwal Jain, who found that the first checkpoint after a recovery could record a log position that came before records recovery had discarded, so that a second crash would read them again, and contributed the fix together with the guard against reusing transaction ids described in \cref{sec:recovery}.
+\end{acks}

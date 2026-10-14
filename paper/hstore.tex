@@ -1,0 +1,45 @@
+\documentclass[sigconf,nonacm]{acmart}
+
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{xspace}
+\usepackage[capitalise,noabbrev]{cleveref}
+
+\settopmatter{printacmref=false,printccs=false,printfolios=true}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\pagestyle{plain}
+
+\setlength{\emergencystretch}{2.5em}
+\newcommand{\hstore}{HStore\xspace}
+\newcommand{\hgdb}{HyperGraphDB\xspace}
+\newcommand{\wl}[1]{\textsf{#1}}
+\newcommand{\code}[1]{\texttt{#1}}
+\input{generated/numbers}
+\input{generated/ablation}
+
+\begin{document}
+
+\title{HStore: A Copy-on-Write Storage Engine for Hypergraphs}
+
+\author{Metacog Labs}
+\affiliation{\institution{Metacog Labs}\country{India}}
+
+\input{sections/abstract}
+
+\maketitle
+
+\input{sections/introduction}
+\input{sections/model}
+\input{sections/overview}
+\input{sections/layout}
+\input{sections/transactions}
+\input{sections/space}
+\input{sections/implementation}
+\input{sections/evaluation}
+\input{sections/related}
+\input{sections/conclusion}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+
+\end{document}
