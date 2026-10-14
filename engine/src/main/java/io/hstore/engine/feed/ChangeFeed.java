@@ -210,7 +210,7 @@ public final class ChangeFeed implements AutoCloseable {
         Path path = directory.resolve("%016x.feed".formatted(end));
         Segment segment = new Segment(end, path, FileHandle.open(path));
         segments.put(end, segment);
-        try (FileChannel listing = FileChannel.open(directory, StandardOpenOption.READ)) {
+        try (FileChannel listing = FileHandle.channel(directory, StandardOpenOption.READ)) {
             listing.force(true);
         } catch (IOException unsupported) {
             LOG.log(System.Logger.Level.DEBUG, "directory sync is not supported for " + directory, unsupported);

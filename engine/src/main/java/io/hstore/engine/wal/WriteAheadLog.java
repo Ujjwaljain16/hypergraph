@@ -158,7 +158,7 @@ public final class WriteAheadLog implements AutoCloseable {
     }
 
     private void syncDirectory() {
-        try (FileChannel listing = FileChannel.open(directory, StandardOpenOption.READ)) {
+        try (FileChannel listing = FileHandle.channel(directory, StandardOpenOption.READ)) {
             listing.force(true);
         } catch (IOException unsupported) {
             LOG.log(System.Logger.Level.DEBUG, "directory sync is not supported for " + directory, unsupported);

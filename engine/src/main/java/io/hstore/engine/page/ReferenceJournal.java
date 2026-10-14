@@ -32,7 +32,7 @@ final class ReferenceJournal {
 
     static void write(Path path, long lsn, ReferenceCounts counts, long[] cleared, int clearedCount) {
         boolean created = !Files.exists(path);
-        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
+        try (FileChannel channel = FileHandle.channel(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE,
                 StandardOpenOption.TRUNCATE_EXISTING)) {
             Writer out = new Writer(channel);
             out.putInt(MAGIC).putInt(FORMAT).putLong(lsn).putInt(counts.changed()).putInt(clearedCount);
@@ -46,7 +46,7 @@ final class ReferenceJournal {
             throw HStoreException.io("cannot write reference journal " + path, e);
         }
         if (created) {
-            syncDirectory(path.getParent());
+            FileHandle.syncDirectory(path.getParent());
         }
     }
 
@@ -86,18 +86,11 @@ final class ReferenceJournal {
         if (!Files.exists(path)) {
             return;
         }
-        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
+        try (FileChannel channel = FileHandle.channel(path, StandardOpenOption.WRITE)) {
             channel.truncate(0);
             channel.force(true);
         } catch (IOException e) {
             throw HStoreException.io("cannot clear reference journal " + path, e);
-        }
-    }
-
-    private static void syncDirectory(Path directory) {
-        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
-            channel.force(true);
-        } catch (IOException _) {
         }
     }
 
