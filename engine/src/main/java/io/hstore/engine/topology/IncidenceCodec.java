@@ -79,8 +79,11 @@ public final class IncidenceCodec implements ValueCodec<Incidence> {
     public void encode(ByteCursor out, long[] keys, List<Incidence> values) {
         int flags = 0;
         for (Column column : COLUMNS) {
-            if (values.stream().anyMatch(column.present)) {
-                flags |= 1 << column.ordinal();
+            for (int i = 0; i < values.size(); i++) {
+                if (column.present.test(values.get(i))) {
+                    flags |= 1 << column.ordinal();
+                    break;
+                }
             }
         }
         out.putByte(flags);
