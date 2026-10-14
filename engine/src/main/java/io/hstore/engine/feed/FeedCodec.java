@@ -53,6 +53,10 @@ public final class FeedCodec {
         return out.toByteArray();
     }
 
+    public long generationOf(byte[] bytes) {
+        return ByteCursor.wrap(bytes).getVarLong();
+    }
+
     public CommitEvent decode(byte[] bytes) {
         ByteCursor in = ByteCursor.wrap(bytes);
         long generation = in.getVarLong();

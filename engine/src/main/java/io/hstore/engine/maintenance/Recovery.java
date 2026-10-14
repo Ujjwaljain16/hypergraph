@@ -10,7 +10,6 @@ import io.hstore.engine.catalog.Generation;
 import io.hstore.engine.catalog.RootVector;
 import io.hstore.engine.catalog.SlotRegistry;
 import io.hstore.engine.feed.ChangeFeed;
-import io.hstore.engine.feed.FeedCodec;
 import io.hstore.engine.page.Checksums;
 import io.hstore.engine.page.PageHeader;
 import io.hstore.engine.page.PageStore;
@@ -46,8 +45,8 @@ public final class Recovery {
         return catalog.loadLatest().orElseGet(CatalogImage::initial);
     }
 
-    public static Outcome recover(CatalogImage checkpoint, WriteAheadLog wal, PageStore pages, ChangeFeed feed, FeedCodec codec,
-                                  SlotRegistry slots, NodeSource source) {
+    public static Outcome recover(CatalogImage checkpoint, WriteAheadLog wal, PageStore pages, ChangeFeed feed, SlotRegistry slots,
+                                  NodeSource source) {
         Map<Long, List<WalRecord>> pending = new HashMap<>();
         List<WalRecord.Commit> commits = new ArrayList<>();
         long[] highestTxn = {0};
@@ -81,7 +80,7 @@ public final class Recovery {
                 discarded++;
                 continue;
             }
-            generation = redo(generation, commit, body, pages, feed, codec, slots, source);
+            generation = redo(generation, commit, body, pages, feed, slots, source);
             history.add(generation);
             replayed.add(generation);
         }
@@ -126,7 +125,7 @@ public final class Recovery {
     }
 
     private static Generation redo(Generation base, WalRecord.Commit commit, List<WalRecord> records,
-                                   PageStore pages, ChangeFeed feed, FeedCodec codec, SlotRegistry slots, NodeSource source) {
+                                   PageStore pages, ChangeFeed feed, SlotRegistry slots, NodeSource source) {
         Map<Integer, Branch> branches = new TreeMap<>(base.branches());
         List<WalRecord> metaFirst = Stream.concat(records.stream().filter(WalRecord.BranchMeta.class::isInstance),
                 records.stream().filter(record -> !(record instanceof WalRecord.BranchMeta))).toList();
@@ -148,7 +147,7 @@ public final class Recovery {
                     Branch target = branches.get(branch);
                     branches.put(branch, target.withRoots(target.roots().with(slot, root)));
                 }
-                case WalRecord.Feed(long _, byte[] payload) -> feed.append(codec.decode(payload));
+                case WalRecord.Feed(long _, byte[] payload) -> feed.appendEncoded(payload);
                 case WalRecord.Begin _, WalRecord.PageRef _, WalRecord.Commit _, WalRecord.Abort _, WalRecord.Checkpoint _ -> {
                 }
             }
