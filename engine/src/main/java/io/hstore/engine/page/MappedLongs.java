@@ -48,6 +48,7 @@ final class MappedLongs implements AutoCloseable {
                 header.set(INT, 0, magic);
                 header.set(INT, 4, format);
                 file.force(header);
+                FileHandle.syncDirectory(path.getParent());
             } else if (header.get(INT, 0) != magic || header.get(INT, 4) != format) {
                 file.close();
                 throw HStoreException.invalid(what + " " + path + " has an unknown format");
