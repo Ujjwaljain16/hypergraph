@@ -4,6 +4,9 @@
 package io.hstore.server;
 
 import io.hstore.db.query.Ast.Statement;
+import io.hstore.db.security.Role;
+
+import java.util.Optional;
 
 final class StatementLogger {
 
@@ -39,7 +42,7 @@ final class StatementLogger {
         };
         if (slow || logged) {
             LOG.log(System.Logger.Level.INFO, "{0} user {1} duration: {2} ms  statement: {3} {4}",
-                    origin, user, millis, statement.getClass().getSimpleName(), abbreviate(script));
+                    origin, user, millis, statement.getClass().getSimpleName(), describe(statement, script));
         }
     }
 
@@ -55,6 +58,16 @@ final class StatementLogger {
                  Statement.ShowTenants _, Statement.ShowUsers _, Statement.WhoAmI _, Statement.DiffBranches _,
                  Statement.DiffGenerations _, Statement.ResolveSignals _, Statement.Trace _ -> Category.READ;
             default -> Category.MOD;
+        };
+    }
+
+    static String describe(Statement statement, String script) {
+        return switch (statement) {
+            case Statement.CreateUser(String name, String _, Optional<String> tenant, Role role) ->
+                    "CREATE USER " + name + " PASSWORD '***'" + tenant.map(found -> " TENANT " + found).orElse("") + " ROLE " + role;
+            case Statement.AlterUser(String name, String _) -> "ALTER USER " + name + " PASSWORD '***'";
+            case Statement.Authenticate(String user, String _) -> "AUTHENTICATE " + user + " PASSWORD '***'";
+            default -> abbreviate(script);
         };
     }
 

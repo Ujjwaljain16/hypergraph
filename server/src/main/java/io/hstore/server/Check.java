@@ -4,23 +4,29 @@
 package io.hstore.server;
 
 import io.hstore.engine.StorageEngine;
+import io.hstore.engine.catalog.AtomRecord;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.catalog.Generation;
 import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.maintenance.ReferenceCounter;
 import io.hstore.engine.tree.TreeVerifier;
 import io.hstore.engine.txn.Snapshot;
+import io.hstore.engine.txn.View;
 
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 final class Check {
+
+    private static final int MAX_LISTED = 50;
 
     private Check() {
     }
 
     static String run(StorageEngine engine) {
         try (Snapshot pinned = engine.snapshot()) {
-            return run(engine, pinned.catalog());
+            return run(engine, pinned.catalog()) + "\n" + isolation(pinned);
         }
     }
 
@@ -48,5 +54,22 @@ final class Check {
         report.append("reference counts match the trees: ").append(references.livePages()).append(" pages in use, ")
                 .append(references.waitingPages()).append(" waiting for older readers");
         return report.toString();
+    }
+
+    private static String isolation(View view) {
+        List<String> crossings = view.atoms()
+                .flatMap(entry -> entry.value() instanceof AtomRecord.EdgeRecord edge
+                        ? view.edge(entry.key(), edge).memberIds()
+                        .filter(member -> view.atom(member).map(record -> record.tenant() != edge.tenant()).orElse(false))
+                        .mapToObj(member -> "  REMOVE @" + member + " FROM @" + entry.key() + "   -- member of tenant "
+                                + view.atom(member).orElseThrow().tenant() + " in an edge of tenant " + edge.tenant())
+                        : Stream.empty())
+                .toList();
+        if (crossings.isEmpty()) {
+            return "tenant isolation: no hyperedge on main has a member from another tenant";
+        }
+        return "tenant isolation: " + crossings.size() + " memberships on main cross tenants; run as the edge's tenant:\n"
+                + String.join("\n", crossings.subList(0, Math.min(MAX_LISTED, crossings.size())))
+                + (crossings.size() > MAX_LISTED ? "\n  ... " + (crossings.size() - MAX_LISTED) + " more" : "");
     }
 }

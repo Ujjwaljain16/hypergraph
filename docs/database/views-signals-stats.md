@@ -46,18 +46,25 @@ range scan `[(id << 48), (id << 48) | (2^48 − 1)]` of `view-data`.
 |---|---|---|---|---|---|
 | `DEGREE` | `AS DEGREE` | atom id | `Count(degree)` | `degree(atom)` for every atom with degree > 0 | `+1` per `MemberChange.Added` of the member, `−1` per `Removed`; a cell reaching 0 is deleted |
 | `CARDINALITY` | `AS CARDINALITY` | edge id | `Count(cardinality)` | record cardinality of every edge | same deltas keyed by edge |
-| `ACTIVITY` | `AS ACTIVITY [BUCKET ms]` | `wallTime / bucket` | `Activity(added, removed)` | replay of all retained `main` events up to the creation generation | add the event's added/removed counts to its bucket |
+| `ACTIVITY` | `AS ACTIVITY [BUCKET ms]` | `wallTime / bucket` | `Activity(added, removed)` | replay of the retained `main` events up to the creation generation, counting only changes that touch the view's tenant | add the event's added/removed counts for the tenant to its bucket |
 | `OVERLAP_TOP_K` | `AS OVERLAP TOP k` | edge id | `Ranked` top-`k` `(edge, overlap)` | for every edge, overlaps with all edges sharing a member | recompute every changed edge and every edge incident to a changed member; delete cells of deleted edges |
 
-`OVERLAP_TOP_K` ranks by overlap descending, then edge id ascending, and omits zero overlaps. Only events of branch
+`OVERLAP_TOP_K` ranks by overlap descending, then edge id ascending, and omits zero overlaps. Only edges of the
+view's tenant are ranked, even if an old membership links a member to another tenant's edge. Only events of branch
 `main` are applied.
+
+Parameters are checked when the view is created: `OVERLAP TOP k` needs k between 1 and 1000, and `ACTIVITY BUCKET`
+needs a bucket between 1 ms and 366 days.
 
 ### Refresh
 
 | Mode | Behaviour |
 |---|---|
-| `ON_DEMAND` | `REFRESH VIEW v` replays events in `(lastGeneration, feed.lastGeneration]`, applies them and advances `lastGeneration`, in one write transaction |
-| `CONTINUOUS` | a change-feed subscriber (`MaterializedViews.onCommit`) refreshes every continuous view after each `main` commit that changed memberships |
+| `ON_DEMAND` | `REFRESH VIEW v` replays events in `(lastGeneration, feed.lastGeneration]`, applies them and advances `lastGeneration`, in one write transaction. If retention already dropped events the view still needs, the view's cells are cleared and it is built again from the current snapshot |
+| `CONTINUOUS` | a change-feed subscriber (`MaterializedViews.onCommit`) refreshes every continuous view after each `main` commit that changed memberships. Each view is refreshed in its own transaction, so one view that fails to refresh does not hold up the others |
+
+Only continuous views hold back change-feed retention. An on-demand view that nobody refreshes does not keep old
+feed segments around; it pays for that with a full rebuild on its next refresh.
 
 View maintenance commits are slot-only events (no member changes), so they do not re-trigger continuous refresh.
 A refresh is an ordinary write transaction: it conflicts with a concurrent refresh of the same cells and is retried
@@ -65,9 +72,11 @@ by `HypergraphDatabase.write`.
 
 ### Staleness
 
-`VIEW v KEY k` returns `Reading(cell, staleness)`, where staleness is the number of `main` change-feed events with
-membership changes in `(lastGeneration, reader.generation]` — how many topology-changing commits the cell has not
-absorbed yet. A continuous view is typically at staleness 0 or 1 (the subscriber runs asynchronously).
+`VIEW v KEY k` returns `Reading(cell, staleness)`, where staleness is the number of `main` change-feed events in
+`(lastGeneration, reader.generation]` with at least one membership change whose edge or member belongs to the view's
+tenant — how many of the tenant's topology-changing commits the cell has not absorbed yet. Commits by other tenants
+are not counted. The count is cached per view and extended from where the last read stopped, so repeated reads only
+look at new events. A continuous view is typically at staleness 0 or 1 (the subscriber runs asynchronously).
 
 ```sql
 CREATE VIEW provider_degree AS DEGREE CONTINUOUS;
@@ -81,14 +90,17 @@ VIEW claim_overlap KEY @103;                          -- staleness 0
 
 ### Scope and permissions
 
-Creating, refreshing and reading views requires ADMIN (`Executor.administrative`, `MaterializedViews.create/read/
-scan`). A view belongs to the tenant of the admin who created it:
+Creating, refreshing, dropping and reading views requires ADMIN (`Executor.administrative`,
+`MaterializedViews.create/refresh/drop/read/scan`). A view belongs to the tenant of the admin who created it:
 
 * The build only covers that tenant's atoms.
 * Feed deltas only touch that tenant's cells. An existing cell is always updated, which handles atoms deleted
   since the last refresh.
-* View names are unique per tenant, and `SHOW VIEWS`, `VIEW` and `REFRESH VIEW` only see the session's own
-  tenant.
+* View names are unique per tenant, and `SHOW VIEWS`, `VIEW`, `REFRESH VIEW` and `DROP VIEW` only see the
+  session's own tenant. Naming another tenant's view gives the same `unknown view` error as a name that does not
+  exist.
+* A tenant can have at most 32 views. Creating and refreshing a view runs under the tenant's transaction page
+  quota.
 * Continuous views are refreshed internally as `system` within the view's tenant, so tenant checks in the
   computation still apply ([security](security.md)).
 

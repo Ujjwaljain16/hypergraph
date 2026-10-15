@@ -16,6 +16,7 @@ import io.hstore.engine.txn.Transaction;
 import io.hstore.engine.txn.TxnOptions;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,9 +33,16 @@ public final class Session implements AutoCloseable {
     private int branch = Branch.MAIN;
     private OptionalLong pinnedGeneration = OptionalLong.empty();
     private Principal principal;
+    private boolean authenticated;
+    private Optional<Security.User> credentials = Optional.empty();
+    private boolean renewing;
+    private Optional<String> origin = Optional.empty();
+    private int failedAuthentications;
     private Format format = Format.TABLE;
 
     public enum Format { TABLE, JSON }
+
+    public static final int MAX_FAILED_AUTHENTICATIONS = 5;
 
     public Session(HypergraphDatabase database) {
         this(database, Principal.SYSTEM);
@@ -62,9 +70,47 @@ public final class Session implements AutoCloseable {
     }
 
     public boolean authenticate(String user, String password) {
-        Optional<Principal> authenticated = database.authenticate(user, password);
-        authenticated.ifPresent(found -> principal = found);
-        return authenticated.isPresent();
+        if (transaction.isPresent()) {
+            throw HStoreException.invalid("cannot authenticate inside a transaction");
+        }
+        if (failedAuthentications >= MAX_FAILED_AUTHENTICATIONS) {
+            throw HStoreException.invalid("too many failed authentication attempts in this session");
+        }
+        Optional<Principal> found = database.authenticate(user, password, origin);
+        if (found.isEmpty()) {
+            failedAuthentications++;
+            return false;
+        }
+        principal = found.get();
+        authenticated = true;
+        credentials = database.read(reader -> Security.user(reader.view(), user));
+        renewing = false;
+        variables.clear();
+        branch = Branch.MAIN;
+        return true;
+    }
+
+    public boolean authenticated() {
+        return authenticated;
+    }
+
+    public void origin(String address) {
+        origin = Optional.of(address);
+    }
+
+    public boolean credentialsCurrent() {
+        if (!authenticated) {
+            return true;
+        }
+        Optional<Security.User> stored = database.read(reader -> Security.user(reader.view(), principal.user()));
+        boolean current = stored.isPresent() && credentials.isPresent()
+                && stored.get().tenant() == credentials.get().tenant() && stored.get().role() == credentials.get().role()
+                && (renewing || stored.get().hash().equals(credentials.get().hash()));
+        if (current && renewing && transaction.isEmpty()) {
+            credentials = stored;
+            renewing = false;
+        }
+        return current;
     }
 
     public HypergraphDatabase database() {
@@ -85,6 +131,18 @@ public final class Session implements AutoCloseable {
     }
 
     public QueryResult execute(Statement statement) {
+        if (!(statement instanceof Statement.Authenticate) && !credentialsCurrent()) {
+            close();
+            throw HStoreException.invalid("user " + principal.user() + " was dropped or its password changed; authenticate again");
+        }
+        QueryResult result = dispatch(statement);
+        if (statement instanceof Statement.AlterUser(String name, String _) && authenticated && name.equals(principal.user())) {
+            renewing = true;
+        }
+        return result;
+    }
+
+    private QueryResult dispatch(Statement statement) {
         return switch (statement) {
             case Statement.Begin(boolean serializable) -> begin(serializable);
             case Statement.Commit _ -> commit();
@@ -97,7 +155,11 @@ public final class Session implements AutoCloseable {
                 if (transaction.isPresent()) {
                     throw HStoreException.invalid("cannot switch tenants inside a transaction");
                 }
-                Security.Tenant tenant = database.read(reader -> Security.requireTenant(reader.view(), name));
+                Security.Tenant tenant = database.read(reader -> Security.tenant(reader.view(), name))
+                        .filter(found -> principal.global() || found.id() == principal.tenant())
+                        .orElseThrow(() -> principal.global()
+                                ? HStoreException.invalid("unknown tenant '" + name + "'")
+                                : HStoreException.invalid("user " + principal.user() + " may not switch tenants"));
                 principal = principal.inTenant(tenant.id());
                 yield QueryResult.message("using tenant " + tenant.name());
             }
@@ -112,7 +174,8 @@ public final class Session implements AutoCloseable {
                     QueryResult.text(database.read(reader -> Security.tenant(reader.view(), principal.tenant()).map(Security.Tenant::name).orElse("#" + principal.tenant()))),
                     QueryResult.text(principal.role().name()), QueryResult.number(branch))));
             case Statement.SetFormat(String name) -> {
-                format = Format.valueOf(name.toUpperCase());
+                format = Arrays.stream(Format.values()).filter(candidate -> candidate.name().equalsIgnoreCase(name)).findFirst()
+                        .orElseThrow(() -> HStoreException.invalid("unknown output format '" + name + "'; expected table or json"));
                 yield QueryResult.message("output format " + name);
             }
             default -> executor.run(statement);
@@ -147,6 +210,9 @@ public final class Session implements AutoCloseable {
         if (transaction.isPresent()) {
             throw HStoreException.invalid("cannot switch branches inside a transaction");
         }
+        if (name.isPresent() && !name.get().equalsIgnoreCase("main")) {
+            principal.requireGlobal();
+        }
         branch = name.map(this::branchId).orElse(Branch.MAIN);
         return QueryResult.message("using branch " + name.orElse("main"));
     }
@@ -163,7 +229,7 @@ public final class Session implements AutoCloseable {
         OptionalLong previous = pinnedGeneration;
         pinnedGeneration = OptionalLong.of(generation);
         try {
-            return execute(inner);
+            return dispatch(inner);
         } finally {
             pinnedGeneration = previous;
         }

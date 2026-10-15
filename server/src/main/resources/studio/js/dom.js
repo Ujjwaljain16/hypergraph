@@ -195,5 +195,11 @@ export const storage = {
       localStorage.setItem(`hstore.studio.${key}`, JSON.stringify(value));
     } catch {
     }
+  },
+  remove(key) {
+    try {
+      localStorage.removeItem(`hstore.studio.${key}`);
+    } catch {
+    }
   }
 };

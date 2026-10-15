@@ -9,7 +9,7 @@ stderr, a health check is built in, and `docker stop` shuts down cleanly.
 ```
 docker run -d --name hstore \
   -e HSTORE_PASSWORD=change-me \
-  -p 7432:7432 -p 7480:7480 \
+  -p 127.0.0.1:7432:7432 -p 127.0.0.1:7480:7480 \
   -v hstore-data:/var/lib/hstore/data \
   hstore
 
@@ -106,7 +106,7 @@ flowchart TD
     W -- yes --> F{"$HSTORE_DATA/FORMAT exists?"}
     F -- yes --> V["unset HSTORE_PASSWORD<br/>exec hstore serve $HSTORE_DATA &lt;flags&gt;"]
     F -- no --> P{password?}
-    P -- yes --> I1["hstore init --superuser $HSTORE_USER --password …"]
+    P -- yes --> I1["hstore init --superuser $HSTORE_USER (password from the environment)"]
     P -- "no, auth off" --> I2["hstore init"]
     P -- no --> E[exit 1 with an error]
     I1 --> D["run /docker-entrypoint-initdb.d/* in name order"]
@@ -125,7 +125,7 @@ Init scripts run once, in lexical order, after `init` and before the server star
 ```
 docker run -d -e HSTORE_PASSWORD=change-me \
   -v "$PWD/examples/clinical-claims.hql:/docker-entrypoint-initdb.d/01-clinical-claims.hql:ro" \
-  -p 7432:7432 -p 7480:7480 hstore
+  -p 127.0.0.1:7432:7432 -p 127.0.0.1:7480:7480 hstore
 ```
 
 ## Health check
@@ -178,8 +178,10 @@ commit is lost.
 
 ## Docker Compose
 
-The repository's [`docker-compose.yml`](../../docker-compose.yml) builds the image, publishes both ports,
-loads the clinical-claims example on first start and keeps data in a named volume:
+The repository's [`docker-compose.yml`](../../docker-compose.yml) builds the image, publishes both ports on
+localhost, loads the clinical-claims example on first start and keeps data in a named volume. It refuses to start
+until `HSTORE_PASSWORD` is set in the environment or an `.env` file, so no stack runs with a sample password.
+To reach it from other machines, change the port mappings and turn on `tls`:
 
 ```yaml
 services:
@@ -188,11 +190,11 @@ services:
     image: hstore:latest
     restart: unless-stopped
     ports:
-      - "7432:7432"
-      - "7480:7480"
+      - "127.0.0.1:7432:7432"
+      - "127.0.0.1:7480:7480"
     environment:
       HSTORE_USER: admin
-      HSTORE_PASSWORD: change-me
+      HSTORE_PASSWORD: ${HSTORE_PASSWORD:?set HSTORE_PASSWORD to the superuser password}
       HSTORE_LOG_STATEMENT: ddl
       HSTORE_LOG_MIN_DURATION_MS: "250"
     volumes:
@@ -205,6 +207,7 @@ volumes:
 ```
 
 ```
+export HSTORE_PASSWORD='<a strong password>'
 docker compose up -d
 docker compose exec hstore hstore connect 127.0.0.1:7432      # HSTORE_USER is set, no prompt
 docker compose down            # keeps the volume; add -v to delete the data

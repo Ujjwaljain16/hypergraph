@@ -11,7 +11,6 @@ import io.hstore.db.query.QueryResult;
 import io.hstore.db.query.Session;
 import io.hstore.db.schema.TypeDef;
 import io.hstore.db.security.Principal;
-import io.hstore.db.security.Role;
 import io.hstore.db.security.Security;
 import io.hstore.db.value.Json;
 import io.hstore.engine.CheckpointThreshold;
@@ -43,6 +42,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -50,6 +50,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 import java.util.stream.LongStream;
 import java.util.stream.Stream;
 import javax.net.ssl.SSLContext;
@@ -113,9 +114,8 @@ public final class Studio implements AutoCloseable {
     private static final String COOKIE = "hstore_studio";
     private static final String CSRF_HEADER = "X-HStore-Studio";
     private static final int MAX_BODY = 1 << 20;
+    private static final Pattern IP_LITERAL = Pattern.compile("\\d{1,3}(\\.\\d{1,3}){3}|\\[[0-9a-f:.]+]");
     private static final int MAX_RESULT_ATOMS = 500;
-    private static final int MAX_FAILED_LOGINS = 5;
-    private static final Duration FAILED_LOGIN_WINDOW = Duration.ofMinutes(15);
     private static final String SECURITY_POLICY = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
             + "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
@@ -125,7 +125,6 @@ public final class Studio implements AutoCloseable {
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final Sessions sessions;
     private final Assets assets;
-    private final LoginThrottle throttle = new LoginThrottle(MAX_FAILED_LOGINS, FAILED_LOGIN_WINDOW, System::nanoTime);
     private final long startedAt = System.currentTimeMillis();
 
     public Studio(HypergraphDatabase database, Options options) {
@@ -168,9 +167,9 @@ public final class Studio implements AutoCloseable {
                     failure.getMessage(), false));
         } catch (HStoreException failure) {
             response = Response.error(400, error(failure.code().name(), failure.getMessage(), failure.retryable()));
-        } catch (RuntimeException failure) {
+        } catch (RuntimeException | StackOverflowError failure) {
             LOG.log(System.Logger.Level.ERROR, "studio request " + exchange.getRequestURI().getPath() + " failed", failure);
-            response = Response.error(500, error("INTERNAL", String.valueOf(failure), false));
+            response = Response.error(500, error("INTERNAL", "the request failed; the server log has the details", false));
         }
         Headers headers = exchange.getResponseHeaders();
         headers.set("Content-Type", response.contentType());
@@ -226,6 +225,9 @@ public final class Studio implements AutoCloseable {
     }
 
     private Response api(Request request) {
+        if (!hostAllowed(request)) {
+            throw HttpFailure.forbidden("studio does not answer to this Host header; use an IP address or localhost, or turn on authentication");
+        }
         if (request.method().equals("POST") && !request.headers().containsKey(CSRF_HEADER)) {
             throw HttpFailure.forbidden("missing " + CSRF_HEADER + " header");
         }
@@ -242,9 +244,25 @@ public final class Studio implements AutoCloseable {
         };
     }
 
+    private boolean hostAllowed(Request request) {
+        String host = request.headers().getOrDefault("Host", List.of()).stream().findFirst().orElse("").toLowerCase(Locale.ROOT);
+        String name = host.startsWith("[") ? host.substring(0, host.indexOf(']') + 1) : host.replaceFirst(":\\d*$", "");
+        return name.equals("localhost") || name.endsWith(".localhost") || name.equals(options.address().getHostString().toLowerCase(Locale.ROOT))
+                || IP_LITERAL.matcher(name).matches() || options.authenticationRequired().getAsBoolean();
+    }
+
     private Sessions.Entry session(Request request) {
-        return request.cookie(COOKIE).flatMap(sessions::find)
+        Sessions.Entry entry = request.cookie(COOKIE).flatMap(sessions::find)
                 .orElseThrow(() -> HttpFailure.unauthorized("sign in to use the studio"));
+        if (!current(entry)) {
+            sessions.close(entry.token());
+            throw HttpFailure.unauthorized("sign in to use the studio");
+        }
+        return entry;
+    }
+
+    private boolean current(Sessions.Entry entry) {
+        return entry.session().authenticated() ? entry.exclusively(Session::credentialsCurrent) : !options.authenticationRequired().getAsBoolean();
     }
 
     private Json describe(Session session) {
@@ -263,7 +281,7 @@ public final class Studio implements AutoCloseable {
     }
 
     private Response info(Request request) {
-        Optional<Sessions.Entry> entry = request.cookie(COOKIE).flatMap(sessions::find);
+        Optional<Sessions.Entry> entry = request.cookie(COOKIE).flatMap(sessions::find).filter(this::current);
         return Response.json(JsonFields.object()
                 .put("product", "HStore Studio")
                 .put("version", options.version())
@@ -275,21 +293,24 @@ public final class Studio implements AutoCloseable {
     }
 
     private Response login(Request request) {
+        request.cookie(COOKIE).ifPresent(sessions::close);
         Json body = request.json();
         Optional<String> user = field(body, "user");
-        long wait = throttle.secondsUntilAllowed(request.address());
-        if (wait > 0) {
-            throw HttpFailure.tooManyRequests("too many failed sign-in attempts; try again in " + wait + " seconds");
-        }
         Session session = new Session(database);
+        session.origin(request.address());
         if (user.isPresent()) {
-            if (!session.authenticate(user.get(), field(body, "password").orElse(""))) {
+            boolean accepted;
+            try {
+                accepted = session.authenticate(user.get(), field(body, "password").orElse(""));
+            } catch (HStoreException.ResourceLimit throttled) {
                 session.close();
-                throttle.failed(request.address());
+                throw HttpFailure.tooManyRequests(throttled.getMessage());
+            }
+            if (!accepted) {
+                session.close();
                 LOG.log(System.Logger.Level.WARNING, "studio password authentication failed for user \"{0}\" from {1}", user.get(), request.peer());
                 throw HttpFailure.unauthorized("authentication failed");
             }
-            throttle.succeeded(request.address());
         } else if (options.authenticationRequired().getAsBoolean()) {
             session.close();
             throw HttpFailure.unauthorized("user and password are required");
@@ -337,6 +358,9 @@ public final class Studio implements AutoCloseable {
                             .put("atoms", JsonFields.array(result.atoms().limit(MAX_RESULT_ATOMS).mapToObj(JsonFields::number)))
                             .build());
                 } catch (HStoreException failure) {
+                    if (statement instanceof Statement.Authenticate(String user, String _)) {
+                        LOG.log(System.Logger.Level.WARNING, "studio password authentication failed for user \"{0}\" from {1}", user, request.peer());
+                    }
                     frames.add(JsonFields.object().put("statement", kind).put("text", sourced.text())
                             .put("error", error(failure.code().name(), failure.getMessage(), failure.retryable())).build());
                     break;
@@ -384,7 +408,8 @@ public final class Studio implements AutoCloseable {
                 .put("types", JsonFields.array(reader.schema().types(reader.view()).stream()
                         .sorted(Comparator.comparing(TypeDef::kind).thenComparing(TypeDef::name))
                         .map(type -> type(reader, type))))
-                .put("branches", JsonFields.array(database.engine().branches().stream().map(Studio::branch)))
+                .put("branches", JsonFields.array(database.engine().branches().stream()
+                        .filter(_ -> session.principal().global()).map(Studio::branch)))
                 .build()));
     }
 
@@ -419,24 +444,22 @@ public final class Studio implements AutoCloseable {
     }
 
     private Response history(Request request) {
-        session(request);
+        boolean global = session(request).session().principal().global();
         TransactionManager transactions = database.engine().transactions();
         Stream<Generation> generations = Stream.concat(transactions.history().stream(), Stream.of(transactions.current()))
                 .distinct().sorted(Comparator.comparingLong(Generation::id));
         return Response.json(JsonFields.object()
                 .put("current", transactions.current().id())
-                .put("generations", JsonFields.array(generations.map(generation -> JsonFields.object()
-                        .put("id", generation.id())
-                        .put("wallTime", generation.wallTime())
-                        .put("txnId", generation.txnId())
-                        .build())))
+                .put("generations", JsonFields.array(generations.map(generation -> global
+                        ? JsonFields.object().put("id", generation.id()).put("wallTime", generation.wallTime()).put("txnId", generation.txnId()).build()
+                        : JsonFields.object().put("id", generation.id()).build())))
                 .build());
     }
 
     private Response stats(Request request) {
         Session session = session(request).session();
-        if (session.principal().role() != Role.ADMIN) {
-            throw HttpFailure.forbidden("the dashboard requires the ADMIN role");
+        if (!session.principal().global()) {
+            throw HttpFailure.forbidden("the dashboard requires the ADMIN role in the default tenant");
         }
         EngineStats engine = database.engine().stats();
         TransactionManager.Statistics transactions = database.engine().transactions().statistics();

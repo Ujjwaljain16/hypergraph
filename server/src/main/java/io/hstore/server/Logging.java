@@ -148,7 +148,7 @@ final class Logging {
                     .append(" [").append(PID).append("] ")
                     .append(severity(record.getLevel())).append(":  ")
                     .append(component(record.getLoggerName()))
-                    .append(formatMessage(record))
+                    .append(escape(formatMessage(record)))
                     .append(System.lineSeparator());
             if (record.getThrown() != null) {
                 line.append("DETAIL:  ").append(record.getThrown()).append(System.lineSeparator());
@@ -157,6 +157,24 @@ final class Logging {
                 }
             }
             return line.toString();
+        }
+
+        private static String escape(String message) {
+            StringBuilder escaped = new StringBuilder(message.length());
+            message.chars().forEach(c -> {
+                switch (c) {
+                    case '\n' -> escaped.append("\\n");
+                    case '\r' -> escaped.append("\\r");
+                    default -> {
+                        if (Character.isISOControl(c) && c != '\t') {
+                            escaped.append("\\u%04x".formatted(c));
+                        } else {
+                            escaped.append((char) c);
+                        }
+                    }
+                }
+            });
+            return escaped.toString();
         }
 
         private static String severity(Level level) {

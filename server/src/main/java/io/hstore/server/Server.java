@@ -10,12 +10,13 @@ import io.hstore.db.query.QueryResult;
 import io.hstore.db.query.Session;
 import io.hstore.engine.HStoreException;
 
-import java.io.BufferedReader;
+import java.io.BufferedInputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.io.OutputStreamWriter;
 import java.io.UncheckedIOException;
 import java.io.Writer;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -24,6 +25,7 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -36,20 +38,26 @@ import javax.net.ssl.SSLSocket;
 
 final class Server implements AutoCloseable {
 
-    record Policy(String authentication, int maxConnections, int idleTimeoutSeconds, StatementLogger statements, boolean logConnections,
-                  Optional<SSLContext> tls) {
+    record Policy(String authentication, int maxConnections, int idleTimeoutSeconds, int authenticationTimeoutSeconds, long maxMessageBytes,
+                  StatementLogger statements, boolean logConnections, Optional<SSLContext> tls) {
 
         static Policy permissive() {
-            return new Policy("auto", 200, 0, StatementLogger.silent(), false, Optional.empty());
+            return new Policy("auto", 200, 0, 30, 64L << 20, StatementLogger.silent(), false, Optional.empty());
         }
 
         static Policy from(ServerConfig config, Optional<SSLContext> tls) {
             return new Policy(config.string(Setting.AUTHENTICATION).toLowerCase(), config.integer(Setting.MAX_CONNECTIONS),
-                    config.integer(Setting.IDLE_TIMEOUT_SECONDS), StatementLogger.from(config), config.flag(Setting.LOG_CONNECTIONS), tls);
+                    config.integer(Setting.IDLE_TIMEOUT_SECONDS), config.integer(Setting.AUTHENTICATION_TIMEOUT_SECONDS),
+                    (long) config.integer(Setting.MAX_MESSAGE_MB) << 20, StatementLogger.from(config), config.flag(Setting.LOG_CONNECTIONS), tls);
         }
 
         Policy withTls(SSLContext context) {
-            return new Policy(authentication, maxConnections, idleTimeoutSeconds, statements, logConnections, Optional.of(context));
+            return new Policy(authentication, maxConnections, idleTimeoutSeconds, authenticationTimeoutSeconds, maxMessageBytes, statements,
+                    logConnections, Optional.of(context));
+        }
+
+        Policy withTimeouts(int idle, int authentication) {
+            return new Policy(this.authentication, maxConnections, idle, authentication, maxMessageBytes, statements, logConnections, tls);
         }
 
         boolean authenticationRequired(HypergraphDatabase database) {
@@ -64,12 +72,15 @@ final class Server implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger("hstore.server");
     private static final int MAX_AUTHENTICATION_ATTEMPTS = 5;
     private static final int HANDSHAKE_TIMEOUT_MILLIS = 10_000;
+    private static final long UNAUTHENTICATED_MESSAGE_BYTES = 64 << 10;
+    private static final int MAX_WAITING_PER_ADDRESS = 16;
 
     private final HypergraphDatabase database;
     private final Policy policy;
     private final ServerSocket listener;
     private final ExecutorService connections = Executors.newVirtualThreadPerTaskExecutor();
     private final Set<Socket> open = ConcurrentHashMap.newKeySet();
+    private final Map<InetAddress, Integer> waiting = new ConcurrentHashMap<>();
     private final AtomicLong served = new AtomicLong();
     private volatile boolean running = true;
 
@@ -100,7 +111,12 @@ final class Server implements AutoCloseable {
             try {
                 Socket socket = listener.accept();
                 if (open.size() >= policy.maxConnections()) {
-                    reject(socket);
+                    connections.submit(() -> reject(socket, "too many connections"));
+                    continue;
+                }
+                if (waiting.merge(socket.getInetAddress(), 1, Integer::sum) > MAX_WAITING_PER_ADDRESS) {
+                    settle(socket.getInetAddress());
+                    connections.submit(() -> reject(socket, "too many unauthenticated connections from this address"));
                     continue;
                 }
                 open.add(socket);
@@ -115,12 +131,13 @@ final class Server implements AutoCloseable {
         }
     }
 
-    private void reject(Socket socket) {
-        LOG.log(System.Logger.Level.WARNING, "connection from {0} refused: max_connections={1} reached",
-                socket.getRemoteSocketAddress(), policy.maxConnections());
+    private void reject(Socket socket, String reason) {
+        LOG.log(System.Logger.Level.WARNING, "connection from {0} refused: {1} (max_connections={2})",
+                socket.getRemoteSocketAddress(), reason, policy.maxConnections());
         try (socket) {
-            WireProtocol.send(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8),
-                    "error [ABORTED_RESOURCE_LIMIT]: too many connections");
+            socket.setSoTimeout(HANDSHAKE_TIMEOUT_MILLIS);
+            WireProtocol.respond(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8),
+                    "error [ABORTED_RESOURCE_LIMIT]: " + reason);
         } catch (IOException _) {
         }
     }
@@ -130,39 +147,55 @@ final class Server implements AutoCloseable {
         long started = System.nanoTime();
         String peer = String.valueOf(socket.getRemoteSocketAddress());
         boolean active = false;
-        try (socket; Session session = new Session(database)) {
+        boolean unsettled = true;
+        Session session = new Session(database);
+        try (socket; session) {
             if (socket instanceof SSLSocket secure) {
                 secure.setSoTimeout(HANDSHAKE_TIMEOUT_MILLIS);
                 secure.startHandshake();
             }
-            socket.setSoTimeout(Math.max(0, policy.idleTimeoutSeconds()) * 1000);
-            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+            session.origin(socket.getInetAddress().getHostAddress());
+            InputStream in = new BufferedInputStream(socket.getInputStream());
             Writer out = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8);
-            boolean authenticated = !policy.authenticationRequired(database);
             int failures = 0;
-            WireProtocol.send(out, "hstore connection " + connection + " at generation " + database.engine().transactions().current().id()
-                    + (authenticated ? "" : "; authentication required"));
-            for (Optional<String> request = WireProtocol.receive(in); request.isPresent() && running; request = WireProtocol.receive(in)) {
+            boolean pending = policy.authenticationRequired(database);
+            timeout(socket, session);
+            unsettled = unsettled(socket, session, unsettled);
+            WireProtocol.respond(out, "hstore connection " + connection + " at generation " + database.engine().transactions().current().id()
+                    + (pending ? "; authentication required" : ""));
+            for (Optional<String> request = receive(in, out, session); request.isPresent() && running; request = receive(in, out, session)) {
+                if (!active && WireProtocol.http(request.get())) {
+                    LOG.log(System.Logger.Level.WARNING, "connection {0} from {1} closed: it sent an HTTP request", connection, peer);
+                    return;
+                }
                 if (!active && policy.logConnections()) {
                     LOG.log(System.Logger.Level.INFO, "connection {0} received from {1}", connection, peer);
                 }
                 active = true;
-                if (!authenticated) {
-                    authenticated = authenticate(session, request.get(), out, connection, peer);
-                    if (!authenticated && ++failures >= MAX_AUTHENTICATION_ATTEMPTS) {
+                if (!session.authenticated() && policy.authenticationRequired(database)) {
+                    if (!authenticate(session, request.get(), out, connection, peer) && ++failures >= MAX_AUTHENTICATION_ATTEMPTS) {
                         LOG.log(System.Logger.Level.WARNING, "connection {0} from {1} closed after {2} failed authentication attempts",
                                 connection, peer, failures);
                         return;
                     }
+                    timeout(socket, session);
+                    unsettled = unsettled(socket, session, unsettled);
                     continue;
                 }
-                WireProtocol.send(out, execute(session, request.get(), connection));
+                WireProtocol.respond(out, execute(session, request.get(), connection));
             }
         } catch (SSLException handshake) {
             LOG.log(System.Logger.Level.INFO, "connection {0} from {1} failed the TLS handshake: {2}", connection, peer, handshake.getMessage());
+        } catch (WireProtocol.TooLarge large) {
+            LOG.log(System.Logger.Level.WARNING, "connection {0} from {1} closed: {2}", connection, peer, large.getMessage());
         } catch (SocketTimeoutException idle) {
             if (!active && socket instanceof SSLSocket) {
                 LOG.log(System.Logger.Level.INFO, "connection {0} from {1} did not complete the TLS handshake in time", connection, peer);
+                return;
+            }
+            if (!session.authenticated() && policy.authenticationRequired(database)) {
+                LOG.log(System.Logger.Level.INFO, "connection {0} from {1} closed: no authentication within {2}s", connection, peer,
+                        policy.authenticationTimeoutSeconds());
                 return;
             }
             LOG.log(System.Logger.Level.INFO, "connection {0} closed after {1}s idle", connection, policy.idleTimeoutSeconds());
@@ -170,10 +203,43 @@ final class Server implements AutoCloseable {
             LOG.log(System.Logger.Level.DEBUG, "connection " + connection + " ended", e);
         } finally {
             open.remove(socket);
+            if (unsettled) {
+                settle(socket.getInetAddress());
+            }
             if (policy.logConnections()) {
                 LOG.log(active ? System.Logger.Level.INFO : System.Logger.Level.DEBUG, "disconnection: connection {0} from {1} session time {2} ms",
                         connection, peer, (System.nanoTime() - started) / 1_000_000);
             }
+        }
+    }
+
+    private boolean unsettled(Socket socket, Session session, boolean unsettled) {
+        if (unsettled && trusted(session)) {
+            settle(socket.getInetAddress());
+            return false;
+        }
+        return unsettled;
+    }
+
+    private void settle(InetAddress address) {
+        waiting.computeIfPresent(address, (_, count) -> count <= 1 ? null : count - 1);
+    }
+
+    private boolean trusted(Session session) {
+        return session.authenticated() || !policy.authenticationRequired(database);
+    }
+
+    private void timeout(Socket socket, Session session) throws IOException {
+        socket.setSoTimeout(Math.max(0, trusted(session) ? policy.idleTimeoutSeconds() : policy.authenticationTimeoutSeconds()) * 1000);
+    }
+
+    private Optional<String> receive(InputStream in, Writer out, Session session) throws IOException {
+        long limit = trusted(session) ? policy.maxMessageBytes() : UNAUTHENTICATED_MESSAGE_BYTES;
+        try {
+            return WireProtocol.receive(in, limit);
+        } catch (WireProtocol.TooLarge large) {
+            WireProtocol.respond(out, "error [ABORTED_RESOURCE_LIMIT]: " + large.getMessage());
+            throw large;
         }
     }
 
@@ -182,23 +248,30 @@ final class Server implements AutoCloseable {
         try {
             statements = Parser.script(request);
         } catch (HStoreException failure) {
-            WireProtocol.send(out, "error [" + failure.code() + "]: " + failure.getMessage());
+            WireProtocol.respond(out, "error [" + failure.code() + "]: " + failure.getMessage());
             return false;
         }
         if (statements.size() == 1 && statements.getFirst() instanceof Statement.Authenticate(String user, String password)) {
-            if (session.authenticate(user, password)) {
+            boolean accepted;
+            try {
+                accepted = session.authenticate(user, password);
+            } catch (HStoreException refused) {
+                WireProtocol.respond(out, "error [" + refused.code() + "]: " + refused.getMessage());
+                return false;
+            }
+            if (accepted) {
                 if (policy.logConnections()) {
                     LOG.log(System.Logger.Level.INFO, "connection {0} authorized: user={1} tenant={2} role={3}",
                             connection, user, session.principal().tenant(), session.principal().role());
                 }
-                WireProtocol.send(out, "authenticated as " + user);
+                WireProtocol.respond(out, "authenticated as " + user);
                 return true;
             }
             LOG.log(System.Logger.Level.WARNING, "password authentication failed for user \"{0}\" from {1}", user, peer);
-            WireProtocol.send(out, "error [AUTHENTICATION_FAILED]: authentication failed");
+            WireProtocol.respond(out, "error [AUTHENTICATION_FAILED]: authentication failed");
             return false;
         }
-        WireProtocol.send(out, "error [AUTHENTICATION_REQUIRED]: authenticate first: AUTHENTICATE <user> PASSWORD '<password>'");
+        WireProtocol.respond(out, "error [AUTHENTICATION_REQUIRED]: authenticate first: AUTHENTICATE <user> PASSWORD '<password>'");
         return false;
     }
 
@@ -226,7 +299,7 @@ final class Server implements AutoCloseable {
                 break;
             } catch (RuntimeException failure) {
                 LOG.log(System.Logger.Level.ERROR, "connection " + connection + " statement failed", failure);
-                rendered.add("error: " + failure);
+                rendered.add("error [INTERNAL]: the statement failed; the server log has the details");
                 break;
             }
         }

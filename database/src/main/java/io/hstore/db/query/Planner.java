@@ -13,7 +13,6 @@ import io.hstore.db.stats.Statistics;
 import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
 import io.hstore.engine.HStoreException;
-import io.hstore.engine.catalog.EngineSlots;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -59,6 +58,7 @@ final class Planner {
     private final Reader reader;
     private final Statistics statistics;
     private final ToLongFunction<Ast.Ref> resolver;
+    private double universe;
 
     Planner(Reader reader, Statistics statistics, ToLongFunction<Ast.Ref> resolver) {
         this.reader = reader;
@@ -75,7 +75,8 @@ final class Planner {
         });
         List<Expr> conjuncts = match.where().map(Planner::conjuncts).orElse(List.of());
         List<Candidate> candidates = new ArrayList<>();
-        double catalogSize = reader.view().scan(EngineSlots.CATALOG).size();
+        universe = reader.population(match.edges());
+        double catalogSize = universe;
         double population = type.map(found -> (double) reader.countOfType(found.id())).orElse(catalogSize);
         Candidate catalogScan = candidate(new AccessPath.AllAtoms(match.edges()), List.of(), catalogSize, conjuncts);
         candidates.add(new Candidate(catalogScan.path(), List.of(), catalogScan.rows(), catalogScan.cost() + VERIFY_WEIGHT * catalogScan.rows()));
@@ -125,7 +126,7 @@ final class Planner {
         }
         List<Expr> consumed = parts.stream().flatMap(part -> part.sources().stream()).toList();
         AccessPath path = new AccessPath.Intersection(parts.stream().map(Candidate::path).toList());
-        double corrected = rows * statistics.correction(path.kind());
+        double corrected = rows * statistics.correction(reader.tenant(), path.kind());
         double access = parts.stream().mapToDouble(part -> scanCost(part.path(), part.rows())).sum();
         return new Candidate(path, consumed, corrected, access + VERIFY_WEIGHT * corrected * verificationWeight(conjuncts, consumed));
     }
@@ -138,7 +139,7 @@ final class Planner {
     }
 
     private Candidate candidate(AccessPath path, List<Expr> sources, double rows, List<Expr> conjuncts) {
-        double corrected = rows * statistics.correction(path.kind());
+        double corrected = rows * statistics.correction(reader.tenant(), path.kind());
         return new Candidate(path, sources, corrected,
                 scanCost(path, corrected) + VERIFY_WEIGHT * corrected * verificationWeight(conjuncts, sources));
     }
@@ -148,9 +149,9 @@ final class Planner {
             case AccessPath.Fixed _ -> IO_WEIGHT * TREE_DEPTH + CPU_WEIGHT * rows;
             case AccessPath.Semantic(String _, int k, var _) -> IO_WEIGHT * (2.0 * k + TREE_DEPTH) + CPU_WEIGHT * rows;
             case AccessPath.Union(List<AccessPath> parts) -> parts.stream()
-                    .mapToDouble(part -> scanCost(part, estimate(part, reader.view().scan(EngineSlots.CATALOG).size()))).sum();
+                    .mapToDouble(part -> scanCost(part, estimate(part, universe))).sum();
             case AccessPath.Intersection(List<AccessPath> parts) -> parts.stream()
-                    .mapToDouble(part -> scanCost(part, estimate(part, reader.view().scan(EngineSlots.CATALOG).size()))).sum();
+                    .mapToDouble(part -> scanCost(part, estimate(part, universe))).sum();
             default -> IO_WEIGHT * (rows / ENTRIES_PER_PAGE + TREE_DEPTH) + CPU_WEIGHT * rows;
         };
     }
@@ -170,7 +171,7 @@ final class Planner {
             case AccessPath.Semantic(String _, int k, var _) -> k;
             case AccessPath.IndexRange range -> indexEstimate(range);
             case AccessPath.TypeScan(TypeDef type) -> reader.countOfType(type.id());
-            case AccessPath.AllAtoms _ -> reader.view().scan(EngineSlots.CATALOG).size();
+            case AccessPath.AllAtoms(boolean edges) -> reader.population(edges);
             case AccessPath.Union(List<AccessPath> parts) -> Math.min(population,
                     parts.stream().mapToDouble(part -> estimate(part, population)).sum());
             case AccessPath.Intersection(List<AccessPath> parts) -> parts.stream().mapToDouble(part -> estimate(part, population)).min().orElse(0);

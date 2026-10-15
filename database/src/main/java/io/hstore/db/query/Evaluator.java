@@ -46,12 +46,15 @@ final class Evaluator {
             case Expr.Or(List<Expr> terms) -> terms.stream().anyMatch(term -> test(term, binding));
             case Expr.Not(Expr term) -> !test(term, binding);
             case Expr.Contains(String variable, List<Ast.Ref> members) -> isEdge(atom(variable, binding))
-                    && members.stream().allMatch(member -> reader().view().contains(atom(variable, binding), context.resolve(member)));
-            case Expr.Has(String variable, Ast.Ref member, Optional<String> role) -> reader().view()
-                    .incidence(atom(variable, binding), context.resolve(member))
+                    && members.stream().map(context::resolve).allMatch(member -> reader().owns(member) && reader().view().contains(atom(variable, binding), member));
+            case Expr.Has(String variable, Ast.Ref member, Optional<String> role) -> Optional.of(context.resolve(member)).filter(reader()::owns)
+                    .flatMap(resolved -> reader().view().incidence(atom(variable, binding), resolved))
                     .map(incidence -> role.map(name -> reader().roles(incidence.roleSet()).contains(name)).orElse(true))
                     .orElse(false);
-            case Expr.In(String variable, Ast.Ref edge) -> reader().view().contains(context.resolve(edge), atom(variable, binding));
+            case Expr.In(String variable, Ast.Ref edge) -> {
+                long resolved = context.resolve(edge);
+                yield reader().owns(resolved) && reader().view().contains(resolved, atom(variable, binding));
+            }
             case Expr.Similar(String variable, String text, int k, var consistency) -> context.similar(text, k, consistency).contains(atom(variable, binding));
             case Expr.ValidAt(String variable, Expr instant) -> validAt(atom(variable, binding), (long) number(instant, binding));
             case Expr.Between(Expr value, Expr low, Expr high) -> {
@@ -67,7 +70,7 @@ final class Evaluator {
         if (isEdge(atom)) {
             return reader().edge(atom).validAt(instant).findAny().isPresent();
         }
-        return reader().view().incident(atom).anyMatch(incident -> reader().view().incidence(incident.edge(), atom)
+        return reader().view().incident(atom).filter(incident -> reader().owns(incident.edge())).anyMatch(incident -> reader().view().incidence(incident.edge(), atom)
                 .map(incidence -> incidence.validAt(instant)).orElse(false));
     }
 
@@ -106,8 +109,8 @@ final class Evaluator {
             case "key" -> reader().require(atomArgument(arguments, 0, binding)).key().<Value>map(Value.Text::new).orElse(Value.NULL);
             case "card", "cardinality" -> new Value.Int(reader().cardinality(atomArgument(arguments, 0, binding)));
             case "degree" -> new Value.Int(reader().degree(atomArgument(arguments, 0, binding)));
-            case "weight", "weightsum" -> new Value.Real(Statistics.weight(reader().view(), atomArgument(arguments, 0, binding)));
-            case "overlap" -> new Value.Int(Statistics.overlap(reader().view(), atomArgument(arguments, 0, binding), atomArgument(arguments, 1, binding)));
+            case "weight", "weightsum" -> new Value.Real(Statistics.weight(reader(), atomArgument(arguments, 0, binding)));
+            case "overlap" -> new Value.Int(Statistics.overlap(reader(), atomArgument(arguments, 0, binding), atomArgument(arguments, 1, binding)));
             case "jaccard" -> new Value.Real(TreeAlgebra.jaccard(reader().edge(atomArgument(arguments, 0, binding)).membership(),
                     reader().edge(atomArgument(arguments, 1, binding)).membership()));
             case "state" -> arguments.size() > 1

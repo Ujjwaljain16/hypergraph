@@ -6,6 +6,7 @@ package io.hstore.server.studio;
 import io.hstore.db.DatabaseOptions;
 import io.hstore.db.HypergraphDatabase;
 import io.hstore.db.query.Session;
+import io.hstore.db.security.SignIns;
 import io.hstore.db.value.Json;
 import io.hstore.engine.EngineOptions;
 import io.hstore.server.Tls;
@@ -16,15 +17,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -116,12 +120,19 @@ class StudioTest {
 
     @Test
     void repeatedFailedLoginsAreThrottled() throws Exception {
-        for (int i = 0; i < 5; i++) {
+        try (Session session = new Session(database)) {
+            session.execute("CREATE USER bob PASSWORD 'b0b' ROLE reader");
+        }
+        for (int i = 0; i < SignIns.USER_LIMIT; i++) {
             assertEquals(401, post("/api/login", "{\"user\":\"admin\",\"password\":\"wrong\"}", Optional.empty(), true).statusCode());
+            if (i % 3 == 0) {
+                assertEquals(200, post("/api/login", "{\"user\":\"bob\",\"password\":\"b0b\"}", Optional.empty(), true).statusCode());
+            }
         }
         HttpResponse<String> blocked = post("/api/login", "{\"user\":\"admin\",\"password\":\"secret\"}", Optional.empty(), true);
         assertEquals(429, blocked.statusCode());
         assertTrue(blocked.body().contains("too many failed sign-in attempts"));
+        assertEquals(200, post("/api/login", "{\"user\":\"bob\",\"password\":\"b0b\"}", Optional.empty(), true).statusCode());
     }
 
     @Test
@@ -188,5 +199,68 @@ class StudioTest {
         assertEquals(64L << 20, ((Json.Number) configuration.get("checkpointWalBytes")).value().longValueExact());
         Map<String, Json> history = object(get("/api/history", cookie).body());
         assertTrue(((Json.Array) history.get("generations")).items().size() > 1);
+    }
+
+    @Test
+    void sessionsOpenedWithoutCredentialsEndOnceUsersExist() throws Exception {
+        try (Session session = new Session(database)) {
+            session.execute("DROP USER admin");
+        }
+        HttpResponse<String> opened = post("/api/login", "{}", Optional.empty(), true);
+        assertEquals(200, opened.statusCode());
+        Optional<String> cookie = opened.headers().firstValue("Set-Cookie").map(header -> header.substring(0, header.indexOf(';')));
+        assertEquals(200, get("/api/schema", cookie).statusCode());
+        try (Session session = new Session(database)) {
+            session.execute("CREATE USER admin PASSWORD 'secret' ROLE admin");
+        }
+        assertEquals(401, get("/api/schema", cookie).statusCode());
+        assertEquals(401, post("/api/query", "{\"script\":\"SHOW USERS\"}", cookie, true).statusCode());
+    }
+
+    @Test
+    void tenantAdministratorsStayOutOfEngineWidePages() throws Exception {
+        try (Session session = new Session(database)) {
+            session.executeAll("CREATE TENANT acme; CREATE USER carol PASSWORD 'c4rol' TENANT acme ROLE admin;");
+        }
+        HttpResponse<String> signedIn = post("/api/login", "{\"user\":\"carol\",\"password\":\"c4rol\"}", Optional.empty(), true);
+        assertEquals(200, signedIn.statusCode());
+        Optional<String> cookie = signedIn.headers().firstValue("Set-Cookie").map(header -> header.substring(0, header.indexOf(';')));
+        assertEquals(403, get("/api/stats", cookie).statusCode());
+        assertTrue(((Json.Array) object(get("/api/schema", cookie).body()).get("branches")).items().isEmpty());
+        Map<String, Json> history = object(get("/api/history", cookie).body());
+        List<Json> generations = ((Json.Array) history.get("generations")).items();
+        assertTrue(!generations.isEmpty() && generations.stream().allMatch(generation -> ((Json.Obj) generation).fields().keySet().equals(Set.of("id"))));
+        for (int i = 0; i < Session.MAX_FAILED_AUTHENTICATIONS; i++) {
+            assertTrue(post("/api/query", "{\"script\":\"AUTHENTICATE admin PASSWORD 'guess'\"}", cookie, true).body().contains("\"error\""));
+        }
+        assertTrue(post("/api/query", "{\"script\":\"AUTHENTICATE admin PASSWORD 'secret'\"}", cookie, true).body()
+                .contains("too many failed authentication attempts in this session"));
+        for (int i = Session.MAX_FAILED_AUTHENTICATIONS; i < SignIns.USER_LIMIT; i++) {
+            assertEquals(200, post("/api/login", "{\"user\":\"carol\",\"password\":\"c4rol\"}", Optional.empty(), true).statusCode());
+            assertEquals(401, post("/api/login", "{\"user\":\"admin\",\"password\":\"guess\"}", Optional.empty(), true).statusCode());
+        }
+        assertEquals(429, post("/api/login", "{\"user\":\"admin\",\"password\":\"secret\"}", Optional.empty(), true).statusCode());
+    }
+
+    @Test
+    void unknownHostNamesAreRefusedWhileAuthenticationIsOff() throws Exception {
+        assertTrue(rawGet("rebind.attacker.example").startsWith("HTTP/1.1 200"));
+        try (Session session = new Session(database)) {
+            session.execute("DROP USER admin");
+        }
+        assertTrue(rawGet("rebind.attacker.example").startsWith("HTTP/1.1 403"));
+        assertTrue(rawGet("rebind.attacker.example:" + studio.port()).startsWith("HTTP/1.1 403"));
+        assertTrue(rawGet("127.0.0.1:" + studio.port()).startsWith("HTTP/1.1 200"));
+        assertTrue(rawGet("localhost").startsWith("HTTP/1.1 200"));
+        assertTrue(rawGet("[::1]:" + studio.port()).startsWith("HTTP/1.1 200"));
+        assertTrue(rawGet("10.1.2.3").startsWith("HTTP/1.1 200"));
+    }
+
+    private String rawGet(String host) throws Exception {
+        try (Socket socket = new Socket("127.0.0.1", studio.port())) {
+            socket.setSoTimeout(10_000);
+            socket.getOutputStream().write(("GET /api/info HTTP/1.1\r\nHost: " + host + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+            return new String(socket.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        }
     }
 }

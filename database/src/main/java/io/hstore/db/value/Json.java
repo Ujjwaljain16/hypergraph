@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -150,8 +151,11 @@ public sealed interface Json {
     }
 
     final class Parser {
+        private static final int MAX_DEPTH = 256;
+
         private final String text;
         private int position;
+        private int depth;
 
         Parser(String text) {
             this.text = text;
@@ -178,14 +182,25 @@ public sealed interface Json {
             }
             char c = text.charAt(position);
             return switch (c) {
-                case '{' -> object();
-                case '[' -> array();
+                case '{' -> nested(this::object);
+                case '[' -> nested(this::array);
                 case '"' -> new Str(string());
                 case 't' -> literal("true", new Bool(true));
                 case 'f' -> literal("false", new Bool(false));
                 case 'n' -> literal("null", NULL);
                 default -> number();
             };
+        }
+
+        private Json nested(Supplier<Json> parse) {
+            if (++depth > MAX_DEPTH) {
+                throw error("nested deeper than " + MAX_DEPTH + " levels");
+            }
+            try {
+                return parse.get();
+            } finally {
+                depth--;
+            }
         }
 
         private Json literal(String word, Json value) {
@@ -278,7 +293,7 @@ public sealed interface Json {
                 throw error("unexpected character '" + text.charAt(position) + "'");
             }
             try {
-                return new Number(new BigDecimal(text.substring(start, position)));
+                return new Number(Values.number(text.substring(start, position)));
             } catch (NumberFormatException e) {
                 throw error("malformed number");
             }

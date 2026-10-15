@@ -20,7 +20,8 @@ final class Sessions implements AutoCloseable {
         private final String token;
         private final Session session;
         private final ReentrantLock lock = new ReentrantLock();
-        private volatile long lastUsed = System.nanoTime();
+        private final long opened = System.nanoTime();
+        private volatile long lastUsed = opened;
 
         private Entry(String token, Session session) {
             this.token = token;
@@ -47,6 +48,8 @@ final class Sessions implements AutoCloseable {
     }
 
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final long LIFETIME_NANOS = Duration.ofHours(12).toNanos();
+    private static final int MAX_SESSIONS = 4096;
 
     private final Map<String, Entry> entries = new ConcurrentHashMap<>();
     private final long idleNanos;
@@ -56,6 +59,10 @@ final class Sessions implements AutoCloseable {
     }
 
     Entry open(Session session) {
+        expire();
+        if (entries.size() >= MAX_SESSIONS) {
+            throw HttpFailure.tooManyRequests("too many open studio sessions; try again later");
+        }
         byte[] secret = new byte[32];
         RANDOM.nextBytes(secret);
         Entry entry = new Entry(Base64.getUrlEncoder().withoutPadding().encodeToString(secret), session);
@@ -86,7 +93,7 @@ final class Sessions implements AutoCloseable {
     private void expire() {
         long now = System.nanoTime();
         entries.values().stream()
-                .filter(entry -> now - entry.lastUsed > idleNanos && !entry.lock.isLocked())
+                .filter(entry -> (now - entry.lastUsed > idleNanos || now - entry.opened > LIFETIME_NANOS) && !entry.lock.isLocked())
                 .map(Entry::token)
                 .toList()
                 .forEach(this::close);

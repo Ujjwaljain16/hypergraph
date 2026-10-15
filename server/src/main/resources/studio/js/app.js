@@ -76,6 +76,7 @@ class Studio {
 
   async logout() {
     await api.logout().catch(() => {});
+    storage.remove('history');
     this.session = null;
     this.stopPolling();
     this.start();

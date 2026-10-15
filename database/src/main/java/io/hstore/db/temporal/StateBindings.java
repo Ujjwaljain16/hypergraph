@@ -8,6 +8,7 @@ import io.hstore.db.Writer;
 import io.hstore.db.property.PropertySlots;
 import io.hstore.db.value.Value;
 import io.hstore.db.value.Values;
+import io.hstore.engine.Dictionary;
 import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.page.ByteCursor;
 import io.hstore.engine.topology.Validity;
@@ -57,7 +58,7 @@ public final class StateBindings {
     public static void bind(Writer writer, long atom, String schema, Value value, Validity validity) {
         writer.principal().requireWrite();
         writer.require(atom);
-        int schemaId = writer.database().engine().dictionary().name(STATE_SCHEMA_NAMESPACE, schema);
+        int schemaId = writer.database().engine().dictionary().name(STATE_SCHEMA_NAMESPACE, Dictionary.requireName("state schema name", schema));
         writer.transaction().update(STATE, atom, current -> Optional.of(new Binding(schemaId, value, validity.from(), validity.to(),
                 current.map(Binding::version).orElse(0L) + 1)));
     }

@@ -37,7 +37,7 @@ if [ ! -s "$HSTORE_DATA/FORMAT" ]; then
 	fi
 	if [ -n "${HSTORE_PASSWORD:-}" ]; then
 		log "initialising $HSTORE_DATA with superuser $user"
-		hstore init "$HSTORE_DATA" --superuser "$user" --password "$HSTORE_PASSWORD"
+		HSTORE_PASSWORD="$HSTORE_PASSWORD" hstore init "$HSTORE_DATA" --superuser "$user"
 	elif [ "${HSTORE_AUTHENTICATION:-auto}" = 'off' ]; then
 		log "initialising $HSTORE_DATA without a superuser; authentication is off"
 		hstore init "$HSTORE_DATA"

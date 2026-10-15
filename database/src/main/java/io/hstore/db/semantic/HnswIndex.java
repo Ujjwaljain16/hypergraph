@@ -3,6 +3,8 @@
 
 package io.hstore.db.semantic;
 
+import io.hstore.engine.HStoreException;
+
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -60,9 +62,12 @@ public final class HnswIndex {
     }
 
     public void upsert(long id, float[] vector) {
-        float[] unit = Embedding.normalized(vector);
+        float[] unit = Embedding.normalized(Embedding.requireValid(vector));
         lock.writeLock().lock();
         try {
+            if (!vectors.isEmpty() && vectors.getFirst().length != unit.length) {
+                throw HStoreException.invalid("this index holds " + vectors.getFirst().length + "-dimensional vectors, not " + unit.length);
+            }
             Integer existing = byId.remove(id);
             if (existing != null) {
                 deleted.set(existing);
@@ -175,6 +180,9 @@ public final class HnswIndex {
                 for (int i = 0; i < layers[layer].length; i++) {
                     layers[layer][i] = in.readInt();
                 }
+            }
+            if (!index.vectors.isEmpty() && index.vectors.getFirst().length != vector.length) {
+                throw new IOException("HNSW index file mixes vector dimensions");
             }
             index.ids.add(id);
             index.vectors.add(vector);

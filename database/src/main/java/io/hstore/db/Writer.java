@@ -3,6 +3,7 @@
 
 package io.hstore.db;
 
+import io.hstore.db.evidence.Provenance;
 import io.hstore.db.property.PropertyBag.Property;
 import io.hstore.db.property.PropertyBag;
 import io.hstore.db.property.PropertyIndex;
@@ -17,6 +18,7 @@ import io.hstore.db.security.Quota.Usage;
 import io.hstore.db.security.Security;
 import io.hstore.db.semantic.Embedding;
 import io.hstore.db.semantic.Encoder;
+import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.value.Json;
 import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
@@ -54,12 +56,12 @@ public final class Writer extends Reader {
     }
 
     public TypeDef defineNode(String name, List<PropertyDef> properties) {
-        principal().requireAdmin();
+        principal().requireGlobal();
         return schema().define(txn, name, AtomKind.NODE, properties, List.of());
     }
 
     public TypeDef defineEdge(String name, AtomKind kind, List<PropertyDef> properties, List<String> roles) {
-        principal().requireAdmin();
+        principal().requireGlobal();
         if (!kind.isEdge()) {
             throw HStoreException.invalid("edge types must be SET_EDGE or ORDERED_EDGE");
         }
@@ -67,7 +69,7 @@ public final class Writer extends Reader {
     }
 
     public TypeDef createIndex(String type, String property) {
-        principal().requireAdmin();
+        principal().requireGlobal();
         TypeDef current = requireType(type);
         PropertyDef existing = current.property(property)
                 .orElseThrow(() -> HStoreException.invalid(type + " has no declared property '" + property + "'"));
@@ -83,7 +85,7 @@ public final class Writer extends Reader {
     }
 
     public TypeDef createJsonIndex(String type, String path, TypeTag tag) {
-        principal().requireAdmin();
+        principal().requireGlobal();
         TypeDef current = requireType(type);
         TypeDef updated = schema().alter(txn, current.withJsonIndex(new JsonIndex(path, tag)));
         int key = schema().propertyKey(path);
@@ -194,14 +196,20 @@ public final class Writer extends Reader {
     }
 
     public void qualify(long edge, long member, long qualifier) {
-        principal().requireWrite();
-        require(edge);
+        requireMembership(edge, MemberSpec.PLAIN);
+        requireVisible(member);
+        if (qualifier != 0 && Provenance.qualifier(this, qualifier).isEmpty()) {
+            throw HStoreException.invalid("assertion " + qualifier + " does not exist");
+        }
         txn.upsert(edge, member, incidence -> incidence.withQualifier(qualifier));
     }
 
     private Incidence incidence(long edge, long member, MemberSpec spec) {
         requireMembership(edge, spec);
         requireVisible(member);
+        if (spec.qualifier() != 0 && Provenance.qualifier(this, spec.qualifier()).isEmpty()) {
+            throw HStoreException.invalid("assertion " + spec.qualifier() + " does not exist");
+        }
         int roleSet = spec.roles().isEmpty() ? Dictionary.NO_ROLES : database.engine().dictionary().roleSet(spec.roles());
         long weight = spec.weight().isPresent() ? Weight.of(spec.weight().getAsDouble()) : Weight.ONE;
         return new Incidence(member, roleSet, weight, spec.validity().from(), spec.validity().to(), spec.dataRef(), spec.qualifier());
@@ -264,7 +272,7 @@ public final class Writer extends Reader {
     }
 
     long writePayload(byte[] bytes) {
-        Security.charge(txn, tenant(), new Usage(0, 0, bytes.length));
+        database.chargePayload(tenant(), bytes.length);
         return database.payloads().write(bytes);
     }
 
@@ -284,8 +292,16 @@ public final class Writer extends Reader {
     public void embed(long atom, String model, int version, float[] vector) {
         principal().requireWrite();
         require(atom);
+        SemanticPlane semantic = database.semantic();
+        int id = semantic.existingModel(model).orElseGet(() -> {
+            if (!model.equals(semantic.encoder().model())) {
+                principal().requireGlobal();
+            }
+            return semantic.model(model);
+        });
+        semantic.validate(view(), model, id, vector);
         long ref = writePayload(Embedding.encode(vector));
-        Embedding embedding = new Embedding(database.semantic().model(model), version, vector.length, ref);
+        Embedding embedding = new Embedding(id, version, vector.length, ref);
         txn.put(Embedding.EMBEDDINGS, atom, embedding);
         txn.updateAtom(atom, record -> record instanceof AtomRecord.NodeRecord node ? node.withEmbeddingRef(ref) : record);
     }

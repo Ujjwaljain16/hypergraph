@@ -34,7 +34,7 @@ flowchart LR
 | **Console** | HQL editor with syntax highlighting, line numbers, completion of keywords, type, property and role names, and persistent history. Results appear as a stream of frames, newest first. Each frame offers *Graph* (when the result contains atoms), *Table*, *JSON* and *Plan* (when the statement produced a trace) tabs. Multi-statement scripts produce one frame per statement. A failed statement gets a red frame with the error code and stops the script. |
 | **Explore** | Full-screen hypergraph canvas. You can load a sample of every hyperedge type, search (`42`, `@42`, `Type:key`, `Type:'key'` or a type name), expand atoms, hide types from the legend, switch render modes and toggle labels. An inspector panel shows the selected atom. A generation slider re-renders the same atoms at any retained generation. |
 | **Schema** | Cards for every node and hyperedge type: kind, visible atom count, properties with `indexed`/`required` badges and value type, JSON indexes, and roles. *Explore* and *Query* buttons on each card, plus a branch table. |
-| **Dashboard** | ADMIN only. Polls `/api/stats` every 2 s. Metric tiles show generation, commits, conflicts, group-commit batch size, cache hit rate, data written, WAL and uptime. Live charts show commits/s, pages written/s, pages read/s and WAL throughput. A segment map is coloured by state (active, sealed, compacting, retired) and filled by bytes used relative to the largest segment size, so the bars also show how segments grew. Hover a segment for its bytes, node images and live images. Configuration and recovery details are listed. |
+| **Dashboard** | Global admins only (ADMIN in the default tenant). Polls `/api/stats` every 2 s. Metric tiles show generation, commits, conflicts, group-commit batch size, cache hit rate, data written, WAL and uptime. Live charts show commits/s, pages written/s, pages read/s and WAL throughput. A segment map is coloured by state (active, sealed, compacting, retired) and filled by bytes used relative to the largest segment size, so the bars also show how segments grew. Hover a segment for its bytes, node images and live images. Configuration and recovery details are listed. |
 | **Access** | ADMIN only. Tenants (usage and quotas) and users, forms to create users and tenants, and *Drop* for users. Every action runs ordinary HQL (`CREATE USER …`, `CREATE TENANT … QUOTA (…)`, `DROP USER …`) through the session. |
 
 The top bar shows the current branch, user, tenant, role and the latest durable generation (polled every
@@ -113,8 +113,15 @@ Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'
   `hstore_studio=<43-char base64url token>; Path=/; HttpOnly; SameSite=Strict`. The token is 256 bits from
   `SecureRandom`. The cookie also gets `; Secure` when Studio itself serves HTTPS (`tls = on`) or when the
   login request carries `X-Forwarded-Proto: https` from a TLS-terminating proxy.
-* Sessions expire after `studio_session_minutes` without a request. Expiry aborts the session's open
-  transaction.
+* Sessions expire after `studio_session_minutes` without a request, and 12 hours after sign-in in any case.
+  Expiry aborts the session's open transaction. Signing in again closes the session the browser already had. At
+  most 4,096 sessions are open at once; past that, `POST /api/login` returns `429`.
+* A session whose user is dropped or changes password is closed on its next request (`401`).
+* While authentication is off, `/api/` only answers requests whose `Host` header is an IP address, `localhost`
+  (or a `.localhost` name) or the configured listen address; anything else gets `403`. This stops a web page
+  from reaching an open Studio through DNS rebinding. With authentication on, any host name is accepted.
+* The console does not keep scripts containing `PASSWORD` or `AUTHENTICATE` in its history, and signing out
+  clears the history kept in the browser.
 * Every `POST` must carry the header `X-HStore-Studio` (any value) and is rejected with `403` otherwise.
   Together with `SameSite=Strict`, this blocks cross-site request forgery: a cross-origin page cannot set a custom
   header without a CORS preflight, which the server never approves.
@@ -135,13 +142,13 @@ Errors use one JSON shape:
 |---|---|---|
 | `GET /` and static files | no | `index.html`, `studio.css`, `favicon.svg`, `js/**.js`. Paths must match `([a-z0-9-]+/){0,3}[a-z0-9-]+\.(html|css|js|svg)`. Everything else returns `404`, which rules out path traversal. |
 | `GET /api/info` | no | Product, version, current generation, `authenticationRequired`, `startedAt`, and `session` (or `null`). |
-| `POST /api/login` | no | Body `{"user","password"}`. With authentication off, an empty body `{}` opens a `system` session. `401` on failure. After 5 failed attempts from one client address within 15 minutes, further attempts get `429` until the window ends; a successful login resets the count. |
+| `POST /api/login` | no | Body `{"user","password"}`. With authentication off, an empty body `{}` opens a `system` session. `401` on failure. Sign-ins share the database's throttle with the wire protocol and `AUTHENTICATE`: after 10 failures for a user name, or 20 from one client address, within 15 minutes, further attempts get `429` until the window ends. A successful login clears only that user's count. |
 | `POST /api/logout` | no | Closes the session and expires the cookie. |
 | `POST /api/query` | yes | Body `{"script": "<HQL>"}`. Executes in the session; see below. |
 | `GET /api/graph` | yes | Hypergraph neighbourhood for visualisation; see below. |
-| `GET /api/schema` | yes | Types visible to the session: `id`, `name`, `kind`, `version`, `count`, `roles`, `properties[{name,type,indexed,required}]`, `jsonIndexes[{path,type}]`, plus `branches`. |
-| `GET /api/history` | yes | `{"current": G, "generations": [{"id","wallTime","txnId"}]}` for the retained generations. |
-| `GET /api/stats` | ADMIN | Engine counters, segments (`id`, `state`, `pages` = node images, `bytes`, `live`), recovery outcome, configuration (`pageSize`, `segmentBytes` (the largest segment), `durability`, `walMode`, `nodeCacheBytes`, `historyLimit`, `checkpointWalBytes` = the threshold in use, `checkpointSource` = `automatic`, `database` or `configuration`), semantic index generation, Studio session count, branches. |
+| `GET /api/schema` | yes | Types visible to the session: `id`, `name`, `kind`, `version`, `count`, `roles`, `properties[{name,type,indexed,required}]`, `jsonIndexes[{path,type}]`, plus `branches` (empty unless the session belongs to a global admin). |
+| `GET /api/history` | yes | `{"current": G, "generations": [{"id","wallTime","txnId"}]}` for the retained generations. Users other than global admins only get `id`, since the wall times and transaction ids describe every tenant's commits. |
+| `GET /api/stats` | global ADMIN | Engine counters, segments (`id`, `state`, `pages` = node images, `bytes`, `live`), recovery outcome, configuration (`pageSize`, `segmentBytes` (the largest segment), `durability`, `walMode`, `nodeCacheBytes`, `historyLimit`, `checkpointWalBytes` = the threshold in use, `checkpointSource` = `automatic`, `database` or `configuration`), semantic index generation, Studio session count, branches. |
 
 Example `GET /api/info`:
 

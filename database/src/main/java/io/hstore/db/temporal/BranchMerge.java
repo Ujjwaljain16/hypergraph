@@ -197,10 +197,10 @@ public final class BranchMerge {
                     if (!txn.exists(edge)) {
                         continue;
                     }
-                    if (source.edge(edge).kind() == EdgeKind.ORDERED) {
+                    if (source.view().requireEdge(edge).kind() == EdgeKind.ORDERED) {
                         boolean contested = changes.stream().anyMatch(change -> skipped.contains(new Conflict("membership", edge, change.member())));
                         if (!contested) {
-                            txn.load(edge, source.edge(edge).stream().toList());
+                            txn.load(edge, source.view().requireEdge(edge).stream().toList());
                             members += changes.size();
                         }
                         continue;

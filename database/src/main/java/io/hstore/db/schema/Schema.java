@@ -76,7 +76,7 @@ public final class Schema {
     }
 
     public int propertyKey(String name) {
-        return dictionary.name(PROPERTY_KEY, name);
+        return dictionary.name(PROPERTY_KEY, Dictionary.requireName("property name", name));
     }
 
     public OptionalInt existingPropertyKey(String name) {

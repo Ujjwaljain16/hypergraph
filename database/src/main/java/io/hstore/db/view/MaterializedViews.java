@@ -27,6 +27,7 @@ import io.hstore.engine.tree.ValueCodec;
 import io.hstore.engine.txn.IncidentEdge;
 import io.hstore.engine.txn.TxnOptions;
 
+import java.time.Duration;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -34,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.ToLongFunction;
 import java.util.stream.Stream;
 
@@ -56,7 +58,14 @@ public final class MaterializedViews implements AutoCloseable {
     public record Reading(ViewCell cell, long staleness) {
     }
 
+    private record Lag(Descriptor descriptor, long through, long count) {
+    }
+
     private static final int KEY_BITS = 48;
+    private static final int MAX_VIEWS_PER_TENANT = 32;
+    private static final long MAX_TOP_K = 1000;
+    private static final long MAX_BUCKET_MILLIS = Duration.ofDays(366).toMillis();
+    private static final System.Logger LOG = System.getLogger("hstore.views");
 
     private static final ValueCodec<Descriptor> DESCRIPTOR_CODEC = ValueCodec.rows(
             descriptor -> 45 + ByteCursor.stringSize(descriptor.name()),
@@ -78,12 +87,14 @@ public final class MaterializedViews implements AutoCloseable {
     private final HypergraphDatabase database;
     private final ChangeFeed.Subscription subscription;
     private final ChangeFeed.Hold hold;
+    private final Map<Integer, Lag> lags = new ConcurrentHashMap<>();
 
     public MaterializedViews(HypergraphDatabase database) {
         this.database = database;
         this.subscription = database.engine().feed().subscribe(database.engine().transactions().current().id(), this::onCommit);
         this.hold = database.engine().feed().hold(() -> database.read(reader ->
-                reader.view().scan(VIEWS).values().mapToLong(Descriptor::lastGeneration).min().orElse(Long.MAX_VALUE)));
+                reader.view().scan(VIEWS).values().filter(descriptor -> descriptor.refresh() == Refresh.CONTINUOUS)
+                        .mapToLong(Descriptor::lastGeneration).min().orElse(Long.MAX_VALUE)));
     }
 
     private static long cellKey(int view, long key) {
@@ -94,10 +105,15 @@ public final class MaterializedViews implements AutoCloseable {
     }
 
     public Descriptor create(Principal principal, String name, Kind kind, Refresh refresh, long parameter) {
-        return database.write(TxnOptions.defaults(), principal, writer -> {
+        return database.write(database.transactionOptions(principal), principal, writer -> {
             writer.principal().requireAdmin();
-            if (find(writer, name).isPresent()) {
+            validate(kind, parameter);
+            List<Descriptor> existing = list(writer);
+            if (existing.stream().anyMatch(descriptor -> descriptor.name().equals(name))) {
                 throw HStoreException.invalid("view '" + name + "' already exists");
+            }
+            if (existing.size() >= MAX_VIEWS_PER_TENANT) {
+                throw HStoreException.limit("a tenant can have at most " + MAX_VIEWS_PER_TENANT + " views; drop one first");
             }
             int id = writer.view().scan(VIEWS).last().map(entry -> (int) entry.key() + 1).orElse(1);
             Descriptor descriptor = new Descriptor(id, name, kind, refresh, parameter, writer.generation(), writer.tenant());
@@ -105,6 +121,42 @@ public final class MaterializedViews implements AutoCloseable {
             build(writer, descriptor);
             return descriptor;
         });
+    }
+
+    private static void validate(Kind kind, long parameter) {
+        switch (kind) {
+            case OVERLAP_TOP_K -> {
+                if (parameter < 1 || parameter > MAX_TOP_K) {
+                    throw HStoreException.invalid("OVERLAP TOP must be between 1 and " + MAX_TOP_K + ", got " + parameter);
+                }
+            }
+            case ACTIVITY -> {
+                if (parameter < 1 || parameter > MAX_BUCKET_MILLIS) {
+                    throw HStoreException.invalid("ACTIVITY BUCKET must be between 1 and " + MAX_BUCKET_MILLIS + " ms, got " + parameter);
+                }
+            }
+            case DEGREE, CARDINALITY -> {
+            }
+        }
+    }
+
+    public void drop(Principal principal, String name) {
+        Descriptor dropped = database.write(TxnOptions.defaults(), principal, writer -> {
+            writer.principal().requireAdmin();
+            Descriptor descriptor = find(writer, name).orElseThrow(() -> unknown(name));
+            clear(writer, descriptor);
+            writer.transaction().delete(VIEWS, descriptor.id());
+            return descriptor;
+        });
+        lags.remove(dropped.id());
+    }
+
+    private static HStoreException unknown(String name) {
+        return HStoreException.invalid("unknown view '" + name + "'");
+    }
+
+    private void clear(Writer writer, Descriptor descriptor) {
+        cells(writer, descriptor).map(Entry::key).toList().forEach(key -> writer.transaction().delete(VIEW_DATA, key));
     }
 
     public Optional<Descriptor> find(Reader reader, String name) {
@@ -116,54 +168,79 @@ public final class MaterializedViews implements AutoCloseable {
     }
 
     public Descriptor refresh(Principal principal, String name) {
-        return database.write(TxnOptions.defaults(), principal, writer ->
-                refresh(writer, find(writer, name).orElseThrow(() -> HStoreException.invalid("unknown view '" + name + "'"))));
+        return database.write(database.transactionOptions(principal), principal, writer ->
+                refresh(writer, find(writer, name).orElseThrow(() -> unknown(name))));
     }
 
     private Descriptor refresh(Writer writer, Descriptor descriptor) {
-        long target = Math.min(database.engine().feed().lastGeneration(), writer.generation());
+        ChangeFeed feed = database.engine().feed();
+        long target = Math.min(feed.lastGeneration(), writer.generation());
         if (target <= descriptor.lastGeneration()) {
             return descriptor;
         }
-        List<CommitEvent> events = database.engine().feed().replay(descriptor.lastGeneration())
+        List<CommitEvent> events = feed.replay(descriptor.lastGeneration())
                 .takeWhile(event -> event.generation() <= target)
                 .filter(event -> event.branch() == Branch.MAIN)
                 .toList();
+        if (!feed.covers(descriptor.lastGeneration())) {
+            return rebuild(writer, descriptor);
+        }
         apply(writer, descriptor, events);
         Descriptor advanced = descriptor.advancedTo(target);
         writer.transaction().put(VIEWS, descriptor.id(), advanced);
         return advanced;
     }
 
+    private Descriptor rebuild(Writer writer, Descriptor descriptor) {
+        clear(writer, descriptor);
+        Descriptor rebuilt = descriptor.advancedTo(writer.generation());
+        build(writer, rebuilt);
+        writer.transaction().put(VIEWS, descriptor.id(), rebuilt);
+        return rebuilt;
+    }
+
     private boolean owns(Writer writer, Descriptor descriptor, long atom) {
         return writer.view().get(VIEW_DATA, cellKey(descriptor.id(), atom)).isPresent() || inTenant(writer, descriptor, atom);
     }
 
-    private static boolean inTenant(Writer writer, Descriptor descriptor, long atom) {
-        return writer.view().atom(atom).map(record -> record.tenant() == descriptor.tenant()).orElse(false);
+    private static boolean inTenant(Reader reader, Descriptor descriptor, long atom) {
+        return reader.view().atom(atom).map(record -> record.tenant() == descriptor.tenant()).orElse(false);
+    }
+
+    private static boolean touches(Reader reader, Descriptor descriptor, MemberChange change) {
+        return inTenant(reader, descriptor, change.member()) || inTenant(reader, descriptor, change.edge());
     }
 
     public Optional<Reading> read(Reader reader, String name, long key) {
         reader.principal().requireAdmin();
-        Descriptor descriptor = find(reader, name).orElseThrow(() -> HStoreException.invalid("unknown view '" + name + "'"));
+        Descriptor descriptor = find(reader, name).orElseThrow(() -> unknown(name));
         return reader.view().get(VIEW_DATA, cellKey(descriptor.id(), key))
-                .map(cell -> new Reading(cell, staleness(descriptor, reader.generation())));
+                .map(cell -> new Reading(cell, staleness(reader, descriptor, reader.generation())));
     }
 
-    public long staleness(Descriptor descriptor, long generation) {
-        return database.engine().feed().replay(descriptor.lastGeneration())
-                .takeWhile(event -> event.generation() <= generation)
-                .filter(event -> event.branch() == Branch.MAIN && !event.members().isEmpty())
+    public long staleness(Reader reader, Descriptor descriptor, long generation) {
+        ChangeFeed feed = database.engine().feed();
+        long through = Math.min(generation, feed.lastGeneration());
+        Lag cached = lags.get(descriptor.id());
+        Lag from = cached != null && cached.descriptor().equals(descriptor) && cached.through() <= through
+                ? cached : new Lag(descriptor, descriptor.lastGeneration(), 0);
+        long count = from.count() + feed.replay(from.through())
+                .takeWhile(event -> event.generation() <= through)
+                .filter(event -> event.branch() == Branch.MAIN
+                        && event.members().stream().anyMatch(change -> touches(reader, descriptor, change)))
                 .count();
+        lags.put(descriptor.id(), new Lag(descriptor, Math.max(from.through(), through), count));
+        return count;
     }
 
     public Stream<Entry<ViewCell>> scan(Reader reader, String name) {
         reader.principal().requireAdmin();
-        Descriptor descriptor = find(reader, name).orElseThrow(() -> HStoreException.invalid("unknown view '" + name + "'"));
-        long low = cellKey(descriptor.id(), 0);
-        long high = cellKey(descriptor.id(), (1L << KEY_BITS) - 1);
-        return reader.view().scan(VIEW_DATA).range(low, high)
-                .map(entry -> new Entry<>(entry.key() & ((1L << KEY_BITS) - 1), entry.value()));
+        Descriptor descriptor = find(reader, name).orElseThrow(() -> unknown(name));
+        return cells(reader, descriptor).map(entry -> new Entry<>(entry.key() & ((1L << KEY_BITS) - 1), entry.value()));
+    }
+
+    private static Stream<Entry<ViewCell>> cells(Reader reader, Descriptor descriptor) {
+        return reader.view().scan(VIEW_DATA).range(cellKey(descriptor.id(), 0), cellKey(descriptor.id(), (1L << KEY_BITS) - 1));
     }
 
     private void build(Writer writer, Descriptor descriptor) {
@@ -178,13 +255,14 @@ public final class MaterializedViews implements AutoCloseable {
                     .filter(entry -> entry.value() instanceof EdgeRecord && entry.value().tenant() == descriptor.tenant())
                     .forEach(entry -> put(writer, descriptor, entry.key(), new ViewCell.Count(((EdgeRecord) entry.value()).cardinality())));
             case ACTIVITY -> apply(writer, descriptor, database.engine().feed().replay(0)
-                    .filter(event -> event.branch() == Branch.MAIN && event.generation() <= descriptor.lastGeneration())
+                    .takeWhile(event -> event.generation() <= descriptor.lastGeneration())
+                    .filter(event -> event.branch() == Branch.MAIN)
                     .toList());
             case OVERLAP_TOP_K -> writer.view().atoms()
                     .filter(entry -> entry.value() instanceof EdgeRecord && entry.value().tenant() == descriptor.tenant())
                     .map(Entry::key)
                     .toList()
-                    .forEach(edge -> put(writer, descriptor, edge, topK(writer, edge, (int) descriptor.parameter())));
+                    .forEach(edge -> put(writer, descriptor, edge, topK(writer, descriptor, edge)));
         }
     }
 
@@ -203,7 +281,7 @@ public final class MaterializedViews implements AutoCloseable {
             case ACTIVITY -> events.forEach(event -> {
                 long bucket = event.wallTime() / Math.max(1, descriptor.parameter());
                 List<MemberChange> changes = event.members().stream()
-                        .filter(change -> inTenant(writer, descriptor, change.member()) || inTenant(writer, descriptor, change.edge()))
+                        .filter(change -> touches(writer, descriptor, change))
                         .toList();
                 long added = changes.stream().filter(change -> change instanceof MemberChange.Added).count();
                 long removed = changes.stream().filter(change -> change instanceof MemberChange.Removed).count();
@@ -217,12 +295,14 @@ public final class MaterializedViews implements AutoCloseable {
                 Set<Long> affected = new HashSet<>();
                 events.forEach(event -> event.members().forEach(change -> {
                     affected.add(change.edge());
-                    writer.view().incident(change.member()).map(IncidentEdge::edge).forEach(affected::add);
+                    if (touches(writer, descriptor, change)) {
+                        writer.view().incident(change.member()).map(IncidentEdge::edge).forEach(affected::add);
+                    }
                 }));
                 affected.forEach(edge -> {
                     if (writer.view().edge(edge).isPresent() && inTenant(writer, descriptor, edge)) {
-                        put(writer, descriptor, edge, topK(writer, edge, (int) descriptor.parameter()));
-                    } else {
+                        put(writer, descriptor, edge, topK(writer, descriptor, edge));
+                    } else if (writer.view().get(VIEW_DATA, cellKey(descriptor.id(), edge)).isPresent()) {
                         writer.transaction().delete(VIEW_DATA, cellKey(descriptor.id(), edge));
                     }
                 });
@@ -260,16 +340,16 @@ public final class MaterializedViews implements AutoCloseable {
         writer.transaction().put(VIEW_DATA, cellKey(descriptor.id(), key), cell);
     }
 
-    private static ViewCell.Ranked topK(Reader reader, long edge, int k) {
+    private static ViewCell.Ranked topK(Reader reader, Descriptor descriptor, long edge) {
         Tree<?> membership = reader.edge(edge).membership();
         Set<Long> candidates = new HashSet<>();
-        reader.edge(edge).stream().map(Incidence::member)
-                .forEach(member -> reader.view().incident(member).map(IncidentEdge::edge).filter(other -> other != edge).forEach(candidates::add));
+        reader.edge(edge).stream().map(Incidence::member).forEach(member -> reader.view().incident(member).map(IncidentEdge::edge)
+                .filter(other -> other != edge && inTenant(reader, descriptor, other)).forEach(candidates::add));
         return new ViewCell.Ranked(candidates.stream()
                 .map(other -> new ViewCell.Neighbor(other, TreeAlgebra.countIntersect(membership, reader.edge(other).membership())))
                 .filter(neighbor -> neighbor.overlap() > 0)
                 .sorted(Comparator.comparingLong(ViewCell.Neighbor::overlap).reversed().thenComparingLong(ViewCell.Neighbor::edge))
-                .limit(k)
+                .limit(descriptor.parameter())
                 .toList());
     }
 
@@ -278,13 +358,20 @@ public final class MaterializedViews implements AutoCloseable {
             return;
         }
         try {
-            List<Descriptor> continuous = database.read(reader -> reader.view().scan(VIEWS).values()
+            database.read(reader -> reader.view().scan(VIEWS).values()
                     .filter(descriptor -> descriptor.refresh() == Refresh.CONTINUOUS)
-                    .toList());
-            continuous.forEach(descriptor -> database.write(TxnOptions.defaults(), Principal.SYSTEM.inTenant(descriptor.tenant()), writer ->
-                    refresh(writer, writer.view().get(VIEWS, descriptor.id()).orElse(descriptor))));
+                    .toList()).forEach(this::refreshContinuous);
         } catch (RuntimeException e) {
-            System.getLogger("hstore.views").log(System.Logger.Level.WARNING, "continuous view refresh failed", e);
+            LOG.log(System.Logger.Level.WARNING, "continuous view refresh failed", e);
+        }
+    }
+
+    private void refreshContinuous(Descriptor descriptor) {
+        try {
+            database.write(TxnOptions.defaults(), Principal.SYSTEM.inTenant(descriptor.tenant()), writer ->
+                    writer.view().get(VIEWS, descriptor.id()).map(current -> refresh(writer, current)));
+        } catch (RuntimeException e) {
+            LOG.log(System.Logger.Level.WARNING, "continuous refresh of view " + descriptor.id() + " failed", e);
         }
     }
 

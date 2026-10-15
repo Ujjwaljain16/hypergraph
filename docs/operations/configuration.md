@@ -75,6 +75,8 @@ max_connections          = 200
 | `max_connections` | `HSTORE_MAX_CONNECTIONS` | `200` | Open wire connections allowed. Connection *n+1* receives `error [ABORTED_RESOURCE_LIMIT]: too many connections` and is closed. Studio sessions are not counted. |
 | `authentication` | `HSTORE_AUTHENTICATION` | `auto` | `auto` requires `AUTHENTICATE` once at least one user exists. `on` always requires it. `off` never requires it, and every connection runs as the built-in `system` ADMIN principal. Applies to the wire protocol and to Studio. |
 | `idle_timeout_seconds` | `HSTORE_IDLE_TIMEOUT_SECONDS` | `0` | Wire connections with no request for this long are closed (the socket read timeout). `0` disables the timeout. |
+| `authentication_timeout_seconds` | `HSTORE_AUTHENTICATION_TIMEOUT_SECONDS` | `30` | Wire connections that still have to authenticate are closed after this long. `0` disables the timeout. |
+| `max_message_mb` | `HSTORE_MAX_MESSAGE_MB` | `64` | Largest request an authenticated client may send. Clients that have not authenticated are limited to 64 KiB. |
 | `tls` | `HSTORE_TLS` | `off` | `on` serves the wire protocol over TLS and Studio over HTTPS, with the same certificate. Startup fails if the certificate or key is missing or unreadable. |
 | `tls_certificate_file` | `HSTORE_TLS_CERTIFICATE_FILE` | *(empty)* | PEM certificate chain the server presents, leaf first. |
 | `tls_key_file` | `HSTORE_TLS_KEY_FILE` | *(empty)* | Unencrypted PKCS#8 PEM private key (`BEGIN PRIVATE KEY`), EC, RSA or Ed25519. Convert other formats with `openssl pkcs8 -topk8 -nocrypt`. |

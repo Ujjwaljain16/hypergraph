@@ -10,7 +10,9 @@ same port; otherwise it is plaintext and belongs on a trusted network.
 
 A *message* is any UTF-8 text. It is transmitted as its lines, each terminated by `\n`, followed by a line
 containing exactly one dot. A line of the message that begins with `.` is sent with one extra leading `.`
-(dot-stuffing, as in SMTP's DATA section).
+(dot-stuffing, as in SMTP's DATA section). Only `\n` ends a line: a `\r` inside a line stays part of it, and a
+terminator may be sent as `.\r\n`. The server breaks its responses at `\r` as well as `\n`, so a client that
+treats a bare `\r` as a line end still sees every line dot-stuffed.
 
 ```
 encode(message):
@@ -21,8 +23,8 @@ encode(message):
 
 decode(stream):
     lines = []
-    for line in stream.lines():                 # "\n" or "\r\n"
-        if line == ".": return join(lines, "\n")
+    for line in stream.split("\n"):            # a "\r" stays in the line
+        if line == "." or line == ".\r": return join(lines, "\n")
         if line starts with "..": line = line[1:]
         lines.append(line)
     return EOF                                  # peer closed
@@ -99,10 +101,28 @@ server logs a WARNING and closes the connection without replying further. Client
 again. `AUTHENTICATION_FAILED` and `AUTHENTICATION_REQUIRED` occur only in this handshake. They are protocol
 codes, not `HStoreException` codes.
 
-Passwords are verified with PBKDF2-HMAC-SHA256 (120,000 iterations), so each attempt costs roughly 200 ms of
-server CPU. Together with the five-attempt limit, this bounds online guessing to about five guesses per
-connection. Every failure is logged as a WARNING with the peer address; see
-[logging](logging.md#connections-log_connections--on).
+The server checks before every request whether the connection still needs to authenticate. With `auto`, a
+connection opened before the first user existed runs as `Principal.SYSTEM` only until a user is created; its next
+request gets `AUTHENTICATION_REQUIRED`. An authenticated session may send `AUTHENTICATE` again to switch users,
+outside a transaction only. That clears its variables and returns it to main. A session that fails 5 such attempts
+refuses further `AUTHENTICATE` statements.
+
+Passwords are verified with PBKDF2-HMAC-SHA256 (600,000 iterations for passwords set since the count was raised).
+Every sign-in path shares one throttle: after 10 failures for a user name, or 20 from one address, within 15
+minutes, further attempts get `error [ABORTED_RESOURCE_LIMIT]: too many failed sign-in attempts; try again in N
+seconds` without the password being checked. Reconnecting does not reset it. Every failure is logged as a WARNING
+with the peer address; see [logging](logging.md#connections-log_connections--on).
+
+Until it authenticates, a connection may send at most 64 KiB per request and must authenticate within
+`authentication_timeout_seconds` (default 30), or it is closed. At most 16 connections from one address may be waiting to authenticate at
+once; the next gets `error [ABORTED_RESOURCE_LIMIT]: too many unauthenticated connections from this address`. After that, requests may be up to
+`max_message_mb` (default 64). A request over the limit gets `error [ABORTED_RESOURCE_LIMIT]: message exceeds N
+bytes` and the connection is closed. A connection whose first request starts like an HTTP request line is closed
+without a reply, so a web page cannot use a browser to post HQL to the port.
+
+If a user is dropped or its password changes, the next statement on each of its open connections fails with
+`user NAME was dropped or its password changed; authenticate again`, and so does every statement after it until the
+connection sends a successful `AUTHENTICATE`.
 
 Without `tls = on` the password travels in clear text. With TLS the server completes the handshake before it
 sends the banner, and gives the client 10 seconds to do so. A client that fails or stalls the handshake (for
@@ -125,14 +145,14 @@ Error lines have the form
 ```
 error [<CODE>]: <message>
 error [<CODE>, retryable]: <message>
-error: <exception>                      (unexpected server fault; logged at ERROR)
+error [INTERNAL]: the statement failed; the server log has the details   (unexpected fault, logged at ERROR)
 ```
 
 | Code | Retryable | Raised for |
 |---|---|---|
 | `RETRYABLE_CONFLICT` | yes | Optimistic concurrency conflict at commit (a write-write conflict that cannot be rebased, or a SERIALIZABLE read-set violation). Re-run the transaction. |
 | `RETRYABLE_IO` | yes | Transient I/O failure, for example the embedding service being unreachable. |
-| `ABORTED_RESOURCE_LIMIT` | no | Query or transaction page budget, tenant quota, or `max_connections`. |
+| `ABORTED_RESOURCE_LIMIT` | no | Query or transaction page budget, tenant quota, `max_connections`, request size, or the sign-in throttle. |
 | `INVALID_SCHEMA` | no | Syntax errors, unknown types or properties, constraint violations, authorisation failures. |
 | `CORRUPT_PAGE` | no | A page failed checksum or structural verification. Run `hstore check`. |
 | `CORRUPT_LOG` | no | A write-ahead log segment that is not the last one is damaged. Raised at open, so it is normally seen by `hstore` commands rather than clients. |

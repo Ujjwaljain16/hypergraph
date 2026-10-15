@@ -10,7 +10,6 @@ import io.hstore.db.property.PropertySlots;
 import io.hstore.db.schema.Schema;
 import io.hstore.db.schema.TypeDef;
 import io.hstore.db.security.Principal;
-import io.hstore.db.security.Security;
 import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.value.Json;
 import io.hstore.db.value.TypeTag;
@@ -18,6 +17,7 @@ import io.hstore.db.value.Value;
 import io.hstore.db.value.Values;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.AtomRecord;
+import io.hstore.engine.catalog.EngineSlots;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Hyperedge;
 import io.hstore.engine.topology.Incidence;
@@ -63,7 +63,7 @@ public sealed class Reader permits Writer {
         Boolean known = onlyDefaultTenant;
         if (known == null) {
             known = tenant() == Principal.DEFAULT_TENANT
-                    && view.scan(Security.TENANTS).last().map(entry -> entry.key() == Principal.DEFAULT_TENANT).orElse(true);
+                    && view.scan(EngineSlots.TYPES).last().map(entry -> entry.key() >>> 32 == Principal.DEFAULT_TENANT).orElse(true);
             onlyDefaultTenant = known;
         }
         return known;
@@ -71,6 +71,10 @@ public sealed class Reader permits Writer {
 
     public boolean visible(long atom) {
         return view.atom(atom).map(record -> record.tenant() == tenant()).orElse(false);
+    }
+
+    public boolean owns(long atom) {
+        return onlyDefaultTenant() || visible(atom);
     }
 
     public View view() {
@@ -131,10 +135,18 @@ public sealed class Reader permits Writer {
         return view.countOfType(tenant(), typeId);
     }
 
+    public long population(boolean edges) {
+        return schema().types(view).stream()
+                .filter(type -> type.kind().isEdge() == edges)
+                .mapToLong(type -> countOfType(type.id()))
+                .sum();
+    }
+
     public Stream<Atom> allAtoms(boolean edges) {
-        return view.atoms()
-                .filter(entry -> entry.value().tenant() == tenant() && edges == (entry.value() instanceof AtomRecord.EdgeRecord))
-                .map(entry -> new Atom(entry.key(), schema().require(view, entry.value().type()), entry.value()));
+        return schema().types(view).stream()
+                .filter(type -> type.kind().isEdge() == edges)
+                .flatMap(type -> atomsOfType(type.id()).mapToObj(id -> view.atom(id).map(record -> new Atom(id, type, record))))
+                .flatMap(Optional::stream);
     }
 
     public Optional<Value> property(long atom, String name) {
@@ -191,7 +203,10 @@ public sealed class Reader permits Writer {
     }
 
     public long degree(long atom) {
-        return visible(atom) ? view.degree(atom) : 0;
+        if (!visible(atom)) {
+            return 0;
+        }
+        return onlyDefaultTenant() ? view.degree(atom) : view.incident(atom).filter(incident -> visible(incident.edge())).count();
     }
 
     public Stream<Member> members(long edge) {
@@ -234,7 +249,8 @@ public sealed class Reader permits Writer {
         if (!onlyDefaultTenant() && !visible(atom)) {
             return Stream.empty();
         }
-        return view.incident(atom).map(incident -> new Incident(incident.edge(), roles(incident.roleSet()), incident.locator()));
+        return view.incident(atom).filter(incident -> owns(incident.edge()))
+                .map(incident -> new Incident(incident.edge(), roles(incident.roleSet()), incident.locator()));
     }
 
     public void forEachIncidentEdge(long atom, LongConsumer action) {
@@ -295,7 +311,8 @@ public sealed class Reader permits Writer {
 
     public List<SemanticPlane.Hit> similar(String model, float[] vector, int k, SemanticPlane.Consistency consistency) {
         SemanticPlane semantic = database.semantic();
-        return semantic.nearest(view, semantic.model(model), vector, k, consistency, this::visible);
+        OptionalInt id = semantic.existingModel(model);
+        return id.isEmpty() ? List.of() : semantic.nearest(view, id.getAsInt(), vector, k, consistency, this::visible);
     }
 
     public Optional<float[]> embedding(long atom) {

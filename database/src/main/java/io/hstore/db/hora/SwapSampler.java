@@ -5,6 +5,7 @@ package io.hstore.db.hora;
 
 import io.hstore.db.HypergraphDatabase;
 import io.hstore.db.Writer;
+import io.hstore.db.security.Principal;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.topology.EdgeKind;
 import io.hstore.engine.topology.Hyperedge;
@@ -27,8 +28,13 @@ public final class SwapSampler {
     }
 
     public static Sample run(HypergraphDatabase database, String edgeType, int swaps, long seed, String branchName) {
+        return run(database, Principal.SYSTEM, edgeType, swaps, seed, branchName);
+    }
+
+    public static Sample run(HypergraphDatabase database, Principal principal, String edgeType, int swaps, long seed, String branchName) {
+        principal.requireGlobal();
         Branch branch = database.engine().createBranch(branchName, Branch.MAIN);
-        Tally tally = database.write(TxnOptions.defaults().onBranch(branch.id()), writer -> swap(writer, edgeType, swaps, seed));
+        Tally tally = database.write(TxnOptions.defaults().onBranch(branch.id()), principal, writer -> swap(writer, edgeType, swaps, seed));
         return new Sample(branch, seed, tally.accepted(), tally.rejected());
     }
 

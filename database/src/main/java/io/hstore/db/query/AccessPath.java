@@ -62,6 +62,9 @@ public sealed interface AccessPath {
         }
 
         public LongStream scan(Reader reader) {
+            if (!atoms.stream().allMatch(reader::visible)) {
+                return LongStream.empty();
+            }
             List<Tree<?>> postings = atoms.stream().<Tree<?>>map(atom -> reader.view().incidentTree(atom)).toList();
             return TreeAlgebra.intersectKeys(postings);
         }
@@ -77,7 +80,9 @@ public sealed interface AccessPath {
         }
 
         public LongStream scan(Reader reader) {
-            return reader.view().edge(edge).map(found -> found.membership().keys()).orElseGet(LongStream::empty);
+            return reader.visible(edge)
+                    ? reader.view().edge(edge).map(found -> found.membership().keys()).orElseGet(LongStream::empty)
+                    : LongStream.empty();
         }
     }
 

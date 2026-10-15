@@ -16,8 +16,24 @@ import java.time.format.DateTimeParseException;
 public final class Values {
 
     private static final BigDecimal BEYOND_DOUBLES = new BigDecimal("1e400");
+    private static final int MAX_NUMBER_CHARS = 400;
+    private static final int MAX_DECIMAL_SCALE = 1000;
 
     private Values() {
+    }
+
+    public static BigDecimal number(String text) {
+        if (text.length() > MAX_NUMBER_CHARS) {
+            throw HStoreException.invalid("number literal longer than " + MAX_NUMBER_CHARS + " characters");
+        }
+        return bounded(new BigDecimal(text));
+    }
+
+    static BigDecimal bounded(BigDecimal value) {
+        if (value.signum() != 0 && Math.abs((long) value.scale()) > MAX_DECIMAL_SCALE) {
+            throw HStoreException.invalid("decimal exponent beyond " + MAX_DECIMAL_SCALE);
+        }
+        return value;
     }
 
     static BigDecimal decimal(double value) {
@@ -129,7 +145,7 @@ public final class Values {
                 case DECIMAL -> new Value.Decimal(switch (value) {
                     case Value.Int(long v) -> BigDecimal.valueOf(v);
                     case Value.Real(double v) -> BigDecimal.valueOf(v);
-                    case Value.Text(String v) -> new BigDecimal(v.trim());
+                    case Value.Text(String v) -> number(v.trim());
                     default -> throw mismatch(value, target);
                 });
                 case TIMESTAMP -> new Value.Time(switch (value) {

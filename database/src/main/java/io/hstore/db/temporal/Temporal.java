@@ -49,6 +49,7 @@ public final class Temporal {
             return LongStream.empty();
         }
         return reader.view().incident(atom)
+                .filter(incident -> reader.owns(incident.edge()))
                 .filter(incident -> reader.view().incidence(incident.edge(), atom).map(found -> found.validAt(instant)).orElse(false))
                 .mapToLong(IncidentEdge::edge);
     }
@@ -69,12 +70,12 @@ public final class Temporal {
             return Stream.empty();
         }
         Hyperedge empty = Hyperedge.empty(atom, edge.kind(), reader.view().source());
-        return changes(empty, reader.edge(atom), atom);
+        return changes(empty, reader.view().edge(atom, edge), atom);
     }
 
     private static Stream<Delta> changedMembers(Reader before, Reader after, long atom, AtomRecord was, AtomRecord now) {
-        if (was instanceof EdgeRecord && now instanceof EdgeRecord) {
-            return changes(before.edge(atom), after.edge(atom), atom);
+        if (was instanceof EdgeRecord from && now instanceof EdgeRecord to) {
+            return changes(before.view().edge(atom, from), after.view().edge(atom, to), atom);
         }
         return Stream.empty();
     }

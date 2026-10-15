@@ -193,7 +193,7 @@ stateDiagram-v2
 | Consumer | Subscribes from | What it does with events |
 |---|---|---|
 | `SemanticPlane` (`database/.../semantic/SemanticPlane.java`) | the generation of its persisted vector index if `covers(persisted)` is true, otherwise it rebuilds from a snapshot and subscribes from that snapshot's generation | For `main`-branch events, upserts or removes HNSW entries for every `Embedding.EMBEDDINGS` slot change, compacts an index whose tombstone ratio exceeds 0.3, and advances `indexedGeneration` for every event. `FRESH` similarity queries wait (bounded by 5 s) for `indexedGeneration >= min(snapshot generation, feed.lastGeneration())`; because the feed is appended before `current` advances, and empty commits have no feed entry, this target is always reached promptly. Holds the feed at its persisted generation. |
-| `MaterializedViews` (`database/.../view/MaterializedViews.java`) | `current` at database open | For `main`-branch events with member changes, refreshes every `CONTINUOUS` view. `refresh` itself uses `replay(descriptor.lastGeneration())` up to `lastGeneration()` and applies degree or cardinality deltas; `staleness` counts pending events; `ACTIVITY` views are built from `replay(0)`, i.e. from the oldest **retained** event. Refresh commits only write view slots (slot changes, no member changes), so they do not retrigger the subscriber. Holds the feed at the minimum `lastGeneration` over all view descriptors. |
+| `MaterializedViews` (`database/.../view/MaterializedViews.java`) | `current` at database open | For `main`-branch events with member changes, refreshes every `CONTINUOUS` view. `refresh` itself uses `replay(descriptor.lastGeneration())` up to `lastGeneration()` and applies degree or cardinality deltas; `staleness` counts pending events that touch the view's tenant; `ACTIVITY` views are built from `replay(0)`, i.e. from the oldest **retained** event. Refresh commits only write view slots (slot changes, no member changes), so they do not retrigger the subscriber. Holds the feed at the minimum `lastGeneration` over the continuous views; an on-demand view whose events were released is rebuilt on its next refresh (`covers`). |
 | `Statistics` (`database/.../stats/Statistics.java`) | `current` at database open | Counts member and slot changes and recomputes the planner's cardinality/degree histograms once they exceed 10,000 or a tenth of the store's atoms and memberships at the last refresh, whichever is larger. |
 | `HISTORY` statement (`database/.../query/Executor.java`) | n/a (one-shot `replay`) | Lists the last N events: generation, transaction, time, branch, number of member and slot changes. Only retained events can be listed. |
 
@@ -209,7 +209,7 @@ The feed is trimmed only at the front and only in whole segments, under two kind
 | Holder | Supplied generation |
 |---|---|
 | `SemanticPlane` | `persistedGeneration` (the generation of the last persisted vector index), or `Long.MAX_VALUE` before the first persist. The plane persists in a checkpoint listener, which runs before `retain`, so the hold advances with every checkpoint. |
-| `MaterializedViews` | `min(descriptor.lastGeneration)` over all views (read in a fresh snapshot), or `Long.MAX_VALUE` when there are none. |
+| `MaterializedViews` | `min(descriptor.lastGeneration)` over the `CONTINUOUS` views (read in a fresh snapshot), or `Long.MAX_VALUE` when there are none. On-demand views do not hold the feed. |
 
 `retain(keepAfter)`:
 
@@ -234,11 +234,11 @@ flowchart LR
     end
     W["window: current 1300 - feedRetention 1000 = 300"] --> F
     H1["hold: SemanticPlane persisted 950"] --> F
-    H2["hold: MaterializedViews min view 620"] --> F
+    H2["hold: MaterializedViews min continuous view 620"] --> F
     F{"floor = min(300, 950, 620) = 300"}
     F -->|"S1 starts at 401 > 301: stop"| S0
 ```
 
-In the example nothing is released because `S1.firstGeneration = 401 > floor + 1 = 301`. Had the window been 500 (`keepAfter = 800`) the floor would be `min(800, 950, 620) = 620`: `S0` is deleted (`S1` starts at 401 `<= 621`), `S1` is kept because `S2` starts at 801 `> 621`; the materialized view at generation 620 still needs events 621 .. 800 from `S1`.
+In the example nothing is released because `S1.firstGeneration = 401 > floor + 1 = 301`. Had the window been 500 (`keepAfter = 800`) the floor would be `min(800, 950, 620) = 620`: `S0` is deleted (`S1` starts at 401 `<= 621`), `S1` is kept because `S2` starts at 801 `> 621`; the continuous view at generation 620 still needs events 621 .. 800 from `S1`.
 
 `covers(after)` is the consumer-side check. `SemanticPlane.load` refuses a persisted index whose generation the feed no longer covers (for example after the plane was disabled for a long time, so its hold was not registered while retention ran) and rebuilds from the embeddings slot instead of silently missing updates.

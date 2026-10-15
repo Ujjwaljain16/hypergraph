@@ -152,7 +152,7 @@ public final class PatternMatcher {
     private Set<Long> neighbourEdges(long edge) {
         Set<Long> edges = new HashSet<>();
         reader.edge(edge).stream().forEach(incidence ->
-                reader.view().incident(incidence.member()).map(IncidentEdge::edge).forEach(edges::add));
+                reader.view().incident(incidence.member()).map(IncidentEdge::edge).filter(reader::owns).forEach(edges::add));
         return edges;
     }
 

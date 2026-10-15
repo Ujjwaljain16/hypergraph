@@ -3,9 +3,9 @@
 
 package io.hstore.server;
 
-import java.io.BufferedReader;
+import java.io.BufferedInputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.io.OutputStreamWriter;
 import java.io.UncheckedIOException;
 import java.io.Writer;
@@ -25,7 +25,7 @@ final class RemoteEndpoint implements Endpoint {
     private static final int TIMEOUT_MILLIS = 10_000;
 
     private final Socket socket;
-    private final BufferedReader in;
+    private final InputStream in;
     private final Writer out;
     private String banner;
 
@@ -39,9 +39,9 @@ final class RemoteEndpoint implements Endpoint {
                     ? tls.get().connect(address.getHostString(), address.getPort(), TIMEOUT_MILLIS)
                     : plain(address);
             socket.setSoTimeout(TIMEOUT_MILLIS);
-            this.in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+            this.in = new BufferedInputStream(socket.getInputStream());
             this.out = new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8);
-            this.banner = WireProtocol.receive(in).orElseThrow(() -> new IOException("server closed the connection"));
+            this.banner = WireProtocol.receive(in, Long.MAX_VALUE).orElseThrow(() -> new IOException("server closed the connection"));
             socket.setSoTimeout(0);
         } catch (IOException e) {
             throw new UncheckedIOException("cannot connect to " + address, e);
@@ -70,7 +70,7 @@ final class RemoteEndpoint implements Endpoint {
     public String execute(String script) {
         try {
             WireProtocol.send(out, script);
-            return WireProtocol.receive(in).orElse("error: server closed the connection");
+            return WireProtocol.receive(in, Long.MAX_VALUE).orElse("error: server closed the connection");
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

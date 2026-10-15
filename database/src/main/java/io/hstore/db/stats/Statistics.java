@@ -3,6 +3,9 @@
 
 package io.hstore.db.stats;
 
+import io.hstore.db.Atom;
+import io.hstore.db.Reader;
+import io.hstore.db.security.Principal;
 import io.hstore.engine.StorageEngine;
 import io.hstore.engine.catalog.AtomRecord.EdgeRecord;
 import io.hstore.engine.catalog.AtomRecord;
@@ -13,7 +16,6 @@ import io.hstore.engine.index.Postings;
 import io.hstore.engine.tree.Tree;
 import io.hstore.engine.tree.TreeAlgebra;
 import io.hstore.engine.txn.Snapshot;
-import io.hstore.engine.txn.View;
 
 import java.util.Arrays;
 import java.util.Map;
@@ -109,30 +111,34 @@ public final class Statistics implements AutoCloseable {
         return subscription.acknowledged();
     }
 
-    public static long degree(View view, long atom) {
-        return view.degree(atom);
+    public static long degree(Reader reader, long atom) {
+        return reader.degree(atom);
     }
 
-    public static long cardinality(View view, long edge) {
-        return view.cardinality(edge);
+    public static long cardinality(Reader reader, long edge) {
+        return reader.cardinality(edge);
     }
 
-    public static double weight(View view, long edge) {
-        return view.edge(edge).map(found -> found.summary().weightSum() / 1e9).orElse(0.0);
+    public static double weight(Reader reader, long edge) {
+        return reader.atom(edge).filter(Atom::isEdge).map(_ -> reader.edge(edge).summary().weightSum() / 1e9).orElse(0.0);
     }
 
-    public static long overlap(View view, long left, long right) {
-        return TreeAlgebra.countIntersect(view.requireEdge(left).membership(), view.requireEdge(right).membership());
+    public static long overlap(Reader reader, long left, long right) {
+        return TreeAlgebra.countIntersect(reader.edge(left).membership(), reader.edge(right).membership());
     }
 
-    public void observe(String accessPath, double estimated, long actual) {
+    public void observe(int tenant, String accessPath, double estimated, long actual) {
         double sample = (actual + 1.0) / (Math.max(estimated, 0) + 1.0);
-        feedback.merge(accessPath, new Feedback(sample, 1), (existing, _) -> existing.absorb(sample));
+        feedback.merge(feedbackKey(tenant, accessPath), new Feedback(sample, 1), (existing, _) -> existing.absorb(sample));
     }
 
-    public double correction(String accessPath) {
-        Feedback recorded = feedback.get(accessPath);
+    public double correction(int tenant, String accessPath) {
+        Feedback recorded = feedback.get(feedbackKey(tenant, accessPath));
         return recorded == null ? 1.0 : recorded.ratio();
+    }
+
+    private static String feedbackKey(int tenant, String accessPath) {
+        return tenant == Principal.DEFAULT_TENANT ? accessPath : accessPath + " (tenant " + tenant + ")";
     }
 
     public Map<String, Double> corrections() {

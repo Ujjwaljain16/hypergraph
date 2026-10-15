@@ -67,6 +67,11 @@ interval   = "[" (instant | "*") "," (instant | "*") ")" ;   (* half-open; * = u
 properties = "{" [ (identifier | string) ":" literal { "," … } ] "}" ;
 ```
 
+A number literal may have at most 400 characters, and a decimal's exponent must stay within ±1000; the same
+limits apply to numbers inside JSON documents and to text converted to `DECIMAL`. Expressions may nest
+parentheses and `NOT` up to 256 levels, and JSON documents may nest up to 256 levels. Larger inputs fail with
+`INVALID_SCHEMA` instead of using up the server's memory or stack.
+
 Values and their storage are described in [data model](data-model.md#values).
 
 ## Statement index
@@ -80,13 +85,17 @@ Values and their storage are described in [data model](data-model.md#values).
 | [Semantic](#semantic) | `EMBED … TEXT`, `EMBED … VECTOR`, `SIMILAR TO` |
 | [Evidence and state](#evidence-state-and-signals) | `EVIDENCE`, `QUALIFY`, `TRACE`, `STATE`, `SIGNAL`, `SIGNALS FOR` |
 | [Transactions, branches, time](#transactions-branches-and-time-travel) | `BEGIN`, `COMMIT`, `ROLLBACK`, `USE BRANCH`, `USE MAIN`, `CREATE BRANCH`, `DROP BRANCH`, `MERGE BRANCH`, `DIFF`, `AT GENERATION`, `AS OF`, `HISTORY`, `SHOW BRANCHES` |
-| [Views](#materialized-views) | `CREATE VIEW`, `REFRESH VIEW`, `VIEW`, `SHOW VIEWS` |
+| [Views](#materialized-views) | `CREATE VIEW`, `REFRESH VIEW`, `DROP VIEW`, `VIEW`, `SHOW VIEWS` |
 | [Tenancy](#tenancy-and-users) | `CREATE TENANT`, `ALTER TENANT`, `SHOW TENANTS`, `CREATE USER`, `ALTER USER`, `DROP USER`, `SHOW USERS`, `USE TENANT`, `AUTHENTICATE` |
 | [Session](#session-and-output) | `WHOAMI`, `FORMAT` |
 | [Maintenance](#maintenance) | `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT`, `STATS` |
 
-Statements marked **ADMIN** are rejected for non-admin principals before execution
-(`Executor.administrative`). Write statements additionally require the WRITER role (`Principal.requireWrite`).
+Statements marked **ADMIN** are rejected for non-admin principals before execution. Users, tenants listings and
+views (`CREATE/ALTER/DROP USER`, `SHOW USERS`, `SHOW TENANTS`, `CREATE/REFRESH VIEW`, `VIEW`) accept an admin of
+any tenant, limited to that tenant (`Executor.administrative`). Every other ADMIN statement changes or reveals the
+whole engine and needs an admin of the default tenant (`Executor.engineWide`), as do `USE BRANCH` and
+`SHOW BRANCHES`. See [security](security.md#principals-and-roles). Write statements additionally require the
+WRITER role (`Principal.requireWrite`).
 Results are tables (`QueryResult.table`) or messages (`QueryResult.message`); `MATCH` results carry a trace line.
 
 ## Schema DDL
@@ -277,7 +286,7 @@ Predicate semantics (`Evaluator.test`):
 | `e CONTAINS (r1, …, rn)` | `e` is a hyperedge containing every `ri` |
 | `e HAS r [AS role]` | `r` is a member of `e` (with `role` in its role set) |
 | `x IN r` | `x` is a member of hyperedge `r` |
-| `x SIMILAR TO 'text' TOP k` | `x` is among the global top-`k` neighbours of the text embedding |
+| `x SIMILAR TO 'text' TOP k` | `x` is among the global top-`k` neighbours of the text embedding (`k` from 1 to 1000, default 10) |
 | `x VALID AT t` | edge: some member valid at `t`; node: some membership valid at `t` |
 | comparisons | `Value.compareTo`; any comparison with `NULL` is false except `a != NULL` with non-null `a` |
 
@@ -442,7 +451,7 @@ propagate = "PROPAGATE" field "OVER" "EDGES" identifier [ "WEIGHTED" ] ;
 neighbors = "NEIGHBORS" "OF" ref [ "THRESHOLD" integer ] [ "LIMIT" integer ] ;
 overlap   = "OVERLAP" "JOIN" identifier "THRESHOLD" integer [ "LIMIT" integer ] ;
 closure   = "CLOSURE" ref "DIM" integer [ "LIMIT" integer ] ;
-expand    = "EXPAND" ref [ "DEPTH" integer ] [ "LIMIT" integer ] ;     (* DEPTH default 4 *)
+expand    = "EXPAND" ref [ "DEPTH" integer ] [ "LIMIT" integer ] ;     (* DEPTH 1-64, default 4 *)
 pattern   = "PATTERN" "(" pvar { "," pvar } ")" [ "WHERE" pcons { "AND" pcons } ] [ "LIMIT" integer ] ;
 pvar      = identifier ":" ( "EDGE" | "NODE" ) [ identifier ] ;
 pcons     = "CARD" "(" identifier ")" bounds
@@ -468,6 +477,9 @@ sample    = "SAMPLE" integer "SWAPS" "ON" identifier [ "SEED" integer ] "INTO" "
 | `EXPAND` | `path, atom, status` |
 | `PATTERN` | one column per pattern variable |
 | `SAMPLE` | message `branch <b> holds <a> accepted and <r> rejected swaps (seed <s>)` |
+
+These statements run under the HORA budget: at most 1,000,000 rows and 30 seconds. `LIMIT` can lower the row
+budget but not raise it. Every read statement also counts page visits against the tenant's `query_pages` quota.
 
 ```sql
 GATHER age FROM @103;
@@ -517,7 +529,7 @@ evidence = "EVIDENCE" string [ "SOURCE" ref ] [ "ATTRIBUTES" properties ] [ "AS"
 qualify  = "QUALIFY" ref "IN" ref "AS" assertion_type [ "CONFIDENCE" number ]
            [ "EVIDENCE" "(" ref { "," ref } ")" ] [ "AS" variable ] ;
 assertion_type = "OBSERVED" | "INFERRED" | "HYPOTHESIZED" | "PROJECTED" | "SIMULATED" | "REJECTED" ;
-trace    = "TRACE" ref [ "DEPTH" integer ] ;                                   (* DEPTH default 8 *)
+trace    = "TRACE" ref [ "DEPTH" integer ] ;                                   (* DEPTH 1-64, default 8 *)
 state    = "STATE" ref "=" literal [ "SCHEMA" ( identifier | string ) ] [ "VALID" interval ] ;
 signal   = "SIGNAL" "ON" ref "CLOCK" ( identifier | string ) "FROM" instant "TO" instant
            [ "RESOLUTION" integer ] [ "SCHEMA" ( identifier | string ) ] ;
@@ -570,7 +582,7 @@ merge_branch  = "MERGE" "BRANCH" identifier [ "INTO" identifier ]
                 [ "ON" "CONFLICT" ( "FAIL" | "SOURCE" | "TARGET" ) ] ;                      (* ADMIN *)
 diff     = "DIFF" ( "GENERATION" integer "AND" integer | "BRANCH" identifier "AND" identifier ) ;   (* ADMIN *)
 history  = "HISTORY" [ "LIMIT" integer ] ;                                                  (* ADMIN *)
-show_branches = "SHOW" "BRANCHES" ;
+show_branches = "SHOW" "BRANCHES" ;                                                         (* ADMIN *)
 ```
 
 Session semantics (`Session`):
@@ -630,12 +642,17 @@ create_view  = "CREATE" "VIEW" identifier "AS"
                ( "DEGREE" | "CARDINALITY" | "ACTIVITY" [ "BUCKET" integer ] | "OVERLAP" "TOP" integer )
                [ "CONTINUOUS" ] ;                                        (* ADMIN; BUCKET default 60000 ms *)
 refresh_view = "REFRESH" "VIEW" identifier ;                              (* ADMIN *)
+drop_view    = "DROP" "VIEW" identifier ;                                 (* ADMIN *)
 view         = "VIEW" identifier [ "KEY" ( ref | integer ) ] [ "LIMIT" integer ] ;   (* ADMIN *)
 show_views   = "SHOW" "VIEWS" ;
 ```
 
 `VIEW v KEY k` columns: `key, value, staleness`; `VIEW v` columns: `key, value`; `SHOW VIEWS` columns:
 `id, name, kind, refresh, parameter, generation`. See [views](views-signals-stats.md#materialized-views).
+
+`OVERLAP TOP k` takes k from 1 to 1000, and `ACTIVITY BUCKET` takes 1 ms up to 366 days; anything else is rejected
+when the view is created. A tenant can hold 32 views at most. `DROP VIEW` removes the view and all of its cells, and
+like the other view statements it only sees views of the session's tenant.
 
 ```sql
 CREATE VIEW provider_degree AS DEGREE CONTINUOUS;
@@ -645,6 +662,7 @@ VIEW provider_degree KEY @Provider:'dr-ada-park';   -- | 25 | 14 | 0 |
 VIEW claim_overlap KEY @103;                         -- | 103 | @50×2, @101×2, @106×2 | 1 |
 REFRESH VIEW claim_overlap;                          -- view claim_overlap refreshed to generation 234
 VIEW activity LIMIT 3;                               -- | 497521 | +299 -2 |
+DROP VIEW activity;                                  -- dropped view activity
 ```
 
 ## Tenancy and users

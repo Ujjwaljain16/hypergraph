@@ -10,7 +10,9 @@ import io.hstore.db.property.PropertySlots;
 import io.hstore.db.schema.Schema;
 import io.hstore.db.schema.SchemaSlots;
 import io.hstore.db.security.Principal;
+import io.hstore.db.security.Quota.Usage;
 import io.hstore.db.security.Security;
+import io.hstore.db.security.SignIns;
 import io.hstore.db.semantic.Embedding;
 import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.signal.Signals;
@@ -46,6 +48,7 @@ public final class HypergraphDatabase implements AutoCloseable {
     private final SemanticPlane semantic;
     private final Statistics statistics;
     private final MaterializedViews views;
+    private final SignIns signIns = new SignIns();
 
     private HypergraphDatabase(Path directory, DatabaseOptions options) {
         this.options = options;
@@ -163,7 +166,18 @@ public final class HypergraphDatabase implements AutoCloseable {
     }
 
     public Optional<Principal> authenticate(String user, String password) {
-        return read(reader -> Security.authenticate(reader.view(), user, password));
+        return authenticate(user, password, Optional.empty());
+    }
+
+    public Optional<Principal> authenticate(String user, String password, Optional<String> origin) {
+        return signIns.attempt(user, origin, () -> read(reader -> Security.authenticate(reader.view(), user, password)));
+    }
+
+    void chargePayload(int tenant, long bytes) {
+        write(TxnOptions.defaults(), Principal.SYSTEM, writer -> {
+            Security.charge(writer.transaction(), tenant, new Usage(0, 0, bytes));
+            return null;
+        });
     }
 
     public boolean requiresAuthentication() {

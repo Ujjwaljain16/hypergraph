@@ -5,6 +5,7 @@ package io.hstore.engine.page;
 
 import io.hstore.engine.HStoreException;
 
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 
@@ -15,6 +16,7 @@ public final class IoTrace {
     private final long pageBudget;
     private final LongAdder pagesRead = new LongAdder();
     private final LongAdder cacheHits = new LongAdder();
+    private final AtomicLong visits = new AtomicLong();
 
     private IoTrace(long pageBudget) {
         this.pageBudget = pageBudget;
@@ -38,7 +40,9 @@ public final class IoTrace {
 
     public static void recordHit() {
         if (CURRENT.isBound()) {
-            CURRENT.get().cacheHits.increment();
+            IoTrace trace = CURRENT.get();
+            trace.cacheHits.increment();
+            trace.visit();
         }
     }
 
@@ -46,9 +50,13 @@ public final class IoTrace {
         if (CURRENT.isBound()) {
             IoTrace trace = CURRENT.get();
             trace.pagesRead.increment();
-            if (trace.pagesRead.sum() + trace.cacheHits.sum() > trace.pageBudget) {
-                throw HStoreException.limit("query exceeded its budget of " + trace.pageBudget + " page visits");
-            }
+            trace.visit();
+        }
+    }
+
+    private void visit() {
+        if (visits.incrementAndGet() > pageBudget) {
+            throw HStoreException.limit("query exceeded its budget of " + pageBudget + " page visits");
         }
     }
 

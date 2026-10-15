@@ -69,6 +69,8 @@ import java.util.stream.Stream;
 
 final class Executor {
 
+    private static final int MAX_DEPTH = 64;
+
     private final Session session;
 
     Executor(Session session) {
@@ -80,7 +82,9 @@ final class Executor {
     }
 
     QueryResult run(Statement statement) {
-        if (administrative(statement)) {
+        if (engineWide(statement)) {
+            session.principal().requireGlobal();
+        } else if (administrative(statement)) {
             session.principal().requireAdmin();
         }
         return switch (statement) {
@@ -105,6 +109,10 @@ final class Executor {
             }
             case Statement.RefreshView(String name) -> QueryResult.message("view " + name + " refreshed to generation "
                     + database().views().refresh(session.principal(), name).lastGeneration());
+            case Statement.DropView(String name) -> {
+                database().views().drop(session.principal(), name);
+                yield QueryResult.message("dropped view " + name);
+            }
             case Statement.ShowView view -> showView(view);
             case Statement.CreateBranch(String name, Optional<String> from) -> {
                 Branch created = database().engine().createBranch(name, from.map(session::branchId).orElse(Branch.MAIN));
@@ -129,26 +137,31 @@ final class Executor {
                 return QueryResult.message("updated quota of tenant " + name);
             });
             case Statement.CreateUser(String name, String password, Optional<String> tenant, var role) -> write(writer -> {
-                int tenantId = tenant.map(found -> Security.requireTenant(writer.view(), found).id()).orElse(Principal.DEFAULT_TENANT);
-                Security.createUser(writer.transaction(), name, password, tenantId, role);
+                Security.createUser(writer.transaction(), name, password, governedTenant(writer, tenant), role);
                 return QueryResult.message("created user " + name + " with role " + role);
             });
             case Statement.AlterUser(String name, String password) -> write(writer -> {
+                governedUser(writer, name);
                 Security.setPassword(writer.transaction(), name, password);
                 return QueryResult.message("changed password of " + name);
             });
             case Statement.DropUser(String name) -> write(writer -> {
+                governedUser(writer, name);
+                if (!session.principal().global() && Security.users(writer.view()).size() <= 1) {
+                    throw HStoreException.invalid("cannot drop the last user: the server would stop asking for credentials");
+                }
                 Security.dropUser(writer.transaction(), name);
                 return QueryResult.message("dropped user " + name);
             });
             case Statement.ShowTenants _ -> read(reader -> table(List.of("id", "name", "atoms", "edges", "payload bytes", "max atoms", "max edges"),
-                    Security.tenants(reader.view()).stream().map(tenant -> {
+                    Security.tenants(reader.view()).stream().filter(tenant -> session.principal().governs(tenant.id())).map(tenant -> {
                         Quota.Usage usage = Security.usage(reader.view(), tenant.id());
                         return List.of(QueryResult.number(tenant.id()), QueryResult.text(tenant.name()), QueryResult.number(usage.atoms()),
                                 QueryResult.number(usage.edges()), QueryResult.number(usage.payloadBytes()),
                                 limit(tenant.quota().maxAtoms()), limit(tenant.quota().maxEdges()));
                     })));
             case Statement.ShowUsers _ -> read(reader -> table(List.of("user", "tenant", "role"), Security.users(reader.view()).stream()
+                    .filter(user -> session.principal().governs(user.tenant()))
                     .map(user -> List.of(QueryResult.text(user.name()), QueryResult.number(user.tenant()), QueryResult.text(user.role().name())))));
             case Statement.DropBranch(String name) -> {
                 database().engine().dropBranch(session.branchId(name));
@@ -231,7 +244,7 @@ final class Executor {
                 evidence.bind().ifPresent(name -> session.bind(name, id));
                 return QueryResult.message("evidence @" + id + " recorded");
             });
-            case Statement.Trace(Ast.Ref assertion, int depth) -> read(reader -> traceProvenance(reader, session.resolve(reader, assertion), depth));
+            case Statement.Trace(Ast.Ref assertion, int depth) -> read(reader -> traceProvenance(reader, session.resolve(reader, assertion), depth(depth)));
             case Statement.RegisterSignal signal -> write(writer -> {
                 long atom = session.resolve(writer, signal.atom());
                 long id = Signals.register(writer, new Signals.Signal(atom, 0, signal.clock(), signal.from(), signal.to(), signal.resolution(), signal.schema()));
@@ -256,7 +269,7 @@ final class Executor {
             case Statement.Describe(Ast.Ref atom) -> read(reader -> describe(reader, session.resolve(reader, atom)));
             case Statement.SetAlgebra algebra -> algebra.into().isPresent() ? write(writer -> setAlgebra(writer, algebra)) : read(reader -> setAlgebra(reader, algebra));
             case Statement.Expand(Ast.Ref atom, int depth, OptionalLong limit) -> read(reader -> table(List.of("path", "atom", "status"),
-                    Hora.on(reader).expand(session.resolve(reader, atom), depth, budget(limit).withDepth(depth))
+                    Hora.on(reader).expand(session.resolve(reader, atom), depth(depth), budget(limit).withDepth(depth(depth)))
                             .map(expansion -> List.<Cell>of(new Cell.Items(expansion.path().stream().map(id -> (Cell) new Cell.AtomCell(id, "")).toList()),
                                     atomCell(reader, expansion.atom()), QueryResult.text(expansion.status().name())))));
             case Statement.Gather(Field field, Ast.Ref edge) -> read(reader -> table(List.of("member", "value", "weight", "roles"),
@@ -289,7 +302,7 @@ final class Executor {
                             .map(subset -> List.<Cell>of(new Cell.Items(LongStream.of(subset).mapToObj(id -> (Cell) new Cell.AtomCell(id, "")).toList()))), limit)));
             case Statement.PatternQuery pattern -> read(reader -> pattern(reader, pattern));
             case Statement.Sample sample -> {
-                SwapSampler.Sample result = SwapSampler.run(database(), sample.edgeType(), sample.swaps(), sample.seed(), sample.branch());
+                SwapSampler.Sample result = SwapSampler.run(database(), session.principal(), sample.edgeType(), sample.swaps(), sample.seed(), sample.branch());
                 yield QueryResult.message("branch " + result.branch().name() + " holds " + result.accepted() + " accepted and "
                         + result.rejected() + " rejected swaps (seed " + result.seed() + ")");
             }
@@ -328,16 +341,40 @@ final class Executor {
         };
     }
 
-    private static boolean administrative(Statement statement) {
+    private static boolean engineWide(Statement statement) {
         return switch (statement) {
-            case Statement.CreateBranch _, Statement.DropBranch _, Statement.MergeBranch _, Statement.Sample _,
+            case Statement.CreateBranch _, Statement.DropBranch _, Statement.MergeBranch _, Statement.ShowBranches _, Statement.Sample _,
                  Statement.DiffGenerations _, Statement.DiffBranches _, Statement.History _, Statement.Stats _,
                  Statement.Checkpoint _, Statement.CheckpointAt _, Statement.Compact _, Statement.CreateTenant _, Statement.AlterTenant _,
-                 Statement.CreateUser _, Statement.AlterUser _, Statement.DropUser _, Statement.ShowTenants _, Statement.ShowUsers _,
-                 Statement.CreateView _, Statement.RefreshView _, Statement.ShowView _, Statement.CreateType _,
-                 Statement.CreateIndex _, Statement.CreateJsonIndex _ -> true;
+                 Statement.CreateType _, Statement.CreateIndex _, Statement.CreateJsonIndex _ -> true;
             default -> false;
         };
+    }
+
+    private static boolean administrative(Statement statement) {
+        return switch (statement) {
+            case Statement.CreateUser _, Statement.AlterUser _, Statement.DropUser _, Statement.ShowTenants _, Statement.ShowUsers _,
+                 Statement.CreateView _, Statement.RefreshView _, Statement.DropView _, Statement.ShowView _ -> true;
+            default -> false;
+        };
+    }
+
+    private int governedTenant(Reader reader, Optional<String> name) {
+        Principal principal = session.principal();
+        if (name.isEmpty()) {
+            return principal.tenant();
+        }
+        Optional<Security.Tenant> found = Security.tenant(reader.view(), name.get());
+        if (principal.global()) {
+            return found.orElseThrow(() -> HStoreException.invalid("unknown tenant '" + name.get() + "'")).id();
+        }
+        return found.filter(tenant -> tenant.id() == principal.home())
+                .orElseThrow(() -> HStoreException.invalid("user " + principal.user() + " may only manage users of its own tenant")).id();
+    }
+
+    private void governedUser(Reader reader, String name) {
+        Security.user(reader.view(), name).filter(user -> session.principal().governs(user.tenant()))
+                .orElseThrow(() -> HStoreException.invalid("unknown user '" + name + "'"));
     }
 
     private static String describe(CheckpointThreshold threshold) {
@@ -353,7 +390,7 @@ final class Executor {
     }
 
     private QueryResult read(Function<Reader, QueryResult> work) {
-        return session.read(work);
+        return IoTrace.withBudget(database().queryPageBudget(session.principal())).call(() -> session.read(work));
     }
 
     private QueryResult write(Function<Writer, QueryResult> work) {
@@ -402,8 +439,8 @@ final class Executor {
         AtomicLong produced = new AtomicLong();
         List<Map<String, Long>> bindings = trace.call(() -> {
             Stream<Map<String, Long>> rows = plan.chosen().path().scan(reader)
-                    .peek(_ -> produced.incrementAndGet())
                     .filter(atom -> admits(reader, plan, atom))
+                    .peek(_ -> produced.incrementAndGet())
                     .mapToObj(atom -> Map.of(match.variable(), atom))
                     .filter(binding -> plan.residual().stream().allMatch(filter -> evaluator.test(filter, binding)));
             if (match.orderBy().isPresent()) {
@@ -416,7 +453,7 @@ final class Executor {
             }
             return rows.toList();
         });
-        database().statistics().observe(plan.chosen().path().kind(), plan.chosen().rows(), produced.get());
+        database().statistics().observe(reader.tenant(), plan.chosen().path().kind(), plan.chosen().rows(), produced.get());
         boolean aggregate = match.projections().stream().anyMatch(projection -> Evaluator.isAggregate(projection.expr()));
         List<List<Cell>> rows = aggregate
                 ? List.of(match.projections().stream().map(projection -> Evaluator.isAggregate(projection.expr())
@@ -653,8 +690,15 @@ final class Executor {
         return QueryResult.table(List.of(column), List.of(List.of(QueryResult.scalar(value))));
     }
 
+    private static int depth(int depth) {
+        if (depth < 1 || depth > MAX_DEPTH) {
+            throw HStoreException.invalid("DEPTH must be between 1 and " + MAX_DEPTH);
+        }
+        return depth;
+    }
+
     private static Budget budget(OptionalLong limit) {
-        return limit.isPresent() ? Budget.DEFAULT.withRows(limit.getAsLong()) : Budget.DEFAULT;
+        return limit.isPresent() ? Budget.DEFAULT.withRows(Math.min(limit.getAsLong(), Budget.DEFAULT.maxRows())) : Budget.DEFAULT;
     }
 
     private static <T> Stream<T> limited(Stream<T> rows, OptionalLong limit) {

@@ -89,7 +89,7 @@ public sealed interface Value extends Comparable<Value> {
 
     record Decimal(BigDecimal value) implements Value {
         public Decimal {
-            value = value.signum() == 0 ? BigDecimal.ZERO : value.stripTrailingZeros();
+            value = value.signum() == 0 ? BigDecimal.ZERO : Values.bounded(value).stripTrailingZeros();
         }
 
         @Override

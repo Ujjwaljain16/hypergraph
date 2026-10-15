@@ -397,6 +397,33 @@ class DatabaseTest {
     }
 
     @Test
+    void onDemandViewsDoNotPinTheFeedAndRebuildAfterRetention(@TempDir Path elsewhere) {
+        EngineOptions engine = EngineOptions.defaults().withPageSize(1024).withWalSegmentBytes(4096).withFeedRetention(10);
+        try (HypergraphDatabase small = HypergraphDatabase.open(elsewhere, DatabaseOptions.defaults().withEngine(engine))) {
+            long edge = small.write(writer -> {
+                writer.defineNode("Person", List.of());
+                writer.defineEdge("Group", AtomKind.SET_EDGE, List.of(), List.of());
+                long group = writer.edge("Group");
+                writer.add(group, writer.node("Person", "first", Map.of()), MemberSpec.PLAIN);
+                return group;
+            });
+            MaterializedViews.Descriptor view = small.views().create(Principal.SYSTEM, "sizes", MaterializedViews.Kind.CARDINALITY,
+                    MaterializedViews.Refresh.ON_DEMAND, 0);
+            for (int i = 0; i < 200; i++) {
+                int index = i;
+                small.write(writer -> {
+                    writer.add(edge, writer.node("Person", "p" + index, Map.of()), MemberSpec.PLAIN);
+                    return null;
+                });
+            }
+            small.engine().checkpoint();
+            assertFalse(small.engine().feed().covers(view.lastGeneration()));
+            small.views().refresh(Principal.SYSTEM, "sizes");
+            assertEquals(new ViewCell.Count(201), small.read(reader -> small.views().read(reader, "sizes", edge)).orElseThrow().cell());
+        }
+    }
+
+    @Test
     void writesOnBranchesStayIsolated() {
         var branch = database.engine().createBranch("what-if", 0);
         database.write(TxnOptions.defaults().onBranch(branch.id()), writer -> writer.node("Person", "ghost", Map.of("name", "Ghost")));

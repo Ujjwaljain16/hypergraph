@@ -144,6 +144,9 @@ public final class Ast {
         record RefreshView(String name) implements Statement {
         }
 
+        record DropView(String name) implements Statement {
+        }
+
         record ShowView(String name, Optional<Ref> key, OptionalLong limit) implements Statement {
         }
 

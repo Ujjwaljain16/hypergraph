@@ -3,6 +3,7 @@
 
 package io.hstore.db.semantic;
 
+import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.tree.EntryMeasure;
 import io.hstore.engine.tree.FingerprintMode;
@@ -45,6 +46,18 @@ public record Embedding(int model, int version, int dimensions, long payloadRef)
         return vector;
     }
 
+    public static float[] requireValid(float[] vector) {
+        if (vector.length == 0) {
+            throw HStoreException.invalid("an embedding needs at least one component");
+        }
+        for (float component : vector) {
+            if (!Float.isFinite(component)) {
+                throw HStoreException.invalid("embedding components must be finite numbers");
+            }
+        }
+        return vector;
+    }
+
     public static float[] normalized(float[] vector) {
         double norm = 0;
         for (float component : vector) {
@@ -59,6 +72,9 @@ public record Embedding(int model, int version, int dimensions, long payloadRef)
     }
 
     public static float cosineDistance(float[] a, float[] b) {
+        if (a.length != b.length) {
+            throw HStoreException.invalid("cannot compare a " + a.length + "-dimensional vector with a " + b.length + "-dimensional one");
+        }
         float dot = 0;
         for (int i = 0; i < a.length; i++) {
             dot += a[i] * b[i];

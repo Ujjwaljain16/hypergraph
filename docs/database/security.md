@@ -8,24 +8,37 @@ in [wire protocol](../operations/wire-protocol.md) and [Studio](../operations/st
 ## Principals and roles
 
 ```java
-record Principal(String user, int tenant, Role role)
+record Principal(String user, int tenant, Role role, int home)
 enum Role { ADMIN, WRITER, READER }
 ```
 
-| Capability | ADMIN | WRITER | READER |
-|---|:---:|:---:|:---:|
-| read atoms of its tenant | yes | yes | yes |
-| insert, update, delete atoms, members, properties, embeddings, evidence, state, signals | yes | yes | no |
-| DDL (`CREATE … TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`) | yes | no | no |
-| branches (`CREATE/DROP/MERGE BRANCH`, `SAMPLE`, `DIFF`), `HISTORY`, `STATS`, `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT` | yes | no | no |
-| tenants and users | yes | no | no |
-| create, refresh and read materialized views (`SHOW VIEWS` lists names for every role) | yes | no | no |
-| switch tenant (`USE TENANT`, `Principal.inTenant`) | yes | no | no |
+`tenant` is the tenant a session currently works in and `home` is the tenant the user belongs to. They only
+differ after an admin of the default tenant runs `USE TENANT`. An ADMIN whose home is the default tenant is a
+**global admin** (`Principal.global()`); an ADMIN of any other tenant is a **tenant admin** and never leaves its
+tenant.
 
-Checks are enforced at two levels: `Executor.administrative` rejects ADMIN statements before execution, and the
-Java API enforces roles itself (`Principal.requireWrite` in every `Writer` mutation and in
-`HypergraphDatabase.write`, `requireAdmin` in `defineNode/defineEdge/createIndex/createJsonIndex` and
-`MaterializedViews`), so embedding applications cannot bypass them by skipping HQL.
+| Capability | global admin | tenant admin | WRITER | READER |
+|---|:---:|:---:|:---:|:---:|
+| read atoms of its tenant | yes | yes | yes | yes |
+| insert, update, delete atoms, members, properties, embeddings, evidence, state, signals | yes | yes | yes | no |
+| create, alter and drop users of its own tenant; `SHOW USERS`, `SHOW TENANTS` (own tenant only) | yes | yes | no | no |
+| create, refresh, drop and read materialized views (`SHOW VIEWS` lists names for every role) | yes | yes | no | no |
+| users of other tenants, `CREATE/ALTER TENANT` | yes | no | no | no |
+| DDL (`CREATE … TYPE`, `CREATE INDEX`, `CREATE JSON INDEX`); the schema is shared by every tenant | yes | no | no | no |
+| branches (`USE BRANCH`, `SHOW BRANCHES`, `CREATE/DROP/MERGE BRANCH`, `SAMPLE`, `DIFF`), `HISTORY`, `STATS`, `CHECKPOINT`, `CHECKPOINT AT`, `COMPACT` | yes | no | no | no |
+| switch tenant (`USE TENANT`, `Principal.inTenant`) | yes | no | no | no |
+
+`USE MAIN` is open to everyone. Without `TENANT`, `CREATE USER` puts the new user in the session's current
+tenant. A tenant admin who names another tenant, or another tenant's user, gets the same error as for a name that
+does not exist, and `USE TENANT` answers the same way for an unknown tenant and a forbidden one, so none of these
+statements reveal what exists elsewhere. User names are global, so `CREATE USER` with a name taken in another
+tenant still fails.
+
+Checks are enforced at two levels: `Executor.engineWide` and `Executor.administrative` reject statements before
+execution, and the Java API enforces roles itself (`Principal.requireWrite` in every `Writer` mutation and in
+`HypergraphDatabase.write`, `requireGlobal` in `defineNode/defineEdge/createIndex/createJsonIndex` and
+`SwapSampler.run`, `requireAdmin` in `MaterializedViews`), so embedding applications cannot bypass them by
+skipping HQL.
 
 `Principal.SYSTEM` = `("system", tenant 0, ADMIN)` is used by embedded API calls that do not pass a principal, by
 `hstore exec`/`hstore shell` on a local directory, and by network sessions when authentication is not required.
@@ -57,25 +70,40 @@ re-verifies the record's tenant.
 | catalog records | `AtomRecord.tenant()` | `Reader.visible(atom)` ⇔ the record exists and `record.tenant() == principal.tenant()` |
 | assertions, evidence | `Qualifier.tenant`, `Evidence.tenant` stamped on write | `Provenance.qualifier/evidence` filter by tenant |
 | usage counters (slot 46) | tenant id | per-tenant accounting |
-| materialized views (slot 42) | `Descriptor.tenant`, set from the creating admin | builds and deltas cover only that tenant; names and listings are per tenant |
+| materialized views (slot 42) | `Descriptor.tenant`, set from the creating admin | builds, deltas and staleness cover only that tenant; names, listings and `DROP VIEW` are per tenant; at most 32 views per tenant |
 
 Every `Reader` method that accepts an atom id calls `visible` (or filters by tenant): `atom`, `require`,
 `property`, `properties`, `document`, `edge`, `members`, `cardinality`, `degree`, `incident`, `embedding`,
-`StateBindings.state`, `Signals.of`, `Temporal.activeEdges`. The one shortcut is `incident`: when the reader's
-principal is in the default tenant and no other tenant exists, every atom is visible and a missing atom has no
-incidence entries anyway, so the extra catalog lookup is skipped. The reader checks this once per snapshot. Writes call `require`, so a principal cannot modify
-an atom it cannot see. A hyperedge may only gain members that are visible to the writer (`Writer.incidence`), so a
-tenant cannot reference another tenant's atoms.
+`StateBindings.state`, `Signals.of`, `Temporal.activeEdges`. The HQL functions `weight` and `overlap` go through
+`Statistics.weight/overlap`, which take a `Reader`. The one shortcut is `incident`: when the reader's principal is
+in the default tenant and the type index holds no atom of another tenant, every atom is visible and a missing atom
+has no incidence entries anyway, so the extra catalog lookup is skipped. The reader checks this once per snapshot.
+
+Code that needs the raw engine `View` (`reader.view()`) may only pass it ids that are already known to belong to the
+reader's tenant, such as bound query variables or atoms from `atomsOfType`. Ids that come from a statement go
+through `Reader` first. The `MemberScan` and `IncidentIntersection` access paths return nothing for an id the
+reader cannot see.
+
+Writes call `require`, so a principal cannot modify an atom it cannot see. A hyperedge may only gain members that
+are visible to the writer (`Writer.incidence`, also used by `Writer.qualify`), so a tenant cannot reference another
+tenant's atoms. Evidence sources, assertion sources and the evidence list of `QUALIFY` must be atoms, evidence or
+assertions of the writer's tenant (`Provenance.record/assertion`). `hstore check` lists any membership on main
+whose member belongs to a different tenant than its edge, with the `REMOVE` statement that undoes it. Databases
+written before these checks existed could have such memberships from `QUALIFY`.
+
+The planner only uses numbers from the reader's tenant: untyped matches are estimated from `Reader.population`
+(the sum of the tenant's per-type counts), and the feedback that corrects estimates after each query is kept per
+tenant. `EXPLAIN` output therefore does not change when another tenant writes or queries.
 
 Shared, non-tenant-scoped structures:
 
 | Structure | Why shared | Protection |
 |---|---|---|
 | schema (types, roles, property keys) | one catalog of type definitions | DDL requires ADMIN; type names are visible to all tenants |
-| dictionary | interned strings | ids only |
-| HNSW indexes | one per model | results filtered by `Reader.visible` ([semantic](semantic.md#tenant-visibility)) |
+| dictionary | interned strings | ids only; property, state schema and model names are limited to 128 characters, and only a global admin can create an embedding model |
+| HNSW indexes | one per model | results filtered by `Reader.visible` ([semantic](semantic.md#tenant-visibility)); vectors must match the model's length, and a row the index cannot take is logged and skipped ([semantic](semantic.md#embedding-records)) |
 | payload store | append-only byte store | payloads are reachable only through tenant-checked properties and embeddings |
-| branches, history, statistics | engine-level | ADMIN only (`STATS`, `HISTORY`, `DIFF`) |
+| branches, history, statistics | engine-level | global admins only (`USE BRANCH`, `SHOW BRANCHES`, `MERGE`, `STATS`, `HISTORY`, `DIFF`; Studio `/api/stats` and `/api/history`) |
 
 ```sql
 CREATE TENANT clinic_b;
@@ -95,13 +123,24 @@ record User(String name, String salt, String hash, int iterations, int tenant, R
 - Slot `USERS` = 45 (schema 82), keyed by `Hashing.of(name)`; lookups also compare the stored name, so a hash
   collision cannot authenticate the wrong user.
 - Names match `[A-Za-z_][A-Za-z0-9_.@-]*`.
-- Password hashing: **PBKDF2WithHmacSHA256**, 120,000 iterations, 16-byte salt from `SecureRandom`, 256-bit
-  derived key, stored hex-encoded together with the iteration count (so the iteration count can be raised later
-  without invalidating existing hashes).
+- Password hashing: **PBKDF2WithHmacSHA256**, 600,000 iterations, 16-byte salt from `SecureRandom`, 256-bit
+  derived key, stored hex-encoded together with the iteration count. Users created before the count was raised
+  from 120,000 keep their old hash until their password is next changed.
 - `Security.authenticate` re-derives with the stored salt and iterations and compares with
-  `MessageDigest.isEqual` (constant time with respect to content).
-- `ALTER USER … PASSWORD` re-salts; `DROP USER` deletes the record. Existing authenticated sessions are not
-  revoked.
+  `MessageDigest.isEqual` (constant time with respect to content). For a name that does not exist it still runs
+  PBKDF2 against a fixed salt, so the response time does not tell which names exist.
+- Every sign-in, from the wire protocol, Studio or an `AUTHENTICATE` statement, goes through one throttle per
+  database (`SignIns`): at most 10 failed attempts per user name and 20 per client address in 15 minutes. The
+  slot is taken before the password is hashed, so parallel guesses cannot slip past the limit. A successful
+  sign-in clears only that user's count and gives back the address's slot. A throttled attempt fails with
+  `ABORTED_RESOURCE_LIMIT` without checking the password. Someone who knows a user name can keep that user locked
+  out by failing on purpose; the address limit makes that cost several addresses.
+- `ALTER USER … PASSWORD` re-salts; `DROP USER` deletes the record. A session checks its user's stored record
+  before every statement, so once a user is dropped or its password changes, its open sessions fail with "was
+  dropped or its password changed; authenticate again" until they authenticate again. A session that changes its
+  own password keeps working.
+- A tenant admin cannot drop the last user of the database, since with `authentication = auto` that would turn
+  authentication off and give the next connection `Principal.SYSTEM`.
 - `CREATE USER` uses an `Optional::isEmpty` precondition, so two concurrent creations of the same name conflict.
 
 `HypergraphDatabase.requiresAuthentication()` is true as soon as any user exists; the server's
@@ -159,23 +198,33 @@ allocator but are not charged as atoms.
 ## Network surface
 
 - Wire protocol: `authentication = auto | on | off`; `AUTHENTICATE` is the only accepted statement before
-  authentication; failed attempts are logged; passwords are masked in statement logs
-  (`StatementLogger.abbreviate`).
-- Studio: cookie sessions (`HttpOnly`, `SameSite=Strict`, 256-bit random tokens), a required custom header on
-  every POST (CSRF), a strict Content-Security-Policy and an idle timeout.
-- Neither protocol implements TLS; terminate TLS in front of the server (reverse proxy, service mesh) when traffic
-  leaves a trusted network. Bind `listen_address` to `127.0.0.1` when the server should be local only.
+  authentication; a connection has `authentication_timeout_seconds` (30) to authenticate and may send at most
+  64 KiB per request until it has (`max_message_mb` after); a connection whose first request looks like HTTP is
+  closed, so a web page cannot post HQL to the port; failed attempts are logged; `CREATE USER`, `ALTER USER` and
+  `AUTHENTICATE` are logged from the parsed statement with the password replaced by `'***'`
+  (`StatementLogger.describe`); control characters in log messages are escaped.
+- Only `\n` ends a line of the wire protocol, so a `\r` inside a string literal cannot end a request early.
+  Responses also break lines at `\r`, so stored text cannot fake the end of a response.
+- Unexpected errors reach the client as `error [INTERNAL]` without the exception text; the server log has the
+  details.
+- Studio: cookie sessions (`HttpOnly`, `SameSite=Strict`, 256-bit random tokens, 12-hour lifetime, at most 4,096
+  open), a required custom header on every POST (CSRF), a strict Content-Security-Policy and an idle timeout.
+  While authentication is off, `/api/` answers only requests whose `Host` is an IP address, `localhost` or the
+  listen address, which defeats DNS rebinding.
+- Both protocols support TLS (`tls = on`); without it, put a TLS-terminating proxy in front when traffic leaves a
+  trusted network. Bind `listen_address` to `127.0.0.1` when the server should be local only.
 
 ## Threat model
 
 | Threat | Mitigation | Residual risk |
 |---|---|---|
-| cross-tenant read through ids or keys | tenant in index keys plus `visible` checks on every path | type names and the existence of types are global |
+| cross-tenant read through ids or keys | tenant in index keys plus `visible` checks on every path, incident edges of other tenants skipped (also for memberships an older version let through), untyped matches scan only the tenant's own types, per-tenant planner estimates and view staleness | type names, user names, generation numbers and the global atom id sequence are visible to every tenant; cache hits and latency depend on what other tenants do, and semantic search walks one shared HNSW graph |
 | cross-tenant write or reference | `require` before mutations; members must be visible | none known |
-| resource exhaustion by a tenant | atom/edge/payload quotas, per-query page budget, per-transaction page budget, HORA budgets | CPU in planning and projection is not budgeted; the HNSW index is shared |
-| password database theft | PBKDF2-SHA256, 120k iterations, per-user salt | offline guessing of weak passwords remains possible |
-| credential sniffing | none in-process | requires external TLS |
-| privilege escalation | role checks in both HQL and the Java API | an embedded application holding `Principal.SYSTEM` is fully trusted |
+| resource exhaustion by a tenant | atom/edge/payload quotas (payload bytes are charged in their own transaction, so a rollback still counts them, as the payload store never shrinks), the tenant's page budget on every read statement, per-transaction page budget, HORA budgets that `LIMIT` cannot raise past 1,000,000 rows, `DEPTH` 1-64, `SIMILAR TO … TOP` 1-1000, expression and JSON nesting up to 256 levels, number literals up to 400 characters with exponents up to 1000, 32 views per tenant, 128-character names, new embedding models only by a global admin | CPU in planning and projection is not budgeted; the HNSW index is shared; a WRITER can still add new property names, role names (on edge types that declare no roles) and state schemas, which stay in the shared dictionary |
+| password database theft | PBKDF2-SHA256, 600k iterations, per-user salt | offline guessing of weak passwords remains possible |
+| online password guessing | one throttle for every sign-in path: 10 failures per user, 20 per address in 15 minutes | a known user name can be locked out on purpose |
+| credential sniffing | `tls = on` for the wire protocol and Studio | plaintext when TLS is off |
+| privilege escalation | role checks in both HQL and the Java API; tenant admins cannot leave their tenant; sessions that never authenticated must authenticate once the first user exists; sessions end when their user is dropped or its password changes; tenant admins cannot drop the last user | an embedded application holding `Principal.SYSTEM` is fully trusted |
 | tampering with data files | CRC32C on pages, WAL records and payloads detects corruption | no cryptographic integrity or encryption at rest; protect the data directory with file-system permissions (the container runs as a non-root user with mode 0700) |
 
 ## Non-goals

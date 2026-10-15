@@ -130,11 +130,14 @@ and in Docker it is the last line of `docker logs`. The storage-integrity failur
 |---|---|
 | LOG | `connection {n} received from /{ip}:{port}` |
 | LOG | `connection {n} authorized: user={user} tenant={tenantId} role={ROLE}` |
-| WARNING | `password authentication failed for user "{user}" from /{ip}:{port}` (logged whatever `log_connections` says) |
+| WARNING | `password authentication failed for user "{user}" from /{ip}:{port}` (logged whatever `log_connections` says). Control characters in the user name, as in every log message, are written as `\n`, `\r` or `\uXXXX`. |
 | WARNING | `connection {n} from /{ip}:{port} closed after 5 failed authentication attempts`: any five rejected requests (wrong password or not `AUTHENTICATE`) before login close the connection. |
 | LOG | `disconnection: connection {n} from /{ip}:{port} session time {ms} ms` |
 | LOG | `connection {n} closed after {s}s idle` (`idle_timeout_seconds` > 0) |
-| WARNING | `connection from /{ip}:{port} refused: max_connections={n} reached` |
+| LOG | `connection {n} from /{ip}:{port} closed: no authentication within {s}s` (`authentication_timeout_seconds`) |
+| WARNING | `connection {n} from /{ip}:{port} closed: message exceeds {bytes} bytes` (64 KiB before authentication, `max_message_mb` after) |
+| WARNING | `connection {n} from /{ip}:{port} closed: it sent an HTTP request` |
+| WARNING | `connection from /{ip}:{port} refused: {reason} (max_connections={n})`: the server is full, or 16 connections from this address are still waiting to authenticate. |
 | LOG | `studio session opened for user={user} role={ROLE} from /{ip}:{port}` |
 | WARNING | `studio password authentication failed for user "{user}" from /{ip}:{port}` |
 

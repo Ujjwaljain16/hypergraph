@@ -4,9 +4,12 @@
 package io.hstore.db.semantic;
 
 import io.hstore.db.payload.PayloadStore;
+import io.hstore.engine.Dictionary;
+import io.hstore.engine.HStoreException;
 import io.hstore.engine.StorageEngine;
 import io.hstore.engine.catalog.Branch;
 import io.hstore.engine.catalog.SlotChange;
+import io.hstore.engine.catalog.Symbol;
 import io.hstore.engine.feed.ChangeFeed;
 import io.hstore.engine.feed.CommitEvent;
 import io.hstore.engine.tree.Entry;
@@ -29,6 +32,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
@@ -55,6 +59,7 @@ public final class SemanticPlane implements AutoCloseable {
     private final PayloadStore payloads;
     private final Encoder encoder;
     private final Map<Integer, HnswIndex> indexes = new ConcurrentHashMap<>();
+    private final Map<Integer, Integer> dimensions = new ConcurrentHashMap<>();
     private final ReentrantLock progressLock = new ReentrantLock();
     private final Condition advanced = progressLock.newCondition();
     private final ReentrantLock applyLock = new ReentrantLock();
@@ -148,7 +153,21 @@ public final class SemanticPlane implements AutoCloseable {
     }
 
     public int model(String name) {
-        return engine.dictionary().name(MODEL_NAMESPACE, name);
+        return engine.dictionary().name(MODEL_NAMESPACE, Dictionary.requireName("model name", name));
+    }
+
+    public OptionalInt existingModel(String name) {
+        return engine.dictionary().lookup(new Symbol.Name(MODEL_NAMESPACE, name));
+    }
+
+    public void validate(View view, String name, int model, float[] vector) {
+        Embedding.requireValid(vector);
+        int expected = dimensions.computeIfAbsent(model, _ -> name.equals(encoder.model()) ? encoder.dimensions()
+                : view.scan(Embedding.EMBEDDINGS).values().filter(embedding -> embedding.model() == model)
+                        .mapToInt(Embedding::dimensions).findFirst().orElse(vector.length));
+        if (vector.length != expected) {
+            throw HStoreException.invalid("model '" + name + "' takes " + expected + "-dimensional vectors, not " + vector.length);
+        }
     }
 
     public long indexedGeneration() {
@@ -157,7 +176,7 @@ public final class SemanticPlane implements AutoCloseable {
 
     private long rebuild() {
         try (Snapshot snapshot = engine.snapshot()) {
-            snapshot.scan(Embedding.EMBEDDINGS).stream().forEach(entry -> index(entry.key(), entry.value()));
+            snapshot.scan(Embedding.EMBEDDINGS).stream().forEach(entry -> guarded(entry.key(), () -> index(entry.key(), entry.value())));
             indexedGeneration = snapshot.generation();
             return snapshot.generation();
         }
@@ -181,9 +200,9 @@ public final class SemanticPlane implements AutoCloseable {
             if (event.branch() == Branch.MAIN) {
                 for (SlotChange<?> change : event.slots()) {
                     if (change.slot() == Embedding.EMBEDDINGS) {
-                        change.after().map(Embedding.class::cast).ifPresentOrElse(
+                        guarded(change.key(), () -> change.after().map(Embedding.class::cast).ifPresentOrElse(
                                 embedding -> index(change.key(), embedding),
-                                () -> indexes.values().forEach(index -> index.remove(change.key())));
+                                () -> indexes.values().forEach(index -> index.remove(change.key()))));
                     }
                 }
                 indexes.replaceAll((_, index) -> index.tombstoneRatio() > TOMBSTONE_LIMIT ? index.compacted() : index);
@@ -201,9 +220,18 @@ public final class SemanticPlane implements AutoCloseable {
         }
     }
 
+    private void guarded(long atom, Runnable action) {
+        try {
+            action.run();
+        } catch (RuntimeException failure) {
+            LOG.log(System.Logger.Level.WARNING, "skipping the embedding of atom " + atom + " in the semantic index", failure);
+        }
+    }
+
     private void index(long atom, Embedding embedding) {
         float[] vector = Embedding.decode(payloads.read(embedding.payloadRef()));
         indexes.values().forEach(index -> index.remove(atom));
+        Embedding.requireValid(vector);
         indexes.computeIfAbsent(embedding.model(), _ -> new HnswIndex(16, 128)).upsert(atom, vector);
     }
 
@@ -255,13 +283,13 @@ public final class SemanticPlane implements AutoCloseable {
 
     private Optional<Hit> verify(View view, int model, long atom, float[] query) {
         return view.get(Embedding.EMBEDDINGS, atom)
-                .filter(embedding -> embedding.model() == model && view.exists(atom))
+                .filter(embedding -> embedding.model() == model && embedding.dimensions() == query.length && view.exists(atom))
                 .map(embedding -> new Hit(atom, distance(embedding, query)));
     }
 
     private List<Hit> exhaustive(View view, int model, float[] query, int k, LongPredicate admit) {
         return view.scan(Embedding.EMBEDDINGS).stream()
-                .filter(entry -> entry.value().model() == model && admit.test(entry.key()))
+                .filter(entry -> entry.value().model() == model && entry.value().dimensions() == query.length && admit.test(entry.key()))
                 .map(entry -> new Hit(entry.key(), distance(entry.value(), query)))
                 .sorted(Comparator.comparingDouble(Hit::distance))
                 .limit(k)

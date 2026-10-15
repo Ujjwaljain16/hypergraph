@@ -146,7 +146,7 @@ Images for linux/amd64 and linux/arm64 are published to the GitHub Container Reg
 docker run -d --name hstore \
   -e HSTORE_USER=admin -e HSTORE_PASSWORD=change-me \
   -v "$PWD/examples/clinical-claims.hql:/docker-entrypoint-initdb.d/01-clinical-claims.hql:ro" \
-  -p 7432:7432 -p 7480:7480 \
+  -p 127.0.0.1:7432:7432 -p 127.0.0.1:7480:7480 \
   ghcr.io/metacoglabs/hypergraph:0.1.0
 ```
 
@@ -157,7 +157,8 @@ build the image yourself instead, run `docker build -t hstore .` and use `hstore
 * Open a shell over the wire protocol: `docker exec -it hstore hstore connect 127.0.0.1:7432`.
 * Follow the server log: `docker logs -f hstore`.
 
-`docker compose up -d` does the same with the repository's [`docker-compose.yml`](docker-compose.yml). See
+`HSTORE_PASSWORD=<password> docker compose up -d` does the same with the repository's
+[`docker-compose.yml`](docker-compose.yml), which publishes both ports on localhost only. See
 [operations/docker.md](docs/operations/docker.md) for every option.
 
 ## A taste of HQL

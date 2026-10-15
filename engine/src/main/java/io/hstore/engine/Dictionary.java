@@ -24,6 +24,7 @@ public final class Dictionary {
     public static final int ROLE = 1;
     public static final int ROLE_SET = 2;
     public static final int NO_ROLES = 0;
+    public static final int NAME_LIMIT = 128;
 
     private final TransactionManager transactions;
     private final ConcurrentHashMap<Symbol, Integer> ids = new ConcurrentHashMap<>();
@@ -51,6 +52,13 @@ public final class Dictionary {
         });
         remember(id, symbol);
         return id;
+    }
+
+    public static String requireName(String kind, String text) {
+        if (text.length() > NAME_LIMIT) {
+            throw HStoreException.invalid("a " + kind + " can be at most " + NAME_LIMIT + " characters long");
+        }
+        return text;
     }
 
     public int name(int namespace, String text) {

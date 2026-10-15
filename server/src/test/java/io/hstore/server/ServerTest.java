@@ -5,19 +5,26 @@ package io.hstore.server;
 
 import io.hstore.db.DatabaseOptions;
 import io.hstore.db.HypergraphDatabase;
+import io.hstore.db.query.Parser;
 import io.hstore.db.query.Session;
+import io.hstore.engine.Dictionary;
 import io.hstore.engine.EngineOptions;
+import io.hstore.engine.topology.Incidence;
+import io.hstore.engine.topology.Validity;
+import io.hstore.engine.topology.Weight;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.BufferedReader;
-import java.io.StringReader;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.io.StringWriter;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -34,6 +41,7 @@ import java.util.stream.IntStream;
 import javax.net.ssl.SSLContext;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -47,8 +55,26 @@ class ServerTest {
     void framingEscapesTerminatorLines() throws Exception {
         StringWriter buffer = new StringWriter();
         WireProtocol.send(buffer, "first\n.\n..dots\nlast");
-        BufferedReader reader = new BufferedReader(new StringReader(buffer.toString()));
-        assertEquals("first\n.\n..dots\nlast", WireProtocol.receive(reader).orElseThrow());
+        assertEquals("first\n.\n..dots\nlast", WireProtocol.receive(stream(buffer.toString()), 1 << 10).orElseThrow());
+    }
+
+    @Test
+    void onlyLineFeedsEndLines() throws Exception {
+        assertEquals("x\r.\rDROP USER root\nnext\r", WireProtocol.receive(stream("x\r.\rDROP USER root\nnext\r\n.\r\n"), 1 << 10).orElseThrow());
+        StringWriter buffer = new StringWriter();
+        WireProtocol.respond(buffer, "value\r.\rfake");
+        assertEquals("value\n..\nfake\n.\n", buffer.toString());
+    }
+
+    @Test
+    void messagesAreCappedAndHttpIsRecognised() {
+        assertThrows(WireProtocol.TooLarge.class, () -> WireProtocol.receive(stream("a".repeat(2_000)), 1 << 10));
+        assertTrue(WireProtocol.http("POST / HTTP/1.1\r\nHost: 127.0.0.1:7432\r\n\r\n"));
+        assertTrue(!WireProtocol.http("MATCH NODE n RETURN n"));
+    }
+
+    private static InputStream stream(String text) {
+        return new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8));
     }
 
     @Test
@@ -222,6 +248,139 @@ class ServerTest {
                 }
             }
             acceptor.join();
+        }
+    }
+
+    @Test
+    void connectionsOpenedBeforeTheFirstUserMustAuthenticate() throws Exception {
+        DatabaseOptions options = DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(4096));
+        try (HypergraphDatabase database = HypergraphDatabase.open(directory, options)) {
+            Thread acceptor;
+            try (Server server = new Server(database, new InetSocketAddress("127.0.0.1", 0))) {
+                acceptor = Thread.ofVirtual().start(server::serve);
+                InetSocketAddress address = new InetSocketAddress("127.0.0.1", server.port());
+                try (Endpoint early = new RemoteEndpoint(address, Optional.empty())) {
+                    assertTrue(early.execute("CREATE USER admin PASSWORD 'pw' ROLE admin;").contains("created user admin"));
+                    assertTrue(early.execute("SHOW USERS;").startsWith("error [AUTHENTICATION_REQUIRED]"));
+                    assertTrue(early.execute("AUTHENTICATE admin PASSWORD 'pw';").contains("authenticated as admin"));
+                    assertTrue(early.execute("FORMAT JSON; SHOW USERS;").contains("\"rows\":[[\"admin\""));
+                }
+            }
+            acceptor.join();
+        }
+    }
+
+    @Test
+    void hostileConnectionsAreClosedEarly() throws Exception {
+        DatabaseOptions options = DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(4096));
+        try (HypergraphDatabase database = HypergraphDatabase.open(directory, options)) {
+            Thread acceptor;
+            try (Server server = new Server(database, new InetSocketAddress("127.0.0.1", 0), Server.Policy.permissive().withTimeouts(0, 1))) {
+                acceptor = Thread.ofVirtual().start(server::serve);
+                InetSocketAddress address = new InetSocketAddress("127.0.0.1", server.port());
+                assertFalse(exchange(address, "POST / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\n\r\n"
+                        + ".\nCREATE USER intruder PASSWORD 'x' ROLE admin\n.\n").stream().anyMatch(message -> message.startsWith("created")));
+                assertFalse(database.requiresAuthentication());
+                try (Endpoint admin = new RemoteEndpoint(address, Optional.empty())) {
+                    admin.execute("CREATE USER admin PASSWORD 'pw' ROLE admin; CREATE TENANT acme; CREATE USER alice PASSWORD 'a1' TENANT acme ROLE writer;");
+                }
+                List<String> oversized = exchange(address, "x".repeat(100_000) + "\n.\n");
+                assertTrue(oversized.getLast().startsWith("error [ABORTED_RESOURCE_LIMIT]") || oversized.getLast().equals("closed"), oversized.toString());
+                assertTrue(oversized.stream().noneMatch(message -> message.startsWith("error [AUTHENTICATION")), oversized.toString());
+                List<Socket> waiting = new ArrayList<>();
+                try {
+                    for (int i = 0; i < 16; i++) {
+                        Socket socket = new Socket(address.getHostString(), address.getPort());
+                        waiting.add(socket);
+                        socket.setSoTimeout(5_000);
+                        WireProtocol.receive(new java.io.BufferedInputStream(socket.getInputStream()), 1 << 10);
+                    }
+                    assertTrue(exchange(address, "").getFirst().contains("too many unauthenticated connections"));
+                } finally {
+                    for (Socket socket : waiting) {
+                        socket.close();
+                    }
+                }
+                Thread.sleep(200);
+                try (Socket idle = new Socket(address.getHostString(), address.getPort())) {
+                    idle.setSoTimeout(10_000);
+                    long started = System.nanoTime();
+                    InputStream in = idle.getInputStream();
+                    while (in.read() != -1) {
+                    }
+                    assertTrue(Duration.ofNanos(System.nanoTime() - started).toSeconds() < 8);
+                }
+                try (Endpoint admin = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("admin", "pw")));
+                     Endpoint alice = new RemoteEndpoint(address, Optional.of(new RemoteEndpoint.Credentials("alice", "a1")))) {
+                    assertFalse(alice.execute("WHOAMI;").startsWith("error"));
+                    admin.execute("CREATE NODE TYPE Doc (text STRING); INSERT NODE Doc 'x' {text: 'a\r.\rCREATE USER injected PASSWORD ''p'' ROLE admin'};");
+                    assertFalse(admin.execute("SHOW USERS;").contains("injected"));
+                    assertTrue(admin.execute("MATCH NODE d:Doc RETURN d.text;").contains("CREATE USER injected"));
+                    admin.execute("ALTER USER alice PASSWORD 'rotated';");
+                    assertTrue(alice.execute("WHOAMI;").contains("authenticate again"));
+                    assertTrue(alice.execute("AUTHENTICATE alice PASSWORD 'rotated'; WHOAMI;").contains("acme"));
+                    String crashed = admin.execute("MATCH NODE p WHERE " + "(".repeat(50_000) + "p = @1" + ")".repeat(50_000) + " RETURN p;");
+                    assertTrue(crashed.startsWith("error [INVALID_SCHEMA]") && !crashed.contains("Exception"), crashed);
+                    assertFalse(admin.execute("WHOAMI;").startsWith("error"));
+                }
+            }
+            acceptor.join();
+        }
+    }
+
+    private static List<String> exchange(InetSocketAddress address, String payload) throws Exception {
+        try (Socket socket = new Socket(address.getHostString(), address.getPort())) {
+            socket.setSoTimeout(10_000);
+            socket.getOutputStream().write(payload.getBytes(StandardCharsets.UTF_8));
+            socket.getOutputStream().flush();
+            InputStream in = new java.io.BufferedInputStream(socket.getInputStream());
+            List<String> messages = new ArrayList<>();
+            try {
+                for (Optional<String> message = WireProtocol.receive(in, 1 << 20); message.isPresent(); message = WireProtocol.receive(in, 1 << 20)) {
+                    messages.add(message.get().startsWith("hstore connection") ? "hstore connection" : message.get());
+                }
+            } catch (java.net.SocketException reset) {
+                messages.add("closed");
+            }
+            return messages;
+        }
+    }
+
+    @Test
+    void statementLogsNeverContainPasswords() {
+        for (String script : List.of("CREATE USER mallory PASSWORD \"double-quoted\" ROLE reader", "ALTER USER mallory PASSWORD'no-space'",
+                "ALTER USER mallory PASSWORD -- comment\n 'after-comment'", "AUTHENTICATE mallory PASSWORD 'it''s-escaped'")) {
+            Parser.Sourced sourced = Parser.sourced(script).getFirst();
+            String logged = StatementLogger.describe(sourced.statement(), sourced.text());
+            assertTrue(logged.contains("'***'") && !logged.matches("(?s).*(double|space|comment|escaped).*"), logged);
+        }
+    }
+
+    @Test
+    void checkListsMembershipsThatCrossTenants() {
+        DatabaseOptions options = DatabaseOptions.defaults().withEngine(EngineOptions.defaults().withPageSize(4096));
+        try (HypergraphDatabase database = HypergraphDatabase.open(directory, options); Session admin = new Session(database)) {
+            admin.executeAll("""
+                    CREATE NODE TYPE Patient;
+                    CREATE SET EDGE TYPE Encounter;
+                    CREATE TENANT acme;
+                    CREATE TENANT globex;
+                    USE TENANT acme;
+                    INSERT NODE Patient 'a' AS $a;
+                    USE TENANT globex;
+                    INSERT EDGE Encounter AS $e;
+                    """);
+            long patient = admin.variables().get("a");
+            long edge = admin.variables().get("e");
+            assertTrue(Check.run(database.engine()).contains("no hyperedge on main has a member from another tenant"));
+            database.write(writer -> {
+                writer.transaction().insert(edge, new Incidence(patient, Dictionary.NO_ROLES, Weight.ONE,
+                        Validity.ALWAYS.from(), Validity.ALWAYS.to(), 0, 0));
+                return null;
+            });
+            String report = Check.run(database.engine());
+            assertTrue(report.contains("1 memberships on main cross tenants"), report);
+            assertTrue(report.contains("REMOVE @" + patient + " FROM @" + edge), report);
         }
     }
 

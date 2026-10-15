@@ -6,6 +6,7 @@ package io.hstore.db.evidence;
 import io.hstore.db.Member;
 import io.hstore.db.Reader;
 import io.hstore.db.Writer;
+import io.hstore.engine.HStoreException;
 import io.hstore.engine.catalog.Slot;
 import io.hstore.engine.tree.EntryMeasure;
 import io.hstore.engine.tree.FingerprintMode;
@@ -54,6 +55,7 @@ public final class Provenance {
 
     public static long record(Writer writer, Evidence evidence) {
         writer.principal().requireWrite();
+        requireReferable(writer, evidence.source());
         long id = writer.database().engine().transactions().allocateAtom();
         writer.transaction().put(EVIDENCE, id, evidence.withTenant(writer.tenant()));
         return id;
@@ -61,6 +63,8 @@ public final class Provenance {
 
     public static long assertion(Writer writer, Qualifier qualifier) {
         writer.principal().requireWrite();
+        requireReferable(writer, qualifier.source());
+        qualifier.evidence().forEach(support -> requireReferable(writer, support));
         long id = writer.database().engine().transactions().allocateAtom();
         writer.transaction().put(QUALIFIERS, id, qualifier.withTenant(writer.tenant()));
         return id;
@@ -70,6 +74,12 @@ public final class Provenance {
         long id = assertion(writer, qualifier);
         writer.qualify(edge, member, id);
         return id;
+    }
+
+    private static void requireReferable(Reader reader, long id) {
+        if (id != 0 && !reader.visible(id) && evidence(reader, id).isEmpty() && qualifier(reader, id).isEmpty()) {
+            throw HStoreException.invalid("atom " + id + " does not exist");
+        }
     }
 
     public static Optional<Qualifier> qualifier(Reader reader, long id) {

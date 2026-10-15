@@ -22,7 +22,9 @@ import io.hstore.db.semantic.SemanticPlane;
 import io.hstore.db.temporal.BranchMerge;
 import io.hstore.db.value.TypeTag;
 import io.hstore.db.value.Value;
+import io.hstore.db.value.Values;
 import io.hstore.db.view.MaterializedViews;
+import io.hstore.engine.Dictionary;
 import io.hstore.engine.HStoreException;
 import io.hstore.engine.topology.Validity;
 
@@ -30,17 +32,24 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
+import java.util.function.Supplier;
 
 public final class Parser {
 
+    private static final int MAX_NESTING = 256;
+    private static final int MAX_SIMILAR = 1000;
+
     private final List<Token> tokens;
     private int index;
+    private int nesting;
 
     public record Sourced(Statement statement, String text) {
     }
@@ -117,7 +126,7 @@ public final class Parser {
             BranchMerge.Policy policy = BranchMerge.Policy.FAIL;
             if (accept("ON")) {
                 expect("CONFLICT");
-                policy = BranchMerge.Policy.valueOf(identifier().toUpperCase());
+                policy = option(BranchMerge.Policy.class, identifier());
             }
             return new Statement.MergeBranch(source, target, policy);
         }
@@ -147,6 +156,9 @@ public final class Parser {
         if (accept("DROP")) {
             if (accept("USER")) {
                 return new Statement.DropUser(identifierOrString());
+            }
+            if (accept("VIEW")) {
+                return new Statement.DropView(identifier());
             }
             expect("BRANCH");
             return new Statement.DropBranch(identifier());
@@ -233,7 +245,7 @@ public final class Parser {
         }
         if (accept("TRACE")) {
             Ref assertion = ref();
-            int depth = accept("DEPTH") ? (int) longValue() : 8;
+            int depth = accept("DEPTH") ? intValue() : 8;
             return new Statement.Trace(assertion, depth);
         }
         if (accept("SIGNAL")) {
@@ -304,7 +316,7 @@ public final class Parser {
         }
         if (accept("EXPAND")) {
             Ref atom = ref();
-            int depth = accept("DEPTH") ? (int) longValue() : 4;
+            int depth = accept("DEPTH") ? intValue() : 4;
             return new Statement.Expand(atom, depth, limit());
         }
         if (accept("GATHER")) {
@@ -338,19 +350,19 @@ public final class Parser {
         if (accept("NEIGHBORS")) {
             expect("OF");
             Ref atom = ref();
-            int threshold = accept("THRESHOLD") ? (int) longValue() : 1;
+            int threshold = accept("THRESHOLD") ? intValue() : 1;
             return new Statement.Neighbors(atom, threshold, limit());
         }
         if (accept("CLOSURE")) {
             Ref edge = ref();
             expect("DIM");
-            return new Statement.Closure(edge, (int) longValue(), limit());
+            return new Statement.Closure(edge, intValue(), limit());
         }
         if (accept("PATTERN")) {
             return pattern();
         }
         if (accept("SAMPLE")) {
-            int swaps = (int) longValue();
+            int swaps = intValue();
             expect("SWAPS");
             expect("ON");
             String type = identifier();
@@ -414,7 +426,7 @@ public final class Parser {
             expect("PASSWORD");
             String password = string();
             Optional<String> tenant = accept("TENANT") ? Optional.of(identifier()) : Optional.empty();
-            Role role = accept("ROLE") ? Role.valueOf(identifier().toUpperCase()) : Role.WRITER;
+            Role role = accept("ROLE") ? option(Role.class, identifier()) : Role.WRITER;
             return new Statement.CreateUser(name, password, tenant, role);
         }
         if (accept("BRANCH")) {
@@ -537,7 +549,7 @@ public final class Parser {
         expect("IN");
         Ref edge = ref();
         expect("AS");
-        AssertionType type = AssertionType.valueOf(identifier().toUpperCase());
+        AssertionType type = option(AssertionType.class, identifier());
         double confidence = accept("CONFIDENCE") ? number().doubleValue() : 1.0;
         List<Ref> evidence = new ArrayList<>();
         if (accept("EVIDENCE")) {
@@ -691,7 +703,18 @@ public final class Parser {
     }
 
     private Expr negation() {
-        return accept("NOT") ? new Expr.Not(negation()) : predicate();
+        return accept("NOT") ? new Expr.Not(nested(this::negation)) : predicate();
+    }
+
+    private Expr nested(Supplier<Expr> parse) {
+        if (++nesting > MAX_NESTING) {
+            throw error("expression nested deeper than " + MAX_NESTING + " levels");
+        }
+        try {
+            return parse.get();
+        } finally {
+            nesting--;
+        }
     }
 
     private Expr predicate() {
@@ -721,7 +744,10 @@ public final class Parser {
                 index += 2;
                 expect("TO");
                 String text = string();
-                int k = accept("TOP") ? (int) longValue() : 10;
+                int k = accept("TOP") ? intValue() : 10;
+                if (k < 1 || k > MAX_SIMILAR) {
+                    throw error("SIMILAR TO ... TOP must be between 1 and " + MAX_SIMILAR);
+                }
                 SemanticPlane.Consistency consistency = accept("SNAPSHOT") ? SemanticPlane.Consistency.SNAPSHOT
                         : optionalKeyword("FRESH", SemanticPlane.Consistency.FRESH);
                 return new Expr.Similar(subject.text(), text, k, consistency);
@@ -781,7 +807,7 @@ public final class Parser {
     private Expr primary() {
         Token token = peek();
         if (acceptSymbol("(")) {
-            Expr inner = expression();
+            Expr inner = nested(this::expression);
             expectSymbol(")");
             return inner;
         }
@@ -909,7 +935,7 @@ public final class Parser {
             return new Value.Time(parseInstant(string()));
         }
         if (accept("DECIMAL")) {
-            return new Value.Decimal(new BigDecimal(peek().kind() == Token.Kind.STRING ? string() : next().text()));
+            return new Value.Decimal(Values.number(peek().kind() == Token.Kind.STRING ? string() : next().text()));
         }
         if (peek().kind() == Token.Kind.STRING) {
             return new Value.Text(string());
@@ -927,7 +953,7 @@ public final class Parser {
             throw error("expected a number but found " + token);
         }
         try {
-            BigDecimal value = new BigDecimal(token.text());
+            BigDecimal value = Values.number(token.text());
             return negative ? value.negate() : value;
         } catch (NumberFormatException e) {
             throw error("malformed number " + token.text());
@@ -966,6 +992,22 @@ public final class Parser {
         } catch (ArithmeticException e) {
             throw error("expected an integer");
         }
+    }
+
+    private <E extends Enum<E>> E option(Class<E> type, String name) {
+        try {
+            return Enum.valueOf(type, name.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException unknown) {
+            throw error("unknown " + type.getSimpleName() + " '" + name + "'; expected one of " + Arrays.toString(type.getEnumConstants()));
+        }
+    }
+
+    private int intValue() {
+        long value = longValue();
+        if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+            throw error("expected an integer between " + Integer.MIN_VALUE + " and " + Integer.MAX_VALUE);
+        }
+        return (int) value;
     }
 
     private long instant() {
@@ -1027,6 +1069,9 @@ public final class Parser {
         Token token = next();
         if (token.kind() != Token.Kind.WORD) {
             throw error("expected an identifier but found " + token);
+        }
+        if (token.text().length() > Dictionary.NAME_LIMIT) {
+            throw error("a name can be at most " + Dictionary.NAME_LIMIT + " characters long");
         }
         return token.text();
     }

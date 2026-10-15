@@ -38,6 +38,13 @@ record Embedding(int model, int version, int dimensions, long payloadRef)
 `EMBED @x TEXT '…'` encodes with the database encoder; `EMBED @x VECTOR [..] MODEL 'm'` stores an external vector
 under model `m`, version 1 ([HQL](hql.md#semantic)).
 
+`Writer.embed` checks every vector before storing it. It must have at least one component, all components must be
+finite, and its length must match the model: the encoder's `dimensions()` for the encoder's own model, and for any
+other model the length of the first vector stored under it. Anything else fails with `INVALID_SCHEMA`. Model names
+are limited to 128 characters. Any WRITER can store vectors under a model that already exists, but the first vector
+under a new name (other than the encoder's model) needs a global admin, because each model adds a dictionary entry
+and an HNSW index that every tenant shares.
+
 ## Encoders
 
 `Encoder` (`semantic/Encoder.java`): `model()`, `version()`, `dimensions()`, `encode(text) → Encoded(vector, model,
@@ -127,7 +134,8 @@ repeat count:
     int32 n, then n × int32 neighbour node indexes
 ```
 
-`readFrom` validates the magic, restores nodes in order and rebuilds `byId` from the non-deleted ones. The random
+`readFrom` validates the magic, restores nodes in order and rebuilds `byId` from the non-deleted ones. A file whose
+vectors do not all have the same length is treated as unreadable, which triggers a rebuild. The random
 generator is re-seeded, so subsequent level draws differ from an uninterrupted process; this affects only graph
 shape, not correctness.
 
@@ -163,7 +171,10 @@ retained event with a larger generation on a virtual thread and then tails new c
 
 1. ignores events of other branches (the index covers `main` only);
 2. for each change of the `EMBEDDINGS` slot, upserts the new vector (reading it from the payload store) or removes
-   the atom from every model's index;
+   the atom from every model's index. `HnswIndex.upsert` refuses a vector that is empty, has a non-finite component
+   or differs in length from the vectors already in the index, before touching the graph. A change that fails is
+   logged and skipped, so one bad row cannot stop the subscriber; a rebuild skips such rows the same way, so they
+   cannot keep the database from opening either;
 3. compacts indexes over the tombstone limit;
 4. advances `indexedGeneration` and signals waiting queries.
 
@@ -222,7 +233,10 @@ MATCH NODE d:Drug WHERE d SIMILAR TO 'blood glucose' TOP 3 SNAPSHOT AND d.class 
 
 `SIMILAR TO … TOP k [SNAPSHOT | FRESH]` uses the database encoder's model; as an access path it yields the top `k`
 atoms; as a residual filter it tests membership in the global top `k` ([planner](planner.md#semantic-candidates)).
-`Reader.similar(model, vector, k, consistency)` searches with a caller-supplied vector under any model.
+`Reader.similar(model, vector, k, consistency)` searches with a caller-supplied vector under any existing model and
+returns nothing for an unknown one. The verification step and the exhaustive scan skip embeddings whose length
+differs from the query's, and `Embedding.cosineDistance` fails with `INVALID_SCHEMA` instead of reading past the end
+of the shorter vector.
 
 ### Observability
 

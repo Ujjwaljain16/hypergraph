@@ -241,6 +241,10 @@ export class ConsolePage {
   }
 
   remember(script) {
+    if (/\b(PASSWORD|AUTHENTICATE)\b/i.test(script)) {
+      this.cursor = this.history.length;
+      return;
+    }
     if (this.history.at(-1) !== script) {
       this.history.push(script);
       this.history = this.history.slice(-HISTORY_LIMIT);

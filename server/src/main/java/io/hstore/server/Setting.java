@@ -13,6 +13,8 @@ enum Setting {
     MAX_CONNECTIONS("max_connections", "200", "concurrent client connections before new ones are refused"),
     AUTHENTICATION("authentication", "auto", "auto requires credentials once a user exists; on always; off never"),
     IDLE_TIMEOUT_SECONDS("idle_timeout_seconds", "0", "close connections idle for this long; 0 disables"),
+    AUTHENTICATION_TIMEOUT_SECONDS("authentication_timeout_seconds", "30", "close connections that have not authenticated after this long; 0 disables"),
+    MAX_MESSAGE_MB("max_message_mb", "64", "largest request a client may send; clients that have not authenticated are limited to 64 KiB"),
     TLS("tls", "off", "encrypt the wire protocol and Studio with TLS"),
     TLS_CERTIFICATE_FILE("tls_certificate_file", "", "PEM certificate chain the server presents when tls is on"),
     TLS_KEY_FILE("tls_key_file", "", "unencrypted PKCS#8 PEM private key for tls_certificate_file"),

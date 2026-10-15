@@ -166,7 +166,7 @@ export class ExplorePage {
     const historical = this.generation !== null;
     this.timeline.classList.toggle('historical', historical);
     this.sliderLabel.textContent = !entry ? 'No retained history'
-      : historical ? `Generation ${entry.id} · ${ago(entry.wallTime)}` : `Live · generation ${entry.id}`;
+      : historical ? `Generation ${entry.id}${entry.wallTime ? ` · ${ago(entry.wallTime)}` : ''}` : `Live · generation ${entry.id}`;
   }
 
   refresh() {

@@ -33,7 +33,8 @@ public final class Security {
     public record User(String name, String salt, String hash, int iterations, int tenant, Role role) {
     }
 
-    private static final int ITERATIONS = 120_000;
+    private static final int ITERATIONS = 600_000;
+    private static final byte[] UNKNOWN_USER_SALT = new byte[16];
     private static final HexFormat HEX = HexFormat.of();
     private static final SecureRandom RANDOM = new SecureRandom();
 
@@ -165,7 +166,11 @@ public final class Security {
     }
 
     public static Optional<Principal> authenticate(View view, String name, String password) {
-        return user(view, name).filter(user -> MessageDigest.isEqual(
+        Optional<User> stored = user(view, name);
+        if (stored.isEmpty()) {
+            derive(password, UNKNOWN_USER_SALT, ITERATIONS);
+        }
+        return stored.filter(user -> MessageDigest.isEqual(
                         derive(password, HEX.parseHex(user.salt()), user.iterations()), HEX.parseHex(user.hash())))
                 .map(user -> new Principal(user.name(), user.tenant(), user.role()));
     }
